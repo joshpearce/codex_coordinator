@@ -1,0 +1,4 @@
+# POC coordinator: it must reach localhost, start the service, and invoke judges.
+# This does NOT technically prevent direct access to sibling child projects.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"

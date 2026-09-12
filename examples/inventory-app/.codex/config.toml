@@ -1,0 +1,4 @@
+# Child writes must be proposed to the external approval coordinator.
+approval_policy = "on-request"
+approvals_reviewer = "user"
+sandbox_mode = "read-only"

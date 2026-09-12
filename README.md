@@ -53,6 +53,41 @@ Install the CLI with:
 make install
 ```
 
+## Long-running control service
+
+The proof-of-concept service owns one multiplexed app-server connection, accepts
+commands over a loopback HTTP port, and writes every event to stdout as JSONL:
+
+```sh
+uv run codex-coordinator-service --port 8765
+```
+
+Its intentionally small, unauthenticated API is:
+
+- `POST /sessions` with `{"project": "/abs/path", "prompt": "..."}`
+- `POST /sessions/{id}/messages` with `{"prompt": "..."}`
+- `GET /sessions`
+- `GET /events?after=N`
+- `POST /approvals/{id}` with `{"verdict": "approve_once|approve_session|deny", "reason": "..."}`
+- `POST /shutdown`
+
+Approval requests have no timeout. They remain pending while the service emits an
+`approval.requested` event and continue only after an outside actor posts a verdict.
+This is deliberately a local experiment, not a hardened network service.
+
+Run the real recursive orchestration experiment with:
+
+```sh
+uv run codex-coordinator-live-e2e --workspace /tmp/codex-orchestration-run
+```
+
+That command copies the checked-in coordinator and child skeletons into three sibling
+project folders. It writes the resolved goal to `workspace/coordinator/goal.md` and
+starts a privileged, low-reasoning `gpt-5.6-luna` coordinating `codex exec` there. The coordinator starts
+the service itself, creates two read-only child sessions, scans the service's stdout,
+and launches a separate read-only `codex exec` judge for each approval. See
+[the live E2E guide](docs/networked-orchestration-e2e.md) before running it.
+
 ## Run a judged worker
 
 ```sh
