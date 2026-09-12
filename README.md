@@ -83,7 +83,8 @@ uv run codex-coordinator-live-e2e --workspace /tmp/codex-orchestration-run
 
 That command copies the checked-in coordinator and child skeletons into three sibling
 project folders. It writes the resolved goal to `workspace/coordinator/goal.md` and
-starts a privileged, low-reasoning `gpt-5.6-luna` coordinating `codex exec` there. The coordinator starts
+starts a privileged `gpt-5.6-sol` coordinating `codex exec` with medium reasoning
+there. Workers and approval judges stay on `gpt-5.6-luna` with low reasoning. The coordinator starts
 the service itself, creates two read-only child sessions, scans the service's stdout,
 and launches a separate read-only `codex exec` judge for each approval. See
 [the live E2E guide](docs/networked-orchestration-e2e.md) before running it.

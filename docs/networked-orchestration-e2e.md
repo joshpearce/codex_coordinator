@@ -42,9 +42,10 @@ write both disposable projects without a human approval channel. The children an
 judges retain their narrower configurations. This separation demonstrates the
 mechanism; it is not a production security boundary.
 
-The harness defaults every Codex role—coordinator, workers, and per-approval judges—to
-`gpt-5.6-luna` with low reasoning to keep this feedback-loop experiment quick. Override
-the model with `--model` when higher implementation quality matters more than latency.
+The harness defaults the coordinating session to `gpt-5.6-sol` with medium reasoning.
+Child workers and per-approval judges remain on `gpt-5.6-luna` with low reasoning to
+keep the repeated work quick. Each role has separate `--*-model` and
+`--*-reasoning-effort` options.
 
 The service has no approval timeout. If the coordinating session crashes, an approval
 can remain pending until the service is stopped. The explicit workspace preserves the
