@@ -1,4 +1,8 @@
-# Judged worker-session prototype
+# Architecture
+
+The repository contains two entry points built on one app-server transport.
+
+## One-shot judged worker
 
 This prototype separates three responsibilities:
 
@@ -21,21 +25,22 @@ and reconnection lifecycle.
 implicitly. A deployment can instead inject a judge backed by a second
 app-server connection and a dedicated Codex thread.
 
-## Why the judge should not share the worker connection
+## Long-running orchestration service
 
-The current `ProtocolClient` has one reader and awaits a server-request handler
-before reading more messages. Starting a judge turn through that same client
-would deadlock: the judge RPC response cannot be read until the approval
-handler returns. Use either:
+`codex-coordinator-service` owns one multiplexed `ProtocolClient`. Its background
+reader correlates RPC responses while approval handlers remain pending, so HTTP
+requests can start and inspect other sessions over the same connection. Server
+requests become `approval.requested` JSONL events and remain pending until an
+outside actor posts a verdict.
 
-- a one-shot `codex exec` judge with read-only sandboxing and approvals disabled;
-- a persistent judge thread on a second app-server connection; or
-- a future multiplexed transport with a background reader and independent
-  request futures.
+The service binds to loopback by default and has no authentication, durable state,
+or approval timeout. It is an orchestration mechanism, not a production security
+boundary. The live E2E places policy in the coordinating session and its independent
+one-shot judges.
 
-The first option is the smallest safe experiment. A third coordinating LLM is
-not required for transport. Add one only if it has a distinct planning role;
-it must not bypass the deterministic policy ceiling.
+Judges should still use separate `codex exec` processes (or a second app-server
+connection), so their work cannot introduce nested approval dependencies on the
+worker connection.
 
 ## Safety boundary
 
@@ -57,8 +62,7 @@ the LLM cannot be the final permission boundary.
 
 ## Validation status
 
-`tests/test_judged_sessions.py` contains isolated tests using fake clients and
-judges. They cover local-config preservation, managed-thread isolation,
-permission ceilings, session-scope downgrading, response translation, and
-fail-closed parsing. No live Codex process, socket, external service, or copied
-third-party package is required by these tests.
+The tests under `tests/` use fake clients and local loopback HTTP. They cover policy
+validation, response translation, fail-closed parsing, concurrent RPC multiplexing,
+event emission, verdict submission, and child-session creation. They do not start a
+live Codex process or consume model usage.

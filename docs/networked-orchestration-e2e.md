@@ -33,12 +33,14 @@ Run it only when real Codex usage and a broad sandbox for the top-level coordina
 are acceptable:
 
 ```sh
-uv run codex-coordinator-live-e2e --workspace /tmp/codex-orchestration-run
+uv run python -m codex_coordinator.live_e2e \
+  --workspace /tmp/codex-orchestration-run
 ```
 
 The top-level coordinator uses `--dangerously-bypass-approvals-and-sandbox` because
 it must start a local server, reach the daemon socket, invoke nested Codex judges, and
-write both disposable projects without a human approval channel. The children and
+inspect both disposable projects without a human approval channel. It is instructed
+to make all child application edits through HTTP-managed sessions. The children and
 judges retain their narrower configurations. This separation demonstrates the
 mechanism; it is not a production security boundary.
 
@@ -47,9 +49,10 @@ Child workers and per-approval judges remain on `gpt-5.6-luna` with low reasonin
 keep the repeated work quick. Each role has separate `--*-model` and
 `--*-reasoning-effort` options.
 
-The service has no approval timeout. If the coordinating session crashes, an approval
-can remain pending until the service is stopped. The explicit workspace preserves the
-goal prompt, stdout events, final response, child projects, and summary for debugging.
+The service has no approval timeout. The harness terminates the coordinator's process
+group if interrupted, preventing the nested service from being left behind. Every
+generated workspace is preserved, including the goal prompt, stdout events, final
+response, child projects, and summary, if produced.
 
 The coordinating session starts the service as a foreground command held by its shell
 execution session. It intentionally does not daemonize with `nohup`: managed execution
@@ -58,3 +61,6 @@ hosts may reap detached descendants as soon as the launching tool call returns.
 The ordinary `pytest` suite does not consume Codex usage. It deterministically covers
 the same critical plumbing: concurrent RPC multiplexing, stdout approval emission,
 HTTP verdict submission, and child-session creation.
+
+The live scenario is intentionally opt-in and is not part of the automated test
+suite; completion depends on model behavior and consumes Codex usage.

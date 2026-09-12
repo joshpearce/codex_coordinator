@@ -87,6 +87,10 @@ class ApprovalBroker:
             self.pending.pop(approval_id, None)
 
     def resolve(self, approval_id: str, verdict: str, reason: str = "") -> dict[str, Any]:
+        if verdict not in {"approve_once", "approve_session", "deny"}:
+            raise ValueError(
+                "verdict must be approve_once, approve_session, or deny"
+            )
         entry = self.pending.get(approval_id)
         if entry is None:
             raise KeyError("unknown or already resolved approval")
@@ -181,6 +185,8 @@ class CoordinatorService:
 
     async def send_message(self, session_id: str, prompt: str) -> dict[str, Any]:
         session = self.sessions[session_id]
+        if session.state == "active":
+            raise ValueError("session already has an active turn")
         result = await self.client.call("turn/start", {
             "threadId": session.thread_id,
             "cwd": session.project,

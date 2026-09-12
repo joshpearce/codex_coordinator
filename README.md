@@ -1,14 +1,12 @@
 # Codex Coordinator
 
-Codex Coordinator is an experimental Python client that starts a Codex worker
-thread through `codex app-server`, watches its approval requests over the
-daemon's Unix WebSocket, and delegates each decision to an independent Codex
-judge.
+Codex Coordinator is an experimental Python client for starting Codex worker
+threads through `codex app-server`, observing approval requests over the daemon's
+Unix WebSocket, and delegating decisions to independent Codex judges.
 
-The transport and policy code—not the judge model—remain the final permission
-boundary. Unknown threads, unsupported request types, out-of-project working
-directories, excessive permission categories, malformed judge output, and
-judge failures are denied deterministically.
+The one-shot judged-worker command has a deterministic policy ceiling around the
+judge. The long-running HTTP service is a deliberately looser orchestration POC:
+its external coordinator is responsible for applying the checked-in constitution.
 
 ## Status
 
@@ -16,8 +14,7 @@ This is a working prototype tested against Codex CLI 0.154.0. It is not a
 general-purpose unattended authorization service. The app-server transport and
 schema are experimental and should be version-tested when Codex is upgraded.
 
-See [architecture](docs/architecture.md) for the responsibility split and
-[live test results](docs/live-e2e.md) for the recorded approval and denial runs.
+See [architecture](docs/architecture.md) for the responsibility split.
 
 ## Requirements
 
@@ -56,7 +53,7 @@ make install
 ## Long-running control service
 
 The proof-of-concept service owns one multiplexed app-server connection, accepts
-commands over a loopback HTTP port, and writes every event to stdout as JSONL:
+commands over a loopback HTTP port, and writes app-server events to stdout as JSONL:
 
 ```sh
 uv run codex-coordinator-service --port 8765
@@ -65,7 +62,7 @@ uv run codex-coordinator-service --port 8765
 Its intentionally small, unauthenticated API is:
 
 - `POST /sessions` with `{"project": "/abs/path", "prompt": "..."}`
-- `POST /sessions/{id}/messages` with `{"prompt": "..."}`
+- `POST /sessions/{id}/messages` with `{"prompt": "..."}` after its active turn ends
 - `GET /sessions`
 - `GET /events?after=N`
 - `POST /approvals/{id}` with `{"verdict": "approve_once|approve_session|deny", "reason": "..."}`
@@ -78,15 +75,18 @@ This is deliberately a local experiment, not a hardened network service.
 Run the real recursive orchestration experiment with:
 
 ```sh
-uv run codex-coordinator-live-e2e --workspace /tmp/codex-orchestration-run
+uv run python -m codex_coordinator.live_e2e \
+  --workspace /tmp/codex-orchestration-run
 ```
 
-That command copies the checked-in coordinator and child skeletons into three sibling
+The live runner is repository-local because it copies the checked-in examples. It
+copies the coordinator and child skeletons into three sibling
 project folders. It writes the resolved goal to `workspace/coordinator/goal.md` and
 starts a privileged `gpt-5.6-sol` coordinating `codex exec` with medium reasoning
-there. Workers and approval judges stay on `gpt-5.6-luna` with low reasoning. The coordinator starts
-the service itself, creates two read-only child sessions, scans the service's stdout,
-and launches a separate read-only `codex exec` judge for each approval. See
+there. Workers and approval judges stay on `gpt-5.6-luna` with low reasoning. The
+coordinator starts the service itself, creates two read-only child sessions, scans the
+service's stdout, and launches a separate read-only `codex exec` judge for each
+approval. The generated workspace is retained for inspection. See
 [the live E2E guide](docs/networked-orchestration-e2e.md) before running it.
 
 ## Run a judged worker
@@ -107,7 +107,7 @@ The judge runs as a separate ephemeral `codex exec` process with a read-only
 sandbox and approvals disabled. A future implementation can instead provide a
 dedicated judge thread over a second app-server connection.
 
-## Safety model
+## One-shot command safety model
 
 - Only thread IDs registered by this coordinator can receive decisions.
 - The worker's request `cwd` and any file-change `grantRoot` must remain inside

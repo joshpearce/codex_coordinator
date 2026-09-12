@@ -59,11 +59,14 @@ async def run(args: argparse.Namespace) -> dict:
         open_timeout=10, close_timeout=3, max_size=32 * 1024 * 1024,
     ) as ws:
         client = ProtocolClient(ws, approvals)
-        await client.initialize()
-        supervisor = JudgedSessionSupervisor(client, approvals, project)
-        thread_id = await supervisor.start(args.prompt)
-        state = await supervisor.monitor(thread_id, max_seconds=args.timeout)
-        return {"threadId": thread_id, "state": state, "decisions": events}
+        try:
+            await client.initialize()
+            supervisor = JudgedSessionSupervisor(client, approvals, project)
+            thread_id = await supervisor.start(args.prompt)
+            state = await supervisor.monitor(thread_id, max_seconds=args.timeout)
+            return {"threadId": thread_id, "state": state, "decisions": events}
+        finally:
+            await client.close()
 
 
 def main() -> None:

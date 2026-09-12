@@ -10,6 +10,7 @@ from codex_coordinator.service import (
     CoordinatorService,
     EventLog,
     HttpControlServer,
+    Session,
 )
 
 
@@ -103,6 +104,35 @@ async def test_stdout_approval_event_is_resolved_through_http(capsys):
 
 
 @pytest.mark.asyncio
+async def test_invalid_http_verdict_does_not_resolve_approval():
+    events = EventLog()
+    broker = ApprovalBroker(events)
+
+    class UnusedClient:
+        pass
+
+    service = CoordinatorService(UnusedClient(), broker, events)
+    server = await asyncio.start_server(HttpControlServer(service).handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        waiting = asyncio.create_task(broker({
+            "id": 7,
+            "method": "item/fileChange/requestApproval",
+            "params": {"threadId": "worker-1"},
+        }))
+        await asyncio.sleep(0)
+        approval_id = next(iter(broker.pending))
+        status, response = await http_json(port, "POST", f"/approvals/{approval_id}", {
+            "verdict": "unexpected",
+        })
+        assert status == 400
+        assert "verdict must be" in response["error"]
+        assert not waiting.done()
+        broker.resolve(approval_id, "deny", "test cleanup")
+        assert await waiting == {"decision": "decline"}
+
+
+@pytest.mark.asyncio
 async def test_file_approval_event_includes_correlated_file_changes(capsys):
     events = EventLog()
     broker = ApprovalBroker(events)
@@ -158,3 +188,18 @@ async def test_http_starts_child_session_and_emits_event(tmp_path: Path, capsys)
     assert session["turnId"] == "turn-1"
     assert event_page["events"][0]["type"] == "session.started"
     assert json.loads(capsys.readouterr().out)["type"] == "session.started"
+
+
+@pytest.mark.asyncio
+async def test_active_session_rejects_another_turn():
+    class UnusedClient:
+        pass
+
+    events = EventLog()
+    service = CoordinatorService(UnusedClient(), ApprovalBroker(events), events)
+    service.sessions["session-1"] = Session(
+        "session-1", "thread-1", "/project", state="active"
+    )
+
+    with pytest.raises(ValueError, match="active turn"):
+        await service.send_message("session-1", "More work")

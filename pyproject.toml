@@ -16,7 +16,6 @@ test = ["build>=1", "pytest>=8", "pytest-asyncio>=0.24"]
 [project.scripts]
 codex-coordinator = "codex_coordinator.cli:main"
 codex-coordinator-service = "codex_coordinator.service:main"
-codex-coordinator-live-e2e = "codex_coordinator.live_e2e:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -28,7 +28,7 @@ install:
 	$(UV) tool install --force .
 
 live-e2e:
-	$(UV) run codex-coordinator-live-e2e --workspace /tmp/codex-orchestration-run
+	$(UV) run python -m codex_coordinator.live_e2e
 
 clean:
 	rm -rf build dist .pytest_cache src/*.egg-info src/*/__pycache__ tests/__pycache__
