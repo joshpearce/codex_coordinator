@@ -394,6 +394,7 @@ async def run(args: argparse.Namespace) -> int:
         "--json",
         "--color",
         "never",
+        "--skip-git-repo-check",
         "--cd",
         str(coordinator),
         "--output-last-message",
@@ -432,7 +433,15 @@ async def run(args: argparse.Namespace) -> int:
             os.killpg(process.pid, signal.SIGTERM)
             await process.wait()
         relay_stop.set()
-        await asyncio.gather(service_relay, coordinator_relay)
+        await service_relay
+        try:
+            await asyncio.wait_for(coordinator_relay, timeout=1)
+        except TimeoutError:
+            # A subprocess launched by the coordinator can inherit its stdout
+            # pipe even after `codex exec` exits. Do not let that leaked writer
+            # keep the completed E2E harness alive forever.
+            coordinator_relay.cancel()
+            await asyncio.gather(coordinator_relay, return_exceptions=True)
     result_path = coordinator / "result.json"
     try:
         summary = json.loads(result_path.read_text()) if result_path.exists() else None

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import re
 import shutil
@@ -12,6 +13,7 @@ from codex_coordinator.live_e2e import (
     _approval_errors,
     _relay_service_events,
     _resolve_template,
+    run,
 )
 
 
@@ -135,6 +137,11 @@ def test_coordinator_template_has_safe_baseline():
     assert 'extends = ":workspace"' in config
     assert '"{{APP_SERVER_SOCKET}}" = "allow"' in config
     assert 'sandbox_mode = "danger-full-access"' not in config
+
+
+def test_live_e2e_allows_its_generated_non_git_workspace():
+    source = inspect.getsource(run)
+    assert '"--skip-git-repo-check"' in source
 
 
 def test_coordinator_config_resolves_only_the_socket_path(tmp_path: Path):
