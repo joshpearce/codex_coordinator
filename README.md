@@ -1,17 +1,31 @@
 # Codex Coordinator
 
-Codex Coordinator is an experimental Python client for starting Codex worker
-threads through `codex app-server`, observing approval requests over the daemon's
-Unix WebSocket, and delegating decisions to independent Codex judges.
+Codex Coordinator is a research prototype for supervising multiple Codex workers.
+It starts workers in separate projects, routes their approval requests to independent
+judges, and applies deterministic policy limits before any approval is returned to
+Codex. It includes a one-shot command, a long-running local control service, and a
+live end-to-end orchestration example.
 
-Both the one-shot judged-worker command and long-running service use the same
-deterministic governance boundary. External judges provide advice inside that
-boundary; they do not grant capabilities themselves.
+The central idea is that a model may recommend a decision, but must not define its
+own authority. Both execution modes therefore share one governance boundary that
+validates requests, seals the evidence seen by judges, limits paths and permissions,
+and fails closed when a verdict exceeds the request or trusted policy.
 
-## Status
+## Security status
 
-This is a working prototype tested against Codex CLI 0.154.0. It is not a
-general-purpose unattended authorization service. The app-server transport and
+The known high-priority governance bypasses in the issue tracker are addressed and
+covered by tests. Worker execution is constrained by an explicit app-server sandbox,
+and judge verdicts cannot widen normalized requests or trusted permission ceilings.
+
+This is still suitable only for controlled, single-user local experiments. The HTTP
+control API is unauthenticated, callers can select arbitrary project paths, judges
+have broader read access than they need, the coordinator has unrestricted outbound
+network access, and logs may retain sensitive content. Resource limits, approval
+expiry, and listener/socket hardening are also unfinished. Do not expose the service
+beyond loopback or use it as a production or multi-user authorization system. See
+the [security issue tracker](docs/issues/issues.md) for the current details.
+
+The prototype is tested against Codex CLI 0.154.0. The app-server transport and
 schema are experimental and should be version-tested when Codex is upgraded.
 
 See [architecture](docs/architecture.md) for the responsibility split.
