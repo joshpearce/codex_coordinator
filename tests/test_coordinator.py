@@ -12,6 +12,7 @@ from codex_coordinator.coordinator import (
     OneShotCodexJudge,
     SessionRegistration,
     WorkerPermissions,
+    mutable_evidence,
 )
 
 
@@ -66,6 +67,16 @@ class StaticJudge:
         if self.error:
             raise self.error
         return JudgeDecision(self.verdict, "test", self.permissions)
+
+
+class MutatingJudge:
+    def __init__(self, mutate, decision):
+        self.mutate = mutate
+        self.decision = decision
+
+    async def decide(self, case):
+        self.mutate(case)
+        return self.decision
 
 
 class FakeClient:
@@ -129,7 +140,7 @@ async def test_unmanaged_or_missing_thread_is_denied_without_judge(tmp_path: Pat
 async def test_session_approval_disabled_by_default_and_enabled_only_when_offered(tmp_path: Path):
     disabled = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), StaticJudge("approve_session"))
     disabled.register_worker("worker-1")
-    assert await disabled(command_request()) == {"decision": "accept"}
+    assert await disabled(command_request()) == {"decision": "decline"}
 
     enabled = JudgedApprovalHandler(
         tmp_path, ApprovalPolicy(tmp_path, allow_session_approval=True), StaticJudge("approve_session")
@@ -137,7 +148,66 @@ async def test_session_approval_disabled_by_default_and_enabled_only_when_offere
     enabled.register_worker("worker-1")
     assert await enabled(command_request()) == {"decision": "acceptForSession"}
     no_offer = command_request(availableDecisions=["accept", "decline"])
-    assert await enabled(no_offer) == {"decision": "accept"}
+    assert await enabled(no_offer) == {"decision": "decline"}
+
+
+@pytest.mark.asyncio
+async def test_approve_once_is_denied_when_command_offers_only_denial(tmp_path: Path):
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), StaticJudge())
+    handler.register_worker("worker-1")
+
+    assert await handler(command_request(availableDecisions=["decline", "cancel"])) == {
+        "decision": "decline"
+    }
+
+
+@pytest.mark.asyncio
+async def test_nested_command_evidence_is_immutable_and_mutation_fails_closed(tmp_path: Path):
+    def append_session_approval(case):
+        case.request["availableDecisions"].append("acceptForSession")
+
+    judge = MutatingJudge(
+        append_session_approval,
+        JudgeDecision("approve_session", "mutated evidence"),
+    )
+    handler = JudgedApprovalHandler(
+        tmp_path,
+        ApprovalPolicy(tmp_path, allow_session_approval=True),
+        judge,
+    )
+    handler.register_worker("worker-1")
+
+    assert await handler(command_request(availableDecisions=["accept", "decline"])) == {
+        "decision": "decline"
+    }
+
+
+@pytest.mark.asyncio
+async def test_nested_permission_evidence_is_immutable_and_mutation_fails_closed(tmp_path: Path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+
+    def append_second_path(case):
+        case.request["permissions"]["fileSystem"]["read"].append(str(second))
+
+    policy = ApprovalPolicy(
+        tmp_path,
+        allowed_permissions={"fileSystem": {"read": [str(first), str(second)]}},
+    )
+    judge = MutatingJudge(
+        append_second_path,
+        JudgeDecision(
+            "approve_once",
+            "mutated evidence",
+            {"fileSystem": {"read": [str(first), str(second)]}},
+        ),
+    )
+    handler = JudgedApprovalHandler(tmp_path, policy, judge)
+    handler.register_worker("worker-1")
+
+    assert await handler(permission_request({"fileSystem": {"read": [str(first)]}})) == {
+        "permissions": {}, "scope": "turn", "strictAutoReview": True
+    }
 
 
 @pytest.mark.asyncio
@@ -168,7 +238,7 @@ async def test_current_structured_command_decisions_are_validated_but_never_sele
     )
 
     assert await handler(request) == {"decision": "accept"}
-    assert judge.cases[0].request["availableDecisions"] == request["params"]["availableDecisions"]
+    assert mutable_evidence(judge.cases[0].request["availableDecisions"]) == request["params"]["availableDecisions"]
 
 
 @pytest.mark.asyncio
@@ -276,7 +346,7 @@ async def test_worker_prompt_injection_is_only_untrusted_evidence(tmp_path: Path
     case = judge.cases[0]
     assert case.session_id == "trusted-session"
     assert case.request["command"] == injected
-    assert case.enforced_capabilities["filesystemWriteRoots"] == [str(tmp_path.resolve())]
+    assert list(case.enforced_capabilities["filesystemWriteRoots"]) == [str(tmp_path.resolve())]
 
 
 @pytest.mark.asyncio
@@ -307,6 +377,19 @@ async def test_permission_values_and_judge_expansion_are_denied_but_narrowing_wo
     expanding.register_worker("worker-1")
     request = permission_request({"fileSystem": {"read": ["first", "second"]}})
     assert await expanding(request) == {"permissions": {}, "scope": "turn", "strictAutoReview": True}
+
+    within_ceiling_but_expanding = JudgedApprovalHandler(
+        tmp_path,
+        policy,
+        StaticJudge(
+            permissions={"fileSystem": {"read": [str(first), str(second)]}},
+        ),
+    )
+    within_ceiling_but_expanding.register_worker("worker-1")
+    one_path_request = permission_request({"fileSystem": {"read": ["first"]}})
+    assert await within_ceiling_but_expanding(one_path_request) == {
+        "permissions": {}, "scope": "turn", "strictAutoReview": True
+    }
 
     narrowing = JudgedApprovalHandler(
         tmp_path, policy,

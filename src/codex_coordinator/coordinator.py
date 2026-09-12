@@ -16,6 +16,15 @@ from .protocol import ProtocolClient
 Verdict = Literal["approve_once", "approve_session", "deny"]
 
 
+def mutable_evidence(value: Any) -> Any:
+    """Return a detached, JSON-compatible copy of recursively frozen evidence."""
+    if isinstance(value, Mapping):
+        return {key: mutable_evidence(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [mutable_evidence(item) for item in value]
+    return copy.deepcopy(value)
+
+
 @dataclass(frozen=True)
 class JudgeDecision:
     verdict: Verdict
@@ -129,15 +138,15 @@ class ApprovalPolicy:
 
     @classmethod
     def _freeze(cls, value: Any) -> Any:
-        if isinstance(value, dict):
+        if isinstance(value, Mapping):
             return MappingProxyType({key: cls._freeze(item) for key, item in value.items()})
-        if isinstance(value, list):
+        if isinstance(value, (list, tuple)):
             return tuple(cls._freeze(item) for item in value)
-        return value
+        return copy.deepcopy(value)
 
     @property
     def enforced_capabilities(self) -> Mapping[str, Any]:
-        return MappingProxyType({
+        return self._freeze({
             "filesystemWriteRoots": (
                 [str(self.project)] if self.sandbox_mode == "workspace-write" else []
             ),
@@ -185,9 +194,9 @@ class ApprovalPolicy:
             method=method,
             thread_id=thread_id,
             project=str(self.project),
-            request=MappingProxyType(normalized),
+            request=self._freeze(normalized),
             session_id=session_id,
-            declared_intent=MappingProxyType(declared),
+            declared_intent=self._freeze(declared),
             enforced_capabilities=self.enforced_capabilities,
         )
 
@@ -382,18 +391,19 @@ class ApprovalPolicy:
         if decision.verdict == "deny":
             return decision
         verdict = decision.verdict
-        if verdict == "approve_session":
-            supported = self.allow_session_approval and (
-                case.method == self.PERMISSIONS
-                or "acceptForSession" in (case.request.get("availableDecisions") or [])
-            )
-            if not supported:
-                verdict = "approve_once"
+        if case.method == self.COMMAND:
+            offered = case.request.get("availableDecisions")
+            if offered is not None:
+                required = "acceptForSession" if verdict == "approve_session" else "accept"
+                if required not in offered:
+                    return JudgeDecision("deny", "judge requested an unavailable decision")
+        if verdict == "approve_session" and not self.allow_session_approval:
+            return JudgeDecision("deny", "session approval is disabled by trusted policy")
         permissions = decision.permissions
         if case.method == self.PERMISSIONS:
             requested = case.request["permissions"]
             if permissions is None:
-                permissions = requested
+                permissions = mutable_evidence(requested)
             try:
                 permissions = self.normalize_permissions(permissions)
             except ValueError:
@@ -402,8 +412,7 @@ class ApprovalPolicy:
                 return JudgeDecision("deny", "judge attempted to expand permissions")
         elif permissions not in (None, {}):
             return JudgeDecision("deny", "judge attempted to add permissions")
-        reason = decision.reason if verdict == decision.verdict else "session approval reduced by trusted policy"
-        return JudgeDecision(verdict, reason, permissions)
+        return JudgeDecision(verdict, decision.reason, permissions)
 
 
 @dataclass(frozen=True)
@@ -447,9 +456,9 @@ class OneShotCodexJudge:
             },
             "untrusted_evidence": {
                 "method": case.method, "thread_id": case.thread_id,
-                "project": case.project, "request": dict(case.request),
+                "project": case.project, "request": mutable_evidence(case.request),
             },
-            "deterministic_ceiling": dict(case.enforced_capabilities),
+            "deterministic_ceiling": mutable_evidence(case.enforced_capabilities),
         }, sort_keys=True)
         try:
             value = json.loads(await self._run(prompt))

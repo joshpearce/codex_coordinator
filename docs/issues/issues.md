@@ -11,24 +11,27 @@ intentionally deferred for this local proof of concept.
 2. [The live approval broker does not enforce the constitution](live-broker-policy-enforcement.md)
 3. [The shared app-server connection accepts unmanaged thread requests](unmanaged-thread-requests.md)
 4. [Approval judges cannot see transitive command side effects](approval-side-effect-visibility.md)
+5. [Command approvals ignore the request's offered decisions](unoffered-command-approval.md)
+6. [Mutable command evidence can enable session-wide approval](session-approval-evidence-mutation.md)
+7. [Mutable permission evidence can widen request scope](permission-request-evidence-mutation.md)
 
 ## Medium priority — scope and isolation
 
-5. [Session creation accepts arbitrary project paths](arbitrary-project-paths.md)
-6. [One-shot judges may read overly broad local data](judge-read-scope.md)
-7. [The coordinator has unrestricted network access](coordinator-network-scope.md)
+8. [Session creation accepts arbitrary project paths](arbitrary-project-paths.md)
+9. [One-shot judges may read overly broad local data](judge-read-scope.md)
+10. [The coordinator has unrestricted network access](coordinator-network-scope.md)
 
 ## Low priority — resilience and data handling
 
-8. [Logs retain sensitive orchestration content](sensitive-event-logs.md)
-9. [In-memory event and item state is unbounded](unbounded-runtime-state.md)
-10. [The HTTP parser has no resource limits](http-resource-limits.md)
-11. [Approval requests can remain pending forever](approval-lifecycle.md)
+11. [Logs retain sensitive orchestration content](sensitive-event-logs.md)
+12. [In-memory event and item state is unbounded](unbounded-runtime-state.md)
+13. [The HTTP parser has no resource limits](http-resource-limits.md)
+14. [Approval requests can remain pending forever](approval-lifecycle.md)
 
 ## Deferred — local control-plane hardening
 
-12. [The HTTP control plane has no authentication](control-plane-authentication.md)
-13. [Socket and listener exposure is not hardened](socket-listener-protection.md)
+15. [The HTTP control plane has no authentication](control-plane-authentication.md)
+16. [Socket and listener exposure is not hardened](socket-listener-protection.md)
 
 The deferred classification is deliberate, not a claim that those issues are
 safe in a networked or multi-user deployment. They must be revisited before the

@@ -35,16 +35,26 @@ known fields. Required identity and correlation fields must have exact types. Pa
 are made absolute relative to the registered project, resolved canonically, and
 checked with path-component containment rather than string prefixes.
 
+The complete normalized case is recursively immutable: nested mappings are
+read-only and nested collections are tuples. This sealed case is the authoritative
+input to every later constraint check. Judge prompts, audit records, and live events
+receive detached JSON-compatible copies, so mutation by any downstream consumer
+cannot change the evidence retained for authorization. A mutation exception in the
+one-shot judge path is treated like any other judge failure and denies the request.
+
 Permission objects have a closed schema. Requested values must fit an immutable,
 trusted allowlist, and a judge-proposed permission response must be a subset of both
 the normalized request and that allowlist. Commands asking for additional sandbox,
 network, or persistent policy authority are denied because a plain command response
 cannot safely narrow those capabilities.
 
-Session-wide approval is off by default. It is available only when trusted service
-startup or embedding code enables it and the individual command request offers
-`acceptForSession`. A judge can always deny or narrow a request, but cannot expand
-its permission or lifetime ceiling.
+For commands, an explicit `availableDecisions` list is also a response ceiling:
+`approve_once` can produce `accept` only when `accept` was offered, and
+`approve_session` can produce `acceptForSession` only when that exact choice was
+offered. Session-wide approval is off by default and additionally requires trusted
+service startup or embedding code to enable it. Unavailable verdicts are denied,
+not converted to a different approving response. A judge can always deny or narrow
+a permission request, but cannot expand its permission or lifetime ceiling.
 
 The one-shot adapter calls a `Judge` directly. The live broker emits a normalized
 `approval.requested` event and accepts a verdict over HTTP. In both cases, invalid

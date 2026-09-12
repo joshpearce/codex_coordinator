@@ -24,6 +24,7 @@ from .coordinator import (
     JudgedApprovalHandler,
     SessionRegistration,
     WorkerPermissions,
+    mutable_evidence,
 )
 from .daemon import ensure_daemon
 from .protocol import ProtocolClient
@@ -121,9 +122,9 @@ class ApprovalBroker:
             threadId=registration.thread_id,
             method=case.method,
             project=registration.project,
-            request=dict(case.request),
-            declaredIntent=dict(case.declared_intent),
-            enforcedCapabilities=dict(case.enforced_capabilities),
+            request=mutable_evidence(case.request),
+            declaredIntent=mutable_evidence(case.declared_intent),
+            enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
         )
         try:
             # Deliberately no timeout: the coordinating agent owns the lifetime.
@@ -165,8 +166,8 @@ class ApprovalBroker:
             verdict=decision.verdict,
             reason=decision.reason,
             response=response,
-            declaredIntent=dict(pending.case.declared_intent),
-            enforcedCapabilities=dict(pending.case.enforced_capabilities),
+            declaredIntent=mutable_evidence(pending.case.declared_intent),
+            enforcedCapabilities=mutable_evidence(pending.case.enforced_capabilities),
         )
         return response
 

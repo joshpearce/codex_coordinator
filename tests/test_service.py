@@ -21,19 +21,21 @@ class QueueSocket:
         return json.dumps(await self.incoming.get())
 
 
-def command_request(thread="worker-1", command="git status"):
+def command_request(thread="worker-1", command="git status", **overrides):
+    params = {
+        "threadId": thread,
+        "turnId": "turn-1",
+        "itemId": "item-1",
+        "startedAtMs": 1,
+        "command": command,
+        "cwd": ".",
+        "availableDecisions": ["accept", "acceptForSession", "decline"],
+    }
+    params.update(overrides)
     return {
         "id": 7,
         "method": ApprovalPolicy.COMMAND,
-        "params": {
-            "threadId": thread,
-            "turnId": "turn-1",
-            "itemId": "item-1",
-            "startedAtMs": 1,
-            "command": command,
-            "cwd": ".",
-            "availableDecisions": ["accept", "acceptForSession", "decline"],
-        },
+        "params": params,
     }
 
 
@@ -166,9 +168,126 @@ async def test_live_session_approval_requires_trusted_enablement_and_request_sup
     await asyncio.sleep(0)
     approval_id = next(iter(disabled.pending))
     assert disabled.resolve(approval_id, "session-1", "approve_session", "judge asked") == {
-        "decision": "accept"
+        "decision": "decline"
     }
-    assert await waiting == {"decision": "accept"}
+    assert await waiting == {"decision": "decline"}
+
+
+@pytest.mark.asyncio
+async def test_live_approve_once_is_denied_when_command_offers_only_denial(tmp_path: Path):
+    broker = ApprovalBroker(EventLog())
+    register(broker, tmp_path)
+    waiting = asyncio.create_task(
+        broker(command_request(availableDecisions=["decline", "cancel"]))
+    )
+    await asyncio.sleep(0)
+
+    approval_id = next(iter(broker.pending))
+    assert broker.resolve(approval_id, "session-1", "approve_once", "looks safe") == {
+        "decision": "decline"
+    }
+    assert await waiting == {"decision": "decline"}
+
+
+@pytest.mark.asyncio
+async def test_live_event_mutation_cannot_enable_session_approval(tmp_path: Path):
+    events = EventLog()
+    broker = ApprovalBroker(events)
+    register(broker, tmp_path, allow_session_approval=True)
+    waiting = asyncio.create_task(
+        broker(command_request(availableDecisions=["accept", "decline"]))
+    )
+    await asyncio.sleep(0)
+    approval_id = next(iter(broker.pending))
+    events.events[-1]["request"]["availableDecisions"].append("acceptForSession")
+
+    response = broker.resolve(
+        approval_id, "session-1", "approve_session", "attempted widening"
+    )
+    assert response == {"decision": "decline"}
+    assert await waiting == response
+
+
+@pytest.mark.asyncio
+async def test_live_event_mutation_cannot_expand_original_permission_request(tmp_path: Path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    events = EventLog()
+    broker = ApprovalBroker(events)
+    register(
+        broker,
+        tmp_path,
+        allowed_permissions={"fileSystem": {"read": [str(first), str(second)]}},
+    )
+    request = {
+        "id": 9,
+        "method": ApprovalPolicy.PERMISSIONS,
+        "params": {
+            "threadId": "worker-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "startedAtMs": 1,
+            "cwd": ".",
+            "permissions": {"fileSystem": {"read": [str(first)]}},
+        },
+    }
+    waiting = asyncio.create_task(broker(request))
+    await asyncio.sleep(0)
+    approval_id = next(iter(broker.pending))
+    events.events[-1]["request"]["permissions"]["fileSystem"]["read"].append(str(second))
+
+    response = broker.resolve(
+        approval_id,
+        "session-1",
+        "approve_once",
+        "attempted widening",
+        {"fileSystem": {"read": [str(first), str(second)]}},
+    )
+    assert response == {"permissions": {}, "scope": "turn", "strictAutoReview": True}
+    assert await waiting == response
+
+
+@pytest.mark.asyncio
+async def test_live_permission_response_can_narrow_original_request(tmp_path: Path):
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    broker = ApprovalBroker(EventLog())
+    register(
+        broker,
+        tmp_path,
+        allowed_permissions={"fileSystem": {"read": [str(first), str(second)]}},
+    )
+    request = {
+        "id": 10,
+        "method": ApprovalPolicy.PERMISSIONS,
+        "params": {
+            "threadId": "worker-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "startedAtMs": 1,
+            "cwd": ".",
+            "permissions": {
+                "fileSystem": {"read": [str(first), str(second)]},
+            },
+        },
+    }
+    waiting = asyncio.create_task(broker(request))
+    await asyncio.sleep(0)
+    approval_id = next(iter(broker.pending))
+
+    response = broker.resolve(
+        approval_id,
+        "session-1",
+        "approve_once",
+        "only the first path is needed",
+        {"fileSystem": {"read": [str(first)]}},
+    )
+    assert response == {
+        "permissions": {"fileSystem": {"read": [str(first.resolve())]}},
+        "scope": "turn",
+        "strictAutoReview": True,
+    }
+    assert await waiting == response
 
 
 @pytest.mark.asyncio

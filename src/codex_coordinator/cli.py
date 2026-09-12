@@ -18,6 +18,7 @@ from .coordinator import (
     OneShotCodexJudge,
     WorkerPermissions,
     codex_exec_json_runner,
+    mutable_evidence,
 )
 from .daemon import ensure_daemon
 from .protocol import ProtocolClient
@@ -44,9 +45,9 @@ async def run(args: argparse.Namespace) -> dict:
             "method": case.method,
             "sessionId": case.session_id,
             "threadId": case.thread_id,
-            "request": dict(case.request),
-            "declaredIntent": dict(case.declared_intent),
-            "enforcedCapabilities": dict(case.enforced_capabilities),
+            "request": mutable_evidence(case.request),
+            "declaredIntent": mutable_evidence(case.declared_intent),
+            "enforcedCapabilities": mutable_evidence(case.enforced_capabilities),
             "verdict": decision.verdict,
             "reason": decision.reason,
             "permissions": dict(decision.permissions) if decision.permissions is not None else None,
