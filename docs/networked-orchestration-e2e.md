@@ -15,16 +15,19 @@ live_e2e harness
 The two child sessions build compatible inventory applications in separate temporary
 projects copied from [`examples/inventory-app`](../examples/inventory-app) and
 [`examples/inventory-report`](../examples/inventory-report). Their checked-in
-`.codex/config.toml` files make the app-server sandbox read-only, so application edits exercise the
-approval path. One child is also instructed to attempt a network operation, which the
-[constitution](../examples/coordinator/constitution.md) requires the independent judge to deny. The
-coordinator must observe at least one `approve_once` and one `deny`, reconcile the two
-applications, run their tests, write `result.json`, and shut down the service.
+`.codex/config.toml` files use `workspace-write`, so each child authors its own project
+while the service remains the middle-man for creating the session and sending turns.
+The inventory child is instructed to make an explicit approval-path request for a
+project-local test command and to attempt a network operation. The
+[constitution](../examples/coordinator/constitution.md) allows the former and denies
+the latter. The coordinator must observe at least one `approve_once` and one `deny`,
+reconcile the applications, run their tests, write `result.json`, and shut down the
+service.
 
 The top-level session runs from the checked-in
 [`examples/coordinator`](../examples/coordinator) template. A live workspace has three
-sibling projects, and all coordinator artifacts—including the resolved `goal.md`, child
-goal prompts, constitution, event stream, decisions, and result—live under
+sibling projects, and all coordinator artifacts—including the path-resolved `goal.md`,
+child goal prompts, constitution, event stream, decisions, and result—live under
 `workspace/coordinator/`. Its `AGENTS.md` explicitly documents that application writes
 must be delegated over HTTP, though the broad POC sandbox means this is not enforced by
 the operating system.
@@ -46,8 +49,8 @@ mechanism; it is not a production security boundary.
 
 The harness defaults the coordinating session to `gpt-5.6-sol` with medium reasoning.
 Child workers and per-approval judges remain on `gpt-5.6-luna` with low reasoning to
-keep the repeated work quick. Each role has separate `--*-model` and
-`--*-reasoning-effort` options.
+keep the repeated work quick. The coordinator model and reasoning effort can be
+overridden with command-line options.
 
 The service has no approval timeout. The harness terminates the coordinator's process
 group if interrupted, preventing the nested service from being left behind. Every
@@ -57,6 +60,9 @@ response, child projects, and summary, if produced.
 The coordinating session starts the service as a foreground command held by its shell
 execution session. It intentionally does not daemonize with `nohup`: managed execution
 hosts may reap detached descendants as soon as the launching tool call returns.
+The harness runs the coordinator with `codex exec --json` and mirrors every appended
+service-log record to its own stdout as a `live_e2e.service_event`, producing one
+continuous machine-readable account of both layers.
 
 The ordinary `pytest` suite does not consume Codex usage. It deterministically covers
 the same critical plumbing: concurrent RPC multiplexing, stdout approval emission,

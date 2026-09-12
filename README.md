@@ -33,7 +33,9 @@ sandbox_mode = "read-only" # or "workspace-write"
 
 The coordinator validates these values and sends them explicitly when starting
 the thread. This prevents the worker from accidentally inheriting broader
-permissions from the app-server daemon's startup context.
+permissions from the app-server daemon's startup context. The example application
+projects use `workspace-write` because their child sessions own and author those
+projects; session creation and prompting still pass through the HTTP service.
 
 ## Development
 
@@ -80,13 +82,16 @@ uv run python -m codex_coordinator.live_e2e \
 ```
 
 The live runner is repository-local because it copies the checked-in examples. It
-copies the coordinator and child skeletons into three sibling
-project folders. It writes the resolved goal to `workspace/coordinator/goal.md` and
+copies the coordinator and child skeletons into three sibling project folders. The
+full goal is checked in at `examples/coordinator/goal.md`; the harness substitutes
+only runtime project paths in the copied file at `workspace/coordinator/goal.md` and
 starts a privileged `gpt-5.6-sol` coordinating `codex exec` with medium reasoning
 there. Workers and approval judges stay on `gpt-5.6-luna` with low reasoning. The
-coordinator starts the service itself, creates two read-only child sessions, scans the
-service's stdout, and launches a separate read-only `codex exec` judge for each
-approval. The generated workspace is retained for inspection. See
+coordinator starts the service itself, creates two workspace-write child sessions,
+scans the service's stdout, and launches a separate read-only `codex exec` judge for
+each approval. The harness prints the coordinator's Codex JSONL events and relays the
+service JSONL events to the same stdout stream, so the run is observable continuously.
+The generated workspace is retained for inspection. See
 [the live E2E guide](docs/networked-orchestration-e2e.md) before running it.
 
 ## Run a judged worker

@@ -4,6 +4,6 @@ This is the starting project for the inventory-domain child session in the live
 orchestration experiment. The child is expected to replace this README and build the
 application, persistence format, CLI, and tests.
 
-The checked-in `.codex/config.toml` intentionally gives the child a read-only sandbox.
-Consequently, its proposed application changes are routed to the coordinator service
-and independently judged under the repository's constitution.
+The checked-in `.codex/config.toml` gives the child a workspace-write sandbox. The
+coordinator service owns the session and sends its prompts, while the child authors
+the application directly inside this project.
