@@ -77,8 +77,7 @@ This is deliberately a local experiment, not a hardened network service.
 Run the real recursive orchestration experiment with:
 
 ```sh
-uv run python -m codex_coordinator.live_e2e \
-  --workspace /tmp/codex-orchestration-run
+make live-e2e
 ```
 
 The live runner is repository-local because it copies the checked-in examples. It
@@ -89,9 +88,12 @@ starts a privileged `gpt-5.6-sol` coordinating `codex exec` with medium reasonin
 there. Workers and approval judges stay on `gpt-5.6-luna` with low reasoning. The
 coordinator starts the service itself, creates two workspace-write child sessions,
 scans the service's stdout, and launches a separate read-only `codex exec` judge for
-each approval. The harness prints the coordinator's Codex JSONL events and relays the
-service JSONL events to the same stdout stream, so the run is observable continuously.
-The generated workspace is retained for inspection. See
+each approval. The terminal shows a compact timeline containing session prompts,
+follow-ups, approvals, completions, and the final result. Full-fidelity logs remain in
+`workspace/coordinator/coordinator.jsonl` and `workspace/coordinator/service.jsonl`.
+Use `make live-e2e LIVE_E2E_ARGS=--verbose` to include commands and file-change
+summaries, or `LIVE_E2E_ARGS=--json` for the complete machine-readable stream. The
+generated workspace is retained for inspection. See
 [the live E2E guide](docs/networked-orchestration-e2e.md) before running it.
 
 ## Run a judged worker

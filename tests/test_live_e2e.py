@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from codex_coordinator.live_e2e import _relay_service_events, _resolve_template
+from codex_coordinator.live_e2e import (
+    OutputRenderer,
+    _relay_service_events,
+    _resolve_template,
+)
 
 
 def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
@@ -58,10 +62,30 @@ async def test_service_events_are_relayed_to_stdout(tmp_path: Path, capsys):
     stop = asyncio.Event()
     stop.set()
 
-    await _relay_service_events(log, stop)
+    await _relay_service_events(log, stop, OutputRenderer(json_output=True))
 
     record = json.loads(capsys.readouterr().out)
     assert record == {
-        "type": "live_e2e.service_event",
+        "source": "service",
         "event": {"type": "service.started", "port": 1234},
     }
+
+
+def test_human_output_shows_prompts_and_suppresses_token_deltas(capsys):
+    renderer = OutputRenderer()
+    renderer.service({
+        "type": "session.started",
+        "session": {"id": "one", "project": "/tmp/inventory-app"},
+        "prompt": "Build the inventory app.\nRun its tests.",
+    })
+    renderer.service({
+        "type": "app_server.notification",
+        "method": "item/agentMessage/delta",
+        "message": {"params": {"delta": "noisy token"}},
+    })
+
+    output = capsys.readouterr().out
+    assert "Started inventory-app" in output
+    assert "Build the inventory app." in output
+    assert "Run its tests." in output
+    assert "noisy token" not in output

@@ -187,7 +187,9 @@ async def test_http_starts_child_session_and_emits_event(tmp_path: Path, capsys)
     assert session["threadId"] == "thread-1"
     assert session["turnId"] == "turn-1"
     assert event_page["events"][0]["type"] == "session.started"
-    assert json.loads(capsys.readouterr().out)["type"] == "session.started"
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["type"] == "session.started"
+    assert emitted["prompt"] == "Build an app"
 
 
 @pytest.mark.asyncio

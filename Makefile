@@ -1,4 +1,5 @@
 UV ?= uv
+LIVE_E2E_ARGS ?=
 
 .PHONY: help sync test check build install live-e2e clean
 
@@ -28,7 +29,7 @@ install:
 	$(UV) tool install --force .
 
 live-e2e:
-	$(UV) run python -m codex_coordinator.live_e2e
+	$(UV) run python -m codex_coordinator.live_e2e $(LIVE_E2E_ARGS)
 
 clean:
 	rm -rf build dist .pytest_cache src/*.egg-info src/*/__pycache__ tests/__pycache__

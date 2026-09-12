@@ -180,7 +180,7 @@ class CoordinatorService:
         })
         turn = (turn_result or {}).get("turn", turn_result or {})
         session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
-        self.events.emit("session.started", session=session.json())
+        self.events.emit("session.started", session=session.json(), prompt=prompt)
         return session.json()
 
     async def send_message(self, session_id: str, prompt: str) -> dict[str, Any]:
@@ -196,7 +196,7 @@ class CoordinatorService:
         turn = (result or {}).get("turn", result or {})
         session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
         session.state = "active"
-        self.events.emit("session.turn_started", session=session.json())
+        self.events.emit("session.turn_started", session=session.json(), prompt=prompt)
         return session.json()
 
     async def notification(self, message: dict[str, Any]) -> None:

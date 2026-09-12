@@ -60,9 +60,20 @@ response, child projects, and summary, if produced.
 The coordinating session starts the service as a foreground command held by its shell
 execution session. It intentionally does not daemonize with `nohup`: managed execution
 hosts may reap detached descendants as soon as the launching tool call returns.
-The harness runs the coordinator with `codex exec --json` and mirrors every appended
-service-log record to its own stdout as a `live_e2e.service_event`, producing one
-continuous machine-readable account of both layers.
+The harness stores the full coordinator stream in `coordinator.jsonl`; the service
+already records its complete stream in `service.jsonl`. By default, the terminal
+filters both into a human-readable timeline. Initial child prompts and all follow-up
+prompts are printed in full, along with approvals, verdicts, child completions, and the
+final result. Token deltas, repeated full diffs, token accounting, and routine protocol
+notifications remain in the log files but are hidden from the terminal.
+
+Use `--verbose` for commands and file-change summaries. Use `--json` to print every
+event with a `coordinator`, `service`, or `harness` source field. With Make, pass these
+as `LIVE_E2E_ARGS`, for example:
+
+```sh
+make live-e2e LIVE_E2E_ARGS=--verbose
+```
 
 The ordinary `pytest` suite does not consume Codex usage. It deterministically covers
 the same critical plumbing: concurrent RPC multiplexing, stdout approval emission,
