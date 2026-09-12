@@ -4,6 +4,13 @@
 
 High — governance integrity.
 
+## Status
+
+Resolved. The live broker uses the same `ApprovalPolicy` normalization and
+constraint logic as the one-shot handler. Its HTTP resolution requires the
+originating session ID, and verdicts can only deny or narrow the validated request
+within trusted policy.
+
 ## Problem
 
 `ApprovalBroker.resolve()` trusts the posted verdict. It permits session-wide

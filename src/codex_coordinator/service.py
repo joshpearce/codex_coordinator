@@ -8,14 +8,23 @@ import json
 import os
 import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import websockets
 
-from .coordinator import WorkerPermissions
+from .coordinator import (
+    ApprovalCase,
+    ApprovalPolicy,
+    JudgeDecision,
+    JudgedApprovalHandler,
+    SessionRegistration,
+    WorkerPermissions,
+)
 from .daemon import ensure_daemon
 from .protocol import ProtocolClient
 
@@ -41,6 +50,7 @@ class Session:
     project: str
     state: str = "active"
     turn_id: str | None = None
+    sandbox_policy: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def json(self) -> dict[str, Any]:
         return {
@@ -52,33 +62,68 @@ class Session:
         }
 
 
+@dataclass(frozen=True)
+class PendingApproval:
+    registration: SessionRegistration
+    case: ApprovalCase
+    future: asyncio.Future[dict[str, Any]]
+
+
 class ApprovalBroker:
-    """Turn app-server requests into stdout events and externally resolved futures."""
+    """Live adapter for the same deterministic boundary used by one-shot flows."""
 
     def __init__(self, events: EventLog) -> None:
         self.events = events
-        self.thread_sessions: dict[str, str] = {}
-        self.thread_projects: dict[str, str] = {}
+        self.registrations: dict[str, SessionRegistration] = {}
         self.items: dict[tuple[str, str], dict[str, Any]] = {}
-        self.pending: dict[str, tuple[dict[str, Any], asyncio.Future[dict[str, Any]]]] = {}
+        self.pending: dict[str, PendingApproval] = {}
+        self.unmanaged_request_count = 0
+
+    def register(self, registration: SessionRegistration) -> None:
+        existing = self.registrations.get(registration.thread_id)
+        if existing is not None and existing != registration:
+            raise ValueError("thread is already bound to a different session")
+        self.registrations[registration.thread_id] = registration
 
     async def __call__(self, message: dict[str, Any]) -> dict[str, Any]:
-        params = message.get("params") or {}
-        thread_id = str(params.get("threadId") or params.get("thread_id") or "")
+        method = message.get("method") if isinstance(message, dict) else ""
+        params = message.get("params") if isinstance(message, dict) else None
+        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        registration = self.registrations.get(thread_id) if isinstance(thread_id, str) else None
+        if registration is None:
+            self.unmanaged_request_count += 1
+            return JudgedApprovalHandler._deny(method)
+        item_id = params.get("itemId")
+        item = self.items.get((thread_id, item_id)) if isinstance(item_id, str) else None
+        try:
+            case = registration.policy.normalize(
+                message,
+                session_id=registration.session_id,
+                thread_id=registration.thread_id,
+                item=item,
+            )
+        except ValueError as exc:
+            self.events.emit(
+                "approval.rejected",
+                sessionId=registration.session_id,
+                threadId=registration.thread_id,
+                method=method,
+                reason=str(exc),
+            )
+            return JudgedApprovalHandler._deny(method)
         approval_id = uuid.uuid4().hex
         future = asyncio.get_running_loop().create_future()
-        self.pending[approval_id] = (message, future)
-        item_id = str(params.get("itemId") or "")
-        item = self.items.get((thread_id, item_id))
+        self.pending[approval_id] = PendingApproval(registration, case, future)
         self.events.emit(
             "approval.requested",
             approvalId=approval_id,
-            sessionId=self.thread_sessions.get(thread_id),
-            threadId=thread_id,
-            method=message.get("method"),
-            project=self.thread_projects.get(thread_id),
-            request=params,
-            item=item,
+            sessionId=registration.session_id,
+            threadId=registration.thread_id,
+            method=case.method,
+            project=registration.project,
+            request=dict(case.request),
+            declaredIntent=dict(case.declared_intent),
+            enforcedCapabilities=dict(case.enforced_capabilities),
         )
         try:
             # Deliberately no timeout: the coordinating agent owns the lifetime.
@@ -86,46 +131,44 @@ class ApprovalBroker:
         finally:
             self.pending.pop(approval_id, None)
 
-    def resolve(self, approval_id: str, verdict: str, reason: str = "") -> dict[str, Any]:
+    def resolve(
+        self,
+        approval_id: str,
+        session_id: str,
+        verdict: str,
+        reason: str = "",
+        permissions: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if verdict not in {"approve_once", "approve_session", "deny"}:
             raise ValueError(
                 "verdict must be approve_once, approve_session, or deny"
             )
-        entry = self.pending.get(approval_id)
-        if entry is None:
+        pending = self.pending.get(approval_id)
+        if pending is None:
             raise KeyError("unknown or already resolved approval")
-        message, future = entry
-        method = message["method"]
-        params = message.get("params") or {}
-        if verdict == "deny":
-            response = self._deny(method)
-        elif method == "item/permissions/requestApproval":
-            response = {
-                "permissions": params.get("permissions", {}),
-                "scope": "session" if verdict == "approve_session" else "turn",
-                "strictAutoReview": True,
-            }
-        elif verdict == "approve_session" and "acceptForSession" in (
-            params.get("availableDecisions") or []
-        ):
-            response = {"decision": "acceptForSession"}
-        else:
-            response = {"decision": "accept"}
-        future.set_result(response)
+        if not isinstance(session_id, str) or session_id != pending.registration.session_id:
+            raise ValueError("approval does not belong to this session")
+        if not isinstance(reason, str):
+            raise ValueError("reason must be a string")
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        decision = pending.registration.policy.constrain(
+            pending.case, JudgeDecision(verdict, reason, permissions)
+        )
+        response = JudgedApprovalHandler._encode(pending.case, decision)
+        pending.future.set_result(response)
         self.events.emit(
             "approval.resolved",
             approvalId=approval_id,
-            verdict=verdict,
-            reason=reason,
+            sessionId=pending.registration.session_id,
+            threadId=pending.registration.thread_id,
+            verdict=decision.verdict,
+            reason=decision.reason,
             response=response,
+            declaredIntent=dict(pending.case.declared_intent),
+            enforcedCapabilities=dict(pending.case.enforced_capabilities),
         )
         return response
-
-    @staticmethod
-    def _deny(method: str) -> dict[str, Any]:
-        if method == "item/permissions/requestApproval":
-            return {"permissions": {}, "scope": "turn", "strictAutoReview": True}
-        return {"decision": "decline"}
 
 
 class CoordinatorService:
@@ -137,6 +180,7 @@ class CoordinatorService:
         *,
         worker_model: str | None = None,
         worker_reasoning_effort: str = "low",
+        allow_session_approval: bool = False,
     ) -> None:
         self.client = client
         self.approvals = approvals
@@ -146,6 +190,7 @@ class CoordinatorService:
         self.stopping = asyncio.Event()
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
+        self.allow_session_approval = allow_session_approval
 
     async def start_session(self, project_value: str, prompt: str) -> dict[str, Any]:
         project = Path(project_value).expanduser().resolve()
@@ -167,16 +212,26 @@ class CoordinatorService:
         if not thread_id:
             raise RuntimeError("thread/start returned no thread ID")
         session_id = uuid.uuid4().hex
-        session = Session(session_id, thread_id, str(project))
+        raw_sandbox_policy = permissions.enforced_sandbox(project)
+        sandbox_policy = MappingProxyType({
+            key: tuple(value) if isinstance(value, list) else value
+            for key, value in raw_sandbox_policy.items()
+        })
+        session = Session(session_id, thread_id, str(project), sandbox_policy=sandbox_policy)
         self.sessions[session_id] = session
         self.thread_sessions[thread_id] = session_id
-        self.approvals.thread_sessions[thread_id] = session_id
-        self.approvals.thread_projects[thread_id] = str(project)
+        policy = ApprovalPolicy(
+            project,
+            sandbox_mode=permissions.sandbox_mode,
+            allow_session_approval=self.allow_session_approval,
+        )
+        self.approvals.register(SessionRegistration(session_id, thread_id, str(project), policy))
         turn_result = await self.client.call("turn/start", {
             "threadId": thread_id,
             "cwd": str(project),
             "input": [{"type": "text", "text": prompt}],
             "turnTrigger": "coordinator-api",
+            "sandboxPolicy": dict(sandbox_policy),
         })
         turn = (turn_result or {}).get("turn", turn_result or {})
         session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
@@ -192,6 +247,7 @@ class CoordinatorService:
             "cwd": session.project,
             "input": [{"type": "text", "text": prompt}],
             "turnTrigger": "coordinator-api",
+            "sandboxPolicy": dict(session.sandbox_policy),
         })
         turn = (result or {}).get("turn", result or {})
         session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
@@ -204,6 +260,8 @@ class CoordinatorService:
         thread_id = str(params.get("threadId") or params.get("thread_id") or "")
         session_id = self.thread_sessions.get(thread_id)
         method = str(message.get("method", "notification"))
+        if session_id is None:
+            return
         if method == "item/started":
             item = params.get("item") or {}
             item_id = str(item.get("id") or "")
@@ -267,8 +325,11 @@ class HttpControlServer:
         if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "messages":
             return 201, await self.service.send_message(parts[1], body["prompt"])
         if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
+            if set(body) - {"sessionId", "verdict", "reason", "permissions"}:
+                raise ValueError("unsupported approval resolution fields")
             response = self.service.approvals.resolve(
-                parts[1], body["verdict"], body.get("reason", "")
+                parts[1], body["sessionId"], body["verdict"], body.get("reason", ""),
+                body.get("permissions"),
             )
             return 200, response
         if method == "POST" and parts == ["shutdown"]:
@@ -283,6 +344,11 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--worker-model", default="gpt-5.6-luna")
     parser.add_argument("--worker-reasoning-effort", default="low")
+    parser.add_argument(
+        "--allow-session-approval",
+        action="store_true",
+        help="allow session-scoped decisions when a request explicitly offers them",
+    )
     parser.add_argument(
         "--socket",
         type=Path,
@@ -312,6 +378,7 @@ async def run(args: argparse.Namespace) -> None:
             events,
             worker_model=args.worker_model,
             worker_reasoning_effort=args.worker_reasoning_effort,
+            allow_session_approval=args.allow_session_approval,
         )
         await client.initialize()
         server = await asyncio.start_server(HttpControlServer(service_ref).handle, args.host, args.port)

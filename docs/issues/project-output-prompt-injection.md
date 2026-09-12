@@ -4,6 +4,13 @@
 
 High — governance integrity.
 
+## Status
+
+Resolved. Approval authority now comes only from immutable registration,
+normalized request fields, a deterministic permission ceiling, and the enforced
+turn sandbox. Adversarial command, file, metadata, message, and summary regressions
+verify that worker prose remains evidence rather than policy.
+
 ## Problem
 
 Project sessions control messages, command descriptions, diffs, and files that the

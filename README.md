@@ -4,9 +4,9 @@ Codex Coordinator is an experimental Python client for starting Codex worker
 threads through `codex app-server`, observing approval requests over the daemon's
 Unix WebSocket, and delegating decisions to independent Codex judges.
 
-The one-shot judged-worker command has a deterministic policy ceiling around the
-judge. The long-running HTTP service is a deliberately looser orchestration POC:
-its external coordinator is responsible for applying the checked-in constitution.
+Both the one-shot judged-worker command and long-running service use the same
+deterministic governance boundary. External judges provide advice inside that
+boundary; they do not grant capabilities themselves.
 
 ## Status
 
@@ -67,12 +67,14 @@ Its intentionally small, unauthenticated API is:
 - `POST /sessions/{id}/messages` with `{"prompt": "..."}` after its active turn ends
 - `GET /sessions`
 - `GET /events?after=N`
-- `POST /approvals/{id}` with `{"verdict": "approve_once|approve_session|deny", "reason": "..."}`
+- `POST /approvals/{id}` with `{"sessionId": "...", "verdict": "approve_once|approve_session|deny", "reason": "..."}`
 - `POST /shutdown`
 
 Approval requests have no timeout. They remain pending while the service emits an
 `approval.requested` event and continue only after an outside actor posts a verdict.
-This is deliberately a local experiment, not a hardened network service.
+The approval ID and posted session ID must match the immutable registration made
+when the worker thread started. This remains a local experiment: the loopback HTTP
+API has no authentication and the medium/deferred hardening issues remain open.
 
 Run the real recursive orchestration experiment with:
 
@@ -124,17 +126,21 @@ The judge runs as a separate ephemeral `codex exec` process with a read-only
 sandbox and approvals disabled. A future implementation can instead provide a
 dedicated judge thread over a second app-server connection.
 
-## One-shot command safety model
+## Governance and execution safety model
 
-- Only thread IDs registered by this coordinator can receive decisions.
-- The worker's request `cwd` and any file-change `grantRoot` must remain inside
-  its configured project.
-- Permission requests are denied unless their categories are explicitly
-  allowlisted by the embedding application.
-- Session-wide approval is downgraded to one-turn approval by default.
-- The judge receives request content as untrusted JSON data.
-- Invalid or unavailable judge responses fail closed.
-
-The current shell-command policy still relies on the Codex judge to interpret
-the command's effects. Production use should add an application-specific
-deterministic command allowlist or exec-policy layer.
+- Each managed thread is registered once with an immutable session ID, canonical
+  project root, and policy. Unknown threads are denied without emitting their data.
+- Approval methods, fields, paths, permission shapes, values, and session identity
+  are normalized and checked before a request can enter the pending queue.
+- File paths are canonicalized and checked against the project root, including
+  traversal, prefix-confusion, and existing symlink cases.
+- Permission responses are intersected with both the normalized request and the
+  trusted policy ceiling. A judge can deny or narrow, never expand.
+- Session-wide approval is disabled by default. Service operators must pass
+  `--allow-session-approval`, and the individual request must support it.
+- Every turn receives an explicit app-server sandbox policy. Workspace-write turns
+  have the canonical project as their only writable root, network disabled, and
+  both ambient temporary-directory write exceptions removed. The OS sandbox applies
+  this boundary to subprocesses, symlinks, and indirect effects.
+- Logs record untrusted declared intent separately from enforced capabilities.
+- Invalid, ambiguous, conflicting, or unavailable judge responses fail closed.

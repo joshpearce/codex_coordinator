@@ -4,6 +4,13 @@
 
 High — governance integrity.
 
+## Status
+
+Resolved. Unknown or missing thread IDs are declined before queueing and without
+content-bearing events. Notifications and item evidence are filtered by immutable
+managed-thread registration, and concurrent cross-session regressions cover the
+boundary.
+
 ## Problem
 
 The live `ApprovalBroker` creates an approval for every server request received on

@@ -11,6 +11,7 @@ import pytest
 from codex_coordinator.live_e2e import (
     OutputRenderer,
     _approval_errors,
+    _relay_coordinator_events,
     _relay_service_events,
     _resolve_template,
     run,
@@ -106,6 +107,23 @@ async def test_service_events_are_relayed_to_stdout(tmp_path: Path, capsys):
         "source": "service",
         "event": {"type": "service.started", "port": 1234},
     }
+
+
+@pytest.mark.asyncio
+async def test_large_coordinator_event_is_relayed_without_stream_limit_failure(
+    tmp_path: Path, capsys
+):
+    event = {"type": "item.completed", "payload": "x" * (128 * 1024)}
+    raw = (json.dumps(event) + "\n").encode()
+    stream = asyncio.StreamReader(limit=1024)
+    stream.feed_data(raw)
+    stream.feed_eof()
+    log = tmp_path / "coordinator.jsonl"
+
+    await _relay_coordinator_events(stream, log, OutputRenderer(json_output=True))
+
+    assert json.loads(log.read_text()) == event
+    assert json.loads(capsys.readouterr().out) == {"source": "coordinator", "event": event}
 
 
 def test_human_output_shows_prompts_and_suppresses_token_deltas(capsys):

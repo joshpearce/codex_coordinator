@@ -7,7 +7,11 @@ runtime effects exceed what the governance decision evaluated.
 
 ## Status
 
-Deferred.
+Resolved. Every turn carries a project-only app-server sandbox policy with ambient
+temporary-directory write exceptions removed. A real app-server regression runs a
+benign unit-test command and verifies that temporary-file, subprocess, and symlink
+writes cannot escape the project. Decision events distinguish declared intent from
+enforced capabilities.
 
 ## Problem
 

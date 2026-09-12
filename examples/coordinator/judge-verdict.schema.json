@@ -5,6 +5,7 @@
   "required": ["verdict", "reason"],
   "properties": {
     "verdict": {"type": "string", "enum": ["approve_once", "approve_session", "deny"]},
-    "reason": {"type": "string", "minLength": 1}
+    "reason": {"type": "string", "minLength": 1},
+    "permissions": {"type": "object"}
   }
 }

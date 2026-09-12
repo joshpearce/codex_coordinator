@@ -8,6 +8,7 @@ from .coordinator import (
     JudgedApprovalHandler,
     JudgedSessionSupervisor,
     OneShotCodexJudge,
+    SessionRegistration,
     WorkerPermissions,
     codex_exec_json_runner,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "JudgedApprovalHandler",
     "JudgedSessionSupervisor",
     "OneShotCodexJudge",
+    "SessionRegistration",
     "WorkerPermissions",
     "codex_exec_json_runner",
 ]

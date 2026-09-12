@@ -16,6 +16,7 @@ from .coordinator import (
     JudgedApprovalHandler,
     JudgedSessionSupervisor,
     OneShotCodexJudge,
+    WorkerPermissions,
     codex_exec_json_runner,
 )
 from .daemon import ensure_daemon
@@ -41,10 +42,14 @@ async def run(args: argparse.Namespace) -> dict:
     def record(case, decision, response) -> None:
         events.append({
             "method": case.method,
+            "sessionId": case.session_id,
             "threadId": case.thread_id,
             "request": dict(case.request),
+            "declaredIntent": dict(case.declared_intent),
+            "enforcedCapabilities": dict(case.enforced_capabilities),
             "verdict": decision.verdict,
             "reason": decision.reason,
+            "permissions": dict(decision.permissions) if decision.permissions is not None else None,
             "response": dict(response),
         })
 
@@ -52,13 +57,14 @@ async def run(args: argparse.Namespace) -> dict:
         partial(codex_exec_json_runner, timeout_seconds=args.timeout),
         policy_instructions=args.judge_policy,
     )
-    policy = ApprovalPolicy(project)
+    worker_permissions = WorkerPermissions.from_project(project)
+    policy = ApprovalPolicy(project, sandbox_mode=worker_permissions.sandbox_mode)
     approvals = JudgedApprovalHandler(project, policy, judge, on_decision=record)
     async with websockets.unix_connect(
         str(socket_path), uri="ws://localhost/", compression=None,
         open_timeout=10, close_timeout=3, max_size=32 * 1024 * 1024,
     ) as ws:
-        client = ProtocolClient(ws, approvals)
+        client = ProtocolClient(ws, approvals, approvals.notification)
         try:
             await client.initialize()
             supervisor = JudgedSessionSupervisor(client, approvals, project)

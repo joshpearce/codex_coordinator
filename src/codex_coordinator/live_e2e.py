@@ -338,16 +338,27 @@ async def _relay_coordinator_events(
     stream: asyncio.StreamReader, path: Path, renderer: OutputRenderer
 ) -> None:
     """Persist the coordinator's complete JSONL output and render selected events."""
+    buffered = bytearray()
+
+    def relay(raw: bytes, log: Any) -> None:
+        line = raw.decode(errors="replace").rstrip("\n")
+        log.write(line + "\n")
+        log.flush()
+        try:
+            event: Any = json.loads(line)
+        except json.JSONDecodeError:
+            event = line
+        renderer.coordinator(event)
+
     with path.open("w") as log:
-        while raw := await stream.readline():
-            line = raw.decode(errors="replace").rstrip("\n")
-            log.write(line + "\n")
-            log.flush()
-            try:
-                event: Any = json.loads(line)
-            except json.JSONDecodeError:
-                event = line
-            renderer.coordinator(event)
+        while chunk := await stream.read(64 * 1024):
+            buffered.extend(chunk)
+            while (newline := buffered.find(b"\n")) >= 0:
+                raw = bytes(buffered[:newline])
+                del buffered[: newline + 1]
+                relay(raw, log)
+        if buffered:
+            relay(bytes(buffered), log)
 
 
 async def run(args: argparse.Namespace) -> int:

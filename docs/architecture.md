@@ -1,68 +1,86 @@
 # Architecture
 
-The repository contains two entry points built on one app-server transport.
+The repository contains two adapters over one governance boundary and the
+app-server transport.
 
-## One-shot judged worker
+## Session creation and execution
 
-This prototype separates three responsibilities:
+`ProtocolClient` owns JSON-RPC framing and multiplexes responses, notifications,
+and server approval requests. `JudgedSessionSupervisor` is the one-shot adapter;
+`CoordinatorService` is the long-running HTTP adapter.
 
-1. `ProtocolClient` owns the app-server connection and JSON-RPC framing.
-2. `JudgedSessionSupervisor` reads and validates the permission fields in the
-   project's `.codex/config.toml`, then sends those exact values on
-   `thread/start`. This prevents a shared daemon from leaking broader startup
-   permissions into a worker while keeping the project file authoritative.
-3. `JudgedApprovalHandler` authenticates the worker thread, applies a
-   deterministic permission ceiling, asks a `Judge` for a narrow verdict, and
-   converts that verdict to the app-server response shape.
+Both read the worker project's `.codex/config.toml` once at registration, accept
+only `on-request`, the `user` reviewer, and `read-only` or `workspace-write`, and
+send those values explicitly on `thread/start`. A managed thread is then registered
+with an immutable session ID, canonical project root, and `ApprovalPolicy`.
 
-After `start()`, `JudgedSessionSupervisor.monitor()` keeps the owning client
-attached and draining server requests until the worker leaves the active state
-or the configured watch window expires. The caller owns WebSocket connection
-and reconnection lifecycle.
+Every `turn/start`, including follow-up turns, carries the sandbox policy captured
+at registration. Read-only workers get a network-disabled read-only policy.
+Workspace-write workers get:
 
-`OneShotCodexJudge` accepts an injected runner. The included
-`codex_exec_json_runner` is an optional adapter and is never invoked
-implicitly. A deployment can instead inject a judge backed by a second
-app-server connection and a dedicated Codex thread.
+- the canonical project as their only writable root;
+- network disabled;
+- the ambient `$TMPDIR` write exception disabled; and
+- the `/tmp` write exception disabled.
 
-## Long-running orchestration service
+The app-server's OS sandbox is the execution-time boundary, so the restriction also
+applies to subprocesses, standard temporary-file APIs, symlinks, and other indirect
+effects. Project-controlled config changes cannot expand a registered session later.
 
-`codex-coordinator-service` owns one multiplexed `ProtocolClient`. Its background
-reader correlates RPC responses while approval handlers remain pending, so HTTP
-requests can start and inspect other sessions over the same connection. Server
-requests become `approval.requested` JSONL events and remain pending until an
-outside actor posts a verdict.
+## Unified approval boundary
 
-The service binds to loopback by default and has no authentication, durable state,
-or approval timeout. It is an orchestration mechanism, not a production security
-boundary. The live E2E places policy in the coordinating session and its independent
-one-shot judges.
+`ApprovalPolicy` normalizes a request before either adapter exposes it to a judge or
+pending queue. It accepts only the three known app-server approval methods and their
+known fields. Required identity and correlation fields must have exact types. Paths
+are made absolute relative to the registered project, resolved canonically, and
+checked with path-component containment rather than string prefixes.
 
-Judges should still use separate `codex exec` processes (or a second app-server
-connection), so their work cannot introduce nested approval dependencies on the
-worker connection.
+Permission objects have a closed schema. Requested values must fit an immutable,
+trusted allowlist, and a judge-proposed permission response must be a subset of both
+the normalized request and that allowlist. Commands asking for additional sandbox,
+network, or persistent policy authority are denied because a plain command response
+cannot safely narrow those capabilities.
 
-## Safety boundary
+Session-wide approval is off by default. It is available only when trusted service
+startup or embedding code enables it and the individual command request offers
+`acceptForSession`. A judge can always deny or narrow a request, but cannot expand
+its permission or lifetime ceiling.
 
-The LLM judge is advisory. Deterministic code always:
+The one-shot adapter calls a `Judge` directly. The live broker emits a normalized
+`approval.requested` event and accepts a verdict over HTTP. In both cases, invalid
+responses, judge errors, ambiguity, conflicting evidence, and ceiling violations
+fail closed.
 
-- rejects requests from unregistered thread IDs;
-- rejects unknown approval methods;
-- rejects working directories and file-change grant roots outside the project;
-- rejects permission categories outside an explicit allowlist;
-- downgrades session-wide approval unless explicitly enabled;
-- denies malformed or unavailable judge responses;
-- requires `on-request`, the `user` approval reviewer, and either a read-only
-  or workspace-write sandbox in the project-local configuration;
-- sends those validated values explicitly when creating the worker.
+## Identity and event isolation
 
-The approval request is serialized inside a JSON object and labeled untrusted,
-which reduces prompt-injection risk but does not eliminate it. Consequently,
-the LLM cannot be the final permission boundary.
+Unknown or missing thread IDs are declined before an approval ID or future is
+created. Their request bodies are not printed or added to the event log. The broker
+keeps only a non-sensitive in-memory count. Notifications and correlated item
+evidence are likewise retained and emitted only for managed threads.
 
-## Validation status
+Each pending approval stores its immutable originating registration. Resolving it
+requires the matching `sessionId`; an approval from another session cannot consume
+or resolve it.
 
-The tests under `tests/` use fake clients and local loopback HTTP. They cover policy
-validation, response translation, fail-closed parsing, concurrent RPC multiplexing,
-event emission, verdict submission, and child-session creation. They do not start a
-live Codex process or consume model usage.
+## Untrusted evidence
+
+Worker messages, files, diffs, summaries, command descriptions, reasons, and all
+approval fields are untrusted evidence. The one-shot judge prompt separates that
+evidence from trusted instructions, but prompt construction is not the security
+boundary. Decisions bind to normalized fields and registered identity.
+
+Audit events record `declaredIntent` separately from `enforcedCapabilities`. The
+former may contain worker-authored prose; the latter is derived solely from trusted
+registration and runtime sandbox policy.
+
+## Deliberate remaining scope
+
+The service still binds to loopback by default and has no HTTP authentication,
+durable state, approval timeout, or event-retention limit. Those medium, low, and
+deferred issues remain separately tracked; they do not weaken request normalization
+or the execution boundary described here.
+
+Most tests use fake clients and local loopback HTTP. One regression starts a real
+local `codex app-server --stdio` process without model inference and proves that a
+benign-looking unit-test command cannot write outside its project through a standard
+temporary-file API, subprocess, or symlink.
