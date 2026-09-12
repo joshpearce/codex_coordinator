@@ -59,6 +59,39 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
     ).read_text()
 
 
+def test_coordinator_goal_runs_scaffolded_children_concurrently_and_gates_completion():
+    repo = Path(__file__).resolve().parents[1]
+    goal = (repo / "examples/coordinator/goal.md").read_text()
+
+    concurrent_start = goal.index("Start both child sessions promptly")
+    inventory_gate = goal.index("python -m inventory_app --help")
+    report_gate = goal.index("python -m inventory_report --help")
+    result_write = goal.index("Do not write `result.json`")
+    shutdown = goal.index("Finally call `POST /shutdown`")
+
+    assert concurrent_start < inventory_gate < result_write < shutdown
+    assert concurrent_start < report_gate < result_write
+    assert "/sessions/SESSION_ID/messages" in goal
+    assert "do not rerun passing suites" in goal
+    for test_name in ("inventory_app", "inventory_report", "integration"):
+        assert f"`{test_name}`" in goal
+        assert f'"{test_name}": {{"command": "COMMAND' in goal
+
+
+def test_live_e2e_projects_are_small_todo_scaffolds():
+    repo = Path(__file__).resolve().parents[1]
+    fixtures = {
+        "inventory-app": ("inventory_app/domain.py", 3),
+        "inventory-report": ("inventory_report/report.py", 2),
+    }
+
+    for project, (implementation, todo_count) in fixtures.items():
+        root = repo / "examples" / project
+        assert (root / "pyproject.toml").is_file()
+        assert len(list(root.glob("test_*.py"))) == 1
+        assert (root / implementation).read_text().count("TODO:") == todo_count
+
+
 @pytest.mark.asyncio
 async def test_service_events_are_relayed_to_stdout(tmp_path: Path, capsys):
     log = tmp_path / "service.jsonl"

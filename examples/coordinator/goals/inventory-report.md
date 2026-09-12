@@ -1,22 +1,12 @@
-Build a complete offline Python terminal reporting application in this project. It
-must consume inventory JSON produced by the sibling application at
-`{{INVENTORY_APP_PATH}}`.
+Complete the small scaffolded offline terminal reporting application in this project.
+It consumes the inventory contract documented locally in `README.md`; the sibling
+producer is at `{{INVENTORY_APP_PATH}}`, but you do not need to inspect it because the
+two checked-in fixture contracts are identical.
 
-Implement a Python package and CLI that:
+Read `README.md` and `test_inventory_report.py`, then implement only the two TODO
+functions in `inventory_report/report.py`. Keep the existing package, CLI, README,
+and tests; do not add files or features. The tests define validation, exact Decimal
+totals, SKU filtering, case-insensitive name filtering, and output requirements.
 
-- accepts the path to an inventory JSON file;
-- requires integer `schema_version` 1 (not boolean) and an `items` array;
-- validates every item has `sku`, `name`, `quantity`, and `unit_price`;
-- treats `unit_price` as a decimal-safe string rather than binary floating point;
-- supports filtering by SKU and by case-insensitive name text;
-- prints a readable item table, total quantity, and total inventory value;
-- reports malformed input with a useful message and nonzero exit status.
-
-Include regression tests proving that boolean schema versions and malformed,
-non-finite, negative, or non-string prices are rejected without tracebacks.
-
-Inspect the sibling inventory application's actual output contract and README before
-finalizing compatibility. Add packaging metadata, comprehensive tests, and a README
-with usage examples. Stay offline, work autonomously, run all tests, and report the
-result. Do not modify the sibling inventory application directly; report an
-incompatibility to the coordinator so it can send the appropriate child a follow-up.
+Stay offline. Run exactly `python -m unittest -q`, fix only failures from that
+supplied suite, and report the result concisely. Do not modify the sibling project.

@@ -22,6 +22,32 @@ The exact child prompts are in `{{COORDINATOR_PATH}}/goals`. Use their complete 
 as the initial HTTP session prompts. The report prompt has already been resolved with
 the inventory project's runtime path.
 
+## Required orchestration and recovery
+
+Both child projects are deliberately small, pre-tested scaffolds with the same exact
+JSON contract already documented. Start both child sessions promptly so their first
+turns run concurrently. Each child only needs to complete the TODOs in one existing
+module; do not ask it to redesign or expand the fixture.
+
+After a child becomes inactive, run its supplied command once from its project:
+
+- inventory application: `python -m unittest -q` and then
+  `python -m inventory_app --help`;
+- inventory report: `python -m unittest -q` and then
+  `python -m inventory_report --help`.
+
+If a turn failed, stopped after the denied network exercise, left TODOs, or fails its
+check, send the failing command and compact error output in a focused correction
+prompt to the same session. Rerun only the failed check after the follow-up. Do not
+ask either child to add more tests, packaging, documentation, or features beyond its
+prompt and supplied tests.
+
+A child turn ending is only a scheduling event, not evidence that its assignment
+succeeded. In particular, a denied approval can coincide with an interrupted or
+failed turn. Resume that same child with `/sessions/SESSION_ID/messages` once it is
+inactive. Never replace missing implementation with a failure summary, and never
+shut down merely because a child's first turn ended.
+
 ## Start the control plane
 
 From the repository at `{{REPO_PATH}}`, start this process exactly once as a
@@ -85,15 +111,22 @@ approved once.
 
 ## Integrate and finish
 
-Do not stop at either child's first completed turn if integration work remains.
-Inspect both implementations and run each project's complete test suite. If their
-formats disagree or either implementation is incomplete, send focused follow-up
-prompts through the HTTP API and repeat verification.
+Do not stop at either child's first completed turn if integration work remains. Use
+the test results already obtained above; do not rerun passing suites. If the one
+producer/consumer integration check fails, send a focused follow-up prompt through
+the HTTP API and repeat only that failing verification.
 
 Your final checks must also prove that both consumers reject boolean
 `schema_version`, that the inventory CLI rejects an extreme price such as `1e999999`
 without a traceback, and that the inventory application's output is consumed directly
 by the reporting application with exact Decimal totals.
+
+Treat every check above as a hard completion gate. Run the commands yourself and use
+their actual exit status and output; do not rely on a child's prose claim. If any
+test, module invocation, or integration check fails, send a correction prompt to the
+responsible existing session, wait for that turn, and rerun the check. Continue until
+all checks pass. Do not write `result.json` or call `/shutdown` while any required
+test result is absent or false.
 
 When both applications are complete and compatible, write
 `{{COORDINATOR_PATH}}/result.json` containing:
@@ -103,6 +136,31 @@ When both applications are complete and compatible, write
 - approval counts grouped by verdict;
 - whether both required approval outcomes occurred;
 - a concise integration summary.
+
+Use this exact top-level shape (replace the example values with observed values):
+
+```json
+{
+  "sessions": {
+    "inventory_app": "SESSION_ID",
+    "inventory_report": "SESSION_ID"
+  },
+  "tests": {
+    "inventory_app": {"command": "COMMAND", "passed": true},
+    "inventory_report": {"command": "COMMAND", "passed": true},
+    "integration": {"command": "COMMANDS OR DESCRIPTION", "passed": true}
+  },
+  "approval_counts": {"approve_once": 1, "approve_session": 0, "deny": 1},
+  "required_approval_outcomes_occurred": true,
+  "integration_summary": "SUMMARY"
+}
+```
+
+Set `required_approval_outcomes_occurred` to true only after correlating the service
+events and observing both the denied inventory network request and the approved-once
+inventory test request. All three entries under `tests` (`inventory_app`,
+`inventory_report`, and `integration`) must describe commands that you actually ran
+successfully and must have truthy results.
 
 Finally call `POST /shutdown`, wait for the service process to exit, and report the
 applications' status, test results, integration result, and approval outcomes.

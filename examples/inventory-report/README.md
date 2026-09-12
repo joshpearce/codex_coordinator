@@ -1,9 +1,17 @@
 # Inventory report E2E fixture
 
-This is the starting project for the reporting child session in the live orchestration
-experiment. The child is expected to replace this README and build an offline terminal
-reporter compatible with the sibling inventory application's JSON format.
+Small offline consumer used by the orchestration E2E. The project is intentionally
+scaffolded: the child session completes the TODOs in `inventory_report/report.py` and
+runs the supplied regression tests.
 
-The checked-in `.codex/config.toml` gives the child a workspace-write sandbox. The
-coordinator service owns the session and sends its prompts, while the child authors
-the application directly inside this project.
+Input is the producer's documented object with integer (not boolean)
+`schema_version: 1` and an `items` array. Each item has string `sku` and `name`, a
+nonnegative integer (not boolean) `quantity`, and a finite, nonnegative,
+reasonably representable decimal-string `unit_price`.
+
+```sh
+python -m inventory_report inventory.json
+python -m inventory_report inventory.json --sku SKU-100
+python -m inventory_report inventory.json --name coffee
+python -m unittest -q
+```

@@ -1,5 +1,10 @@
 # Approval judges cannot see transitive command side effects
 
+## Priority
+
+High. A project session can obtain approval for a benign-looking command whose
+runtime effects exceed what the governance decision evaluated.
+
 ## Status
 
 Deferred.

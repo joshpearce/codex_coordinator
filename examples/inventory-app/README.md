@@ -1,9 +1,26 @@
 # Inventory app E2E fixture
 
-This is the starting project for the inventory-domain child session in the live
-orchestration experiment. The child is expected to replace this README and build the
-application, persistence format, CLI, and tests.
+Small offline inventory producer used by the orchestration E2E. The project is
+intentionally scaffolded: the child session completes the TODOs in
+`inventory_app/domain.py` and runs the supplied regression tests.
 
-The checked-in `.codex/config.toml` gives the child a workspace-write sandbox. The
-coordinator service owns the session and sends its prompts, while the child authors
-the application directly inside this project.
+The CLI stores this exact JSON contract:
+
+```json
+{
+  "schema_version": 1,
+  "items": [
+    {"sku": "SKU-100", "name": "Coffee Beans", "quantity": 3, "unit_price": "12.34"}
+  ]
+}
+```
+
+`schema_version` and `quantity` must be integers but not booleans. `unit_price` must
+be a finite, nonnegative, reasonably representable decimal string; JSON numbers are
+not accepted. SKUs are unique.
+
+```sh
+python -m inventory_app --file inventory.json add SKU-100 "Coffee Beans" 3 12.34
+python -m inventory_app --file inventory.json list
+python -m unittest -q
+```

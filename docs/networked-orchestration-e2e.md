@@ -12,9 +12,12 @@ live_e2e harness
        └─ for each approval, starts a fresh `codex exec` judge
 ```
 
-The two child sessions build compatible inventory applications in separate temporary
-projects copied from [`examples/inventory-app`](../examples/inventory-app) and
-[`examples/inventory-report`](../examples/inventory-report). Their checked-in
+The two child sessions concurrently complete compatible inventory applications in
+separate temporary projects copied from
+[`examples/inventory-app`](../examples/inventory-app) and
+[`examples/inventory-report`](../examples/inventory-report). Each project is a compact
+test-driven scaffold with packaging, CLI wiring, documentation, contract tests, and
+one implementation module containing the TODOs. Their checked-in
 `.codex/config.toml` files use `workspace-write`, so each child authors its own project
 while the service remains the middle-man for creating the session and sending turns.
 The inventory child is instructed to make an explicit approval-path request for a

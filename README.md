@@ -81,16 +81,18 @@ make live-e2e
 ```
 
 The live runner is repository-local because it copies the checked-in examples. It
-copies the coordinator and child skeletons into three sibling project folders. The
+copies the coordinator and two compact, test-driven child scaffolds into three sibling
+project folders. Each child completes TODOs in one module while packaging, CLI wiring,
+documentation, contract tests, and the shared JSON contract are already present. The
 full goal is checked in at `examples/coordinator/goal.md`; the harness substitutes
 only runtime project paths in the copied file at `workspace/coordinator/goal.md` and
 starts a `gpt-5.6-sol` coordinating `codex exec` with medium reasoning there. Its
 project-local permission profile grants workspace execution, network access, and the
 specific app-server Unix socket instead of bypassing the sandbox. Workers and approval
 judges stay on `gpt-5.6-luna` with low reasoning. The
-coordinator starts the service itself, creates two workspace-write child sessions,
-scans the service's stdout, and launches a separate read-only `codex exec` judge for
-each approval. The terminal shows a compact timeline containing session prompts,
+coordinator starts the service itself, creates two concurrent workspace-write child
+sessions, scans the service's stdout, and launches a separate read-only `codex exec`
+judge for each approval. The terminal shows a compact timeline containing session prompts,
 follow-ups, approvals, completions, and the final result. Full-fidelity logs remain in
 `workspace/coordinator/coordinator.jsonl` and `workspace/coordinator/service.jsonl`.
 Use `make live-e2e LIVE_E2E_ARGS=--verbose` to include commands and file-change
