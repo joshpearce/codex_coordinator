@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-coordinator"
+version = "0.1.0"
+description = "Coordinate Codex worker sessions with independently judged approvals"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["websockets>=15,<16"]
+
+[project.optional-dependencies]
+test = ["build>=1", "pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+codex-coordinator = "codex_coordinator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
