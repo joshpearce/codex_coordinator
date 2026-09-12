@@ -81,3 +81,16 @@ HTTP verdict submission, and child-session creation.
 
 The live scenario is intentionally opt-in and is not part of the automated test
 suite; completion depends on model behavior and consumes Codex usage.
+
+Once the coordinator exits, the non-model harness acts as the final oracle. It reruns
+both suites, produces and consumes a known inventory, checks strict schema-version and
+extreme-decimal behavior, and correlates approval requests with resolutions. A run
+fails if the network request was not explicitly denied, the project test request was
+not approved once, an approval remains pending, or any black-box application check
+fails.
+
+The coordinator template itself uses a `workspace-write` baseline. The live harness
+still launches it with `--dangerously-bypass-approvals-and-sandbox`; that explicit
+override supplies the broad effective access needed for the daemon socket, localhost,
+nested judges, and sibling inspection. The template does not independently require a
+`danger-full-access` declaration.

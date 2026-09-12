@@ -96,6 +96,12 @@ summaries, or `LIVE_E2E_ARGS=--json` for the complete machine-readable stream. T
 generated workspace is retained for inspection. See
 [the live E2E guide](docs/networked-orchestration-e2e.md) before running it.
 
+After the coordinating session exits, the harness independently reruns both child
+test suites and a producer/consumer integration scenario. It also checks strict schema
+typing, extreme-decimal error handling, complete approval resolution, and that the
+recorded denial belongs to the network request rather than an unrelated operation.
+Model-written `result.json` claims alone cannot make the command succeed.
+
 ## Run a judged worker
 
 ```sh

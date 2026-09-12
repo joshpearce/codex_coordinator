@@ -8,10 +8,173 @@ import json
 import os
 import shutil
 import signal
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+
+async def _command(cwd: Path, *args: str) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+    return (
+        int(process.returncode or 0),
+        stdout.decode(errors="replace"),
+        stderr.decode(errors="replace"),
+    )
+
+
+def _approval_errors(service_log: Path) -> list[str]:
+    if not service_log.exists():
+        return ["service.jsonl was not created"]
+    requests: dict[str, dict[str, Any]] = {}
+    resolutions: dict[str, dict[str, Any]] = {}
+    for line in service_log.read_text().splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        approval_id = event.get("approvalId")
+        if event.get("type") == "approval.requested" and approval_id:
+            requests[approval_id] = event
+        elif event.get("type") == "approval.resolved" and approval_id:
+            resolutions[approval_id] = event
+
+    matched = [(request, resolutions.get(approval_id)) for approval_id, request in requests.items()]
+    network_denied = any(
+        resolution
+        and resolution.get("verdict") == "deny"
+        and any(marker in str(request.get("request", {}).get("command", "")).lower()
+                for marker in ("curl ", "wget ", "http://", "https://"))
+        for request, resolution in matched
+    )
+    test_approved = any(
+        resolution
+        and resolution.get("verdict") == "approve_once"
+        and any(marker in str(request.get("request", {}).get("command", "")).lower()
+                for marker in ("unittest", "pytest"))
+        for request, resolution in matched
+    )
+    errors = []
+    if not network_denied:
+        errors.append("no network approval request was explicitly denied")
+    if not test_approved:
+        errors.append("no project test approval request was approved once")
+    if set(requests) != set(resolutions):
+        errors.append("one or more approval requests were not resolved")
+    return errors
+
+
+async def _post_run_errors(
+    coordinator: Path,
+    inventory_app: Path,
+    inventory_report: Path,
+    summary: Any,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(summary, dict):
+        errors.append("result.json is missing or is not an object")
+    else:
+        sessions = summary.get("sessions")
+        tests = summary.get("tests")
+        if not isinstance(sessions, dict) or not all(
+            sessions.get(name) for name in ("inventory_app", "inventory_report")
+        ):
+            errors.append("result.json does not identify both child sessions")
+        if not isinstance(tests, dict) or not all(
+            tests.get(name)
+            for name in ("inventory_app", "inventory_report", "integration")
+        ):
+            errors.append("result.json does not report all required test results")
+        if summary.get("required_approval_outcomes_occurred") is not True:
+            errors.append("result.json does not confirm the required approval outcomes")
+    errors.extend(_approval_errors(coordinator / "service.jsonl"))
+
+    for name, project in (
+        ("inventory-app", inventory_app),
+        ("inventory-report", inventory_report),
+    ):
+        code, _stdout, stderr = await _command(
+            project, sys.executable, "-m", "unittest", "discover", "-v"
+        )
+        if code:
+            errors.append(f"{name} tests failed: {OutputRenderer._compact(stderr)}")
+
+    inventory_path = coordinator / "harness-validation-inventory.json"
+    for sku, name, quantity, price in (
+        ("SKU-100", "Coffee Beans", "3", "12.34"),
+        ("SKU-200", "Tea Tin", "2", "5.00"),
+    ):
+        code, _stdout, stderr = await _command(
+            inventory_app,
+            sys.executable,
+            "-m",
+            "inventory_app",
+            "--file",
+            str(inventory_path),
+            "add",
+            sku,
+            name,
+            quantity,
+            price,
+        )
+        if code:
+            errors.append(f"inventory producer failed: {OutputRenderer._compact(stderr)}")
+            break
+    else:
+        code, stdout, stderr = await _command(
+            inventory_report,
+            sys.executable,
+            "-m",
+            "inventory_report",
+            str(inventory_path),
+        )
+        if code or "Total quantity: 5" not in stdout or "47.02" not in stdout:
+            errors.append(
+                "producer/consumer integration failed: "
+                + OutputRenderer._compact(stderr or stdout)
+            )
+
+    edge_path = coordinator / "harness-validation-edge.json"
+    code, _stdout, stderr = await _command(
+        inventory_app,
+        sys.executable,
+        "-m",
+        "inventory_app",
+        "--file",
+        str(edge_path),
+        "add",
+        "EDGE",
+        "Extreme",
+        "1",
+        "1e999999",
+    )
+    if code == 0 or "Traceback" in stderr or "price" not in stderr.lower():
+        errors.append("inventory CLI does not reject extreme decimals cleanly")
+
+    edge_path.write_text('{"schema_version":true,"items":[]}\n')
+    for name, project, command in (
+        (
+            "inventory-app",
+            inventory_app,
+            (sys.executable, "-m", "inventory_app", "--file", str(edge_path), "list"),
+        ),
+        (
+            "inventory-report",
+            inventory_report,
+            (sys.executable, "-m", "inventory_report", str(edge_path)),
+        ),
+    ):
+        code, _stdout, _stderr = await _command(project, *command)
+        if code == 0:
+            errors.append(f"{name} accepts boolean schema_version as integer 1")
+    return errors
 
 
 def _make_project(root: Path, examples: Path, name: str) -> Path:
@@ -74,6 +237,8 @@ class OutputRenderer:
         elif event_type == "live_e2e.completed":
             outcome = "SUCCESS" if data.get("returnCode") == 0 and data.get("result") else "FAILED"
             self._line(f"Result: {outcome} (exit {data.get('returnCode')})")
+            for error in data.get("validationErrors") or []:
+                self._line(f"VALIDATION ERROR: {error}")
 
     def service(self, event: dict[str, Any]) -> None:
         if self.json_output:
@@ -261,14 +426,22 @@ async def run(args: argparse.Namespace) -> int:
         relay_stop.set()
         await asyncio.gather(service_relay, coordinator_relay)
     result_path = coordinator / "result.json"
-    summary = json.loads(result_path.read_text()) if result_path.exists() else None
+    try:
+        summary = json.loads(result_path.read_text()) if result_path.exists() else None
+    except json.JSONDecodeError:
+        summary = None
+    validation_errors = await _post_run_errors(
+        coordinator, api_project, ui_project, summary
+    )
+    final_return_code = return_code or (1 if validation_errors else 0)
     renderer.harness(
         "live_e2e.completed",
-        returnCode=return_code,
+        returnCode=final_return_code,
         workspace=str(root),
         result=summary,
+        validationErrors=validation_errors,
     )
-    return return_code if return_code else (0 if summary else 1)
+    return final_return_code
 
 
 def arguments() -> argparse.Namespace:

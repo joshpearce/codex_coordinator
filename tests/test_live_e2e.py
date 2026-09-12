@@ -8,6 +8,7 @@ import pytest
 
 from codex_coordinator.live_e2e import (
     OutputRenderer,
+    _approval_errors,
     _relay_service_events,
     _resolve_template,
 )
@@ -89,3 +90,45 @@ def test_human_output_shows_prompts_and_suppresses_token_deltas(capsys):
     assert "Build the inventory app." in output
     assert "Run its tests." in output
     assert "noisy token" not in output
+
+
+def test_approval_validation_requires_verdicts_for_the_intended_requests(tmp_path: Path):
+    log = tmp_path / "service.jsonl"
+    events = [
+        {
+            "type": "approval.requested",
+            "approvalId": "network",
+            "request": {"command": "curl -I https://example.com"},
+        },
+        {
+            "type": "approval.resolved",
+            "approvalId": "network",
+            "verdict": "deny",
+        },
+        {
+            "type": "approval.requested",
+            "approvalId": "tests",
+            "request": {"command": "python -m unittest discover -v"},
+        },
+        {
+            "type": "approval.resolved",
+            "approvalId": "tests",
+            "verdict": "approve_once",
+        },
+    ]
+    log.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+    assert _approval_errors(log) == []
+
+    events[0]["request"]["command"] = "python local_check.py"
+    log.write_text("".join(json.dumps(event) + "\n" for event in events))
+    assert _approval_errors(log) == [
+        "no network approval request was explicitly denied"
+    ]
+
+
+def test_coordinator_template_has_safe_baseline():
+    repo = Path(__file__).resolve().parents[1]
+    config = (repo / "examples/coordinator/.codex/config.toml").read_text()
+    assert 'sandbox_mode = "workspace-write"' in config
+    assert 'sandbox_mode = "danger-full-access"' not in config
