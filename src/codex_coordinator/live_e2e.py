@@ -367,6 +367,15 @@ async def run(args: argparse.Namespace) -> int:
         {"INVENTORY_APP_PATH": api_project},
     )
     _resolve_template(
+        coordinator / ".codex/config.toml",
+        {
+            "APP_SERVER_SOCKET": (
+                Path.home()
+                / ".codex/app-server-control/app-server-control.sock"
+            )
+        },
+    )
+    _resolve_template(
         coordinator / "goal.md",
         {
             "REPO_PATH": repo,
@@ -382,7 +391,6 @@ async def run(args: argparse.Namespace) -> int:
         args.coordinator_model,
         "--config",
         f'model_reasoning_effort="{args.coordinator_reasoning_effort}"',
-        "--dangerously-bypass-approvals-and-sandbox",
         "--json",
         "--color",
         "never",

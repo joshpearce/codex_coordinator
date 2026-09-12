@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import shutil
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -130,5 +131,24 @@ def test_approval_validation_requires_verdicts_for_the_intended_requests(tmp_pat
 def test_coordinator_template_has_safe_baseline():
     repo = Path(__file__).resolve().parents[1]
     config = (repo / "examples/coordinator/.codex/config.toml").read_text()
-    assert 'sandbox_mode = "workspace-write"' in config
+    assert 'default_permissions = "coordinator"' in config
+    assert 'extends = ":workspace"' in config
+    assert '"{{APP_SERVER_SOCKET}}" = "allow"' in config
     assert 'sandbox_mode = "danger-full-access"' not in config
+
+
+def test_coordinator_config_resolves_only_the_socket_path(tmp_path: Path):
+    repo = Path(__file__).resolve().parents[1]
+    config = tmp_path / "config.toml"
+    shutil.copy(repo / "examples/coordinator/.codex/config.toml", config)
+    socket = tmp_path / "app-server-control.sock"
+
+    rendered = _resolve_template(config, {"APP_SERVER_SOCKET": socket})
+
+    assert "{{" not in rendered
+    assert f'"{socket}" = "allow"' in rendered
+    parsed = tomllib.loads(rendered)
+    profile = parsed["permissions"]["coordinator"]
+    assert profile["extends"] == ":workspace"
+    assert profile["network"]["enabled"] is True
+    assert profile["network"]["unix_sockets"][str(socket)] == "allow"

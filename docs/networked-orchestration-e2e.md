@@ -29,23 +29,23 @@ The top-level session runs from the checked-in
 sibling projects, and all coordinator artifacts—including the path-resolved `goal.md`,
 child goal prompts, constitution, event stream, decisions, and result—live under
 `workspace/coordinator/`. Its `AGENTS.md` explicitly documents that application writes
-must be delegated over HTTP, though the broad POC sandbox means this is not enforced by
-the operating system.
+must be delegated over HTTP. The coordinator's workspace permission profile keeps the
+sibling projects outside its writable roots.
 
-Run it only when real Codex usage and a broad sandbox for the top-level coordinator
-are acceptable:
+Run it only when real Codex usage, outbound access for nested judges, and access to the
+local app-server socket are acceptable:
 
 ```sh
 uv run python -m codex_coordinator.live_e2e \
   --workspace /tmp/codex-orchestration-run
 ```
 
-The top-level coordinator uses `--dangerously-bypass-approvals-and-sandbox` because
-it must start a local server, reach the daemon socket, invoke nested Codex judges, and
-inspect both disposable projects without a human approval channel. It is instructed
-to make all child application edits through HTTP-managed sessions. The children and
-judges retain their narrower configurations. This separation demonstrates the
-mechanism; it is not a production security boundary.
+The top-level coordinator uses the `coordinator` permission profile from its copied
+`.codex/config.toml`. The profile extends the workspace baseline, enables networking
+for localhost and nested Codex judges, and allowlists only the resolved app-server Unix
+socket. It is instructed to make all child application edits through HTTP-managed
+sessions. The children and judges retain their narrower configurations. This
+separation demonstrates the mechanism; it is not a production security boundary.
 
 The harness defaults the coordinating session to `gpt-5.6-sol` with medium reasoning.
 Child workers and per-approval judges remain on `gpt-5.6-luna` with low reasoning to
@@ -89,8 +89,6 @@ fails if the network request was not explicitly denied, the project test request
 not approved once, an approval remains pending, or any black-box application check
 fails.
 
-The coordinator template itself uses a `workspace-write` baseline. The live harness
-still launches it with `--dangerously-bypass-approvals-and-sandbox`; that explicit
-override supplies the broad effective access needed for the daemon socket, localhost,
-nested judges, and sibling inspection. The template does not independently require a
-`danger-full-access` declaration.
+The coordinator template uses a named workspace permission profile. The harness
+resolves its `{{APP_SERVER_SOCKET}}` marker to the current user's control socket before
+launch and does not use `--dangerously-bypass-approvals-and-sandbox`.

@@ -84,8 +84,10 @@ The live runner is repository-local because it copies the checked-in examples. I
 copies the coordinator and child skeletons into three sibling project folders. The
 full goal is checked in at `examples/coordinator/goal.md`; the harness substitutes
 only runtime project paths in the copied file at `workspace/coordinator/goal.md` and
-starts a privileged `gpt-5.6-sol` coordinating `codex exec` with medium reasoning
-there. Workers and approval judges stay on `gpt-5.6-luna` with low reasoning. The
+starts a `gpt-5.6-sol` coordinating `codex exec` with medium reasoning there. Its
+project-local permission profile grants workspace execution, network access, and the
+specific app-server Unix socket instead of bypassing the sandbox. Workers and approval
+judges stay on `gpt-5.6-luna` with low reasoning. The
 coordinator starts the service itself, creates two workspace-write child sessions,
 scans the service's stdout, and launches a separate read-only `codex exec` judge for
 each approval. The terminal shows a compact timeline containing session prompts,

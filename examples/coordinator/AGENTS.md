@@ -11,6 +11,7 @@ This project is the control room for the orchestration experiment.
 - Direct reads of child outputs and direct test execution are allowed for integration
   verification in this proof of concept.
 
-The final restriction is prompt-level, not an operating-system boundary. This
-coordinator uses a broad sandbox so it can access localhost, the daemon socket, and
-nested Codex processes; therefore it is technically capable of editing sibling files.
+The coordinator permission profile makes this project writable but leaves sibling
+projects read-only to the coordinator process. It separately enables networking and
+allowlists the app-server control socket so session management and nested judges work
+without granting direct write access to child projects.

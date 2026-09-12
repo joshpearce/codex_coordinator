@@ -1,7 +1,15 @@
-# Safe baseline for opening this template directly. The live harness explicitly uses
-# --dangerously-bypass-approvals-and-sandbox because the POC must reach the daemon
-# socket and localhost, start nested Codex processes, and inspect sibling projects.
+# The live harness resolves the app-server socket path before starting Codex.
 approval_policy = "never"
-sandbox_mode = "workspace-write"
+default_permissions = "coordinator"
 model = "gpt-5.6-sol"
 model_reasoning_effort = "medium"
+
+[permissions.coordinator]
+extends = ":workspace"
+
+[permissions.coordinator.network]
+enabled = true
+mode = "full"
+
+[permissions.coordinator.network.unix_sockets]
+"{{APP_SERVER_SOCKET}}" = "allow"

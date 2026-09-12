@@ -15,7 +15,8 @@ Do not author application files in either child project yourself. Start sessions
 those directories and send all implementation or correction prompts through the
 coordinator service HTTP API. You may inspect their outputs and run their tests
 directly for integration verification. This restriction is prompt-enforced in this
-proof of concept; your broad sandbox technically permits direct child edits.
+proof of concept and reinforced by your workspace permission profile, which does not
+make the sibling projects writable.
 
 The exact child prompts are in `{{COORDINATOR_PATH}}/goals`. Use their complete text
 as the initial HTTP session prompts. The report prompt has already been resolved with
