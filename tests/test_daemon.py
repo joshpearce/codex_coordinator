@@ -1,0 +1,56 @@
+from pathlib import Path
+
+import pytest
+
+from codex_coordinator.daemon import ensure_daemon, probe_local_socket, validate_local_socket
+
+
+def test_socket_target_must_be_private_unix_socket(tmp_path: Path):
+    target = tmp_path / "control.sock"
+    target.write_text("not a socket")
+    with pytest.raises(ValueError, match="not a Unix socket"):
+        validate_local_socket(target)
+    link = tmp_path / "linked.sock"
+    link.symlink_to(target)
+    with pytest.raises(ValueError, match="not a Unix socket"):
+        validate_local_socket(link)
+
+
+def test_socket_parent_must_be_owner_controlled(tmp_path: Path):
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o777)
+    try:
+        with pytest.raises(ValueError, match="parent must be owner-controlled"):
+            validate_local_socket(parent / "control.sock")
+    finally:
+        parent.chmod(0o700)
+
+
+@pytest.mark.asyncio
+async def test_custom_socket_does_not_start_unrelated_default_daemon(tmp_path: Path):
+    with pytest.raises(RuntimeError, match="start an app-server listener"):
+        await ensure_daemon(socket_path=tmp_path / "custom.sock")
+
+
+def test_probe_reports_stale_or_unreachable_socket(monkeypatch, tmp_path: Path):
+    path = tmp_path / "stale.sock"
+    monkeypatch.setattr("codex_coordinator.daemon.validate_local_socket", lambda _path: None)
+
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, value):
+            assert value == 2
+
+        def connect(self, value):
+            assert value == str(path)
+            raise ConnectionRefusedError("stale socket")
+
+    monkeypatch.setattr("codex_coordinator.daemon.socket.socket", lambda *_args: Socket())
+    with pytest.raises(ConnectionError, match="not reachable"):
+        probe_local_socket(path)

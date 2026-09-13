@@ -1,5 +1,13 @@
 # Logs retain sensitive orchestration content
 
+## Status
+
+Partially addressed. Default stdout is metadata-only, known secret-bearing
+fields and environment values are redacted, and the source-only live harness
+creates its coordinator JSONL file privately without following an existing
+symlink. In-memory retention is bounded; redirected stdout and on-disk log
+retention remain operator responsibilities. This issue is not closed.
+
 ## Priority
 
 Low — data handling.

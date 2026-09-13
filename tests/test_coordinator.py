@@ -1,7 +1,10 @@
 import json
+import asyncio
+import tomllib
 from pathlib import Path
 
 import pytest
+import codex_coordinator.coordinator as coordinator_module
 
 from codex_coordinator.coordinator import (
     ApprovalCase,
@@ -12,6 +15,7 @@ from codex_coordinator.coordinator import (
     OneShotCodexJudge,
     SessionRegistration,
     WorkerPermissions,
+    codex_exec_json_runner,
     mutable_evidence,
 )
 
@@ -36,7 +40,6 @@ def file_request(thread="worker-1", **overrides):
         "turnId": "turn-1",
         "itemId": "item-1",
         "startedAtMs": 1,
-        "changes": [{"path": "safe.txt"}],
     }
     params.update(overrides)
     return {"method": ApprovalPolicy.FILE, "params": params}
@@ -100,6 +103,145 @@ def write_worker_config(project: Path, mode="workspace-write"):
 
 
 @pytest.mark.asyncio
+async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(coordinator_module, "_probe_judge_read_boundary", lambda *_: None)
+
+    class FakeProcess:
+        returncode = 0
+        async def communicate(self):
+            return b'{"verdict":"deny","reason":"test"}', b""
+
+    async def spawn(*command, **options):
+        captured["command"] = command
+        captured["cwd"] = options["cwd"]
+        assert list(Path(options["cwd"]).iterdir()) == []
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    output = await codex_exec_json_runner("judge this")
+    assert '"verdict":"deny"' in output
+    assert "--ignore-user-config" in captured["command"]
+    assert "--ignore-rules" in captured["command"]
+    assert "--skip-git-repo-check" in captured["command"]
+    assert "--cd" in captured["command"]
+    assert "--sandbox" not in captured["command"]
+    assert "--strict-config" in captured["command"]
+    command = captured["command"]
+    overrides = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--config"]
+    assert 'default_permissions="coordinator_judge"' in overrides
+    assert 'permissions.coordinator_judge.network.enabled=false' in overrides
+    filesystem = next(value.split("=", 1)[1] for value in overrides if value.startswith("permissions.coordinator_judge.filesystem="))
+    assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == {
+        ":root": "deny", ":minimal": "read", captured["cwd"]: "read",
+    }
+    disabled = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--disable"]
+    assert set(disabled) == {"shell_tool", "browser_use", "computer_use", "apps", "plugins", "multi_agent"}
+    assert not Path(captured["cwd"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_one_shot_judge_reaps_subprocess(monkeypatch):
+    started = asyncio.Event()
+    monkeypatch.setattr(coordinator_module, "_probe_judge_read_boundary", lambda *_: None)
+
+    class FakeProcess:
+        returncode = None
+        killed = False
+        waited = False
+
+        async def communicate(self):
+            started.set()
+            await asyncio.Event().wait()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            self.waited = True
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def spawn(*_command, **_options):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    task = asyncio.create_task(codex_exec_json_runner("judge this"))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert process.killed and process.waited
+
+
+@pytest.mark.asyncio
+async def test_timed_out_one_shot_judge_reaps_subprocess(monkeypatch):
+    monkeypatch.setattr(coordinator_module, "_probe_judge_read_boundary", lambda *_: None)
+    class FakeProcess:
+        returncode = None
+        killed = False
+        waited = False
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            self.waited = True
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def spawn(*_command, **_options):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(RuntimeError, match="judge timed out"):
+        await codex_exec_json_runner("judge this", timeout_seconds=0.001)
+    assert process.killed and process.waited
+
+
+def test_judge_read_probe_checks_allow_and_deny_with_same_profile(monkeypatch, tmp_path):
+    observed = {}
+
+    def run(command, **options):
+        observed["command"] = command
+        observed["options"] = options
+        assert Path(command[-2]).read_text() == "allowed evidence"
+        assert Path(command[-1]).read_text() == "must be denied"
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(coordinator_module.subprocess, "run", run)
+    coordinator_module._probe_judge_read_boundary("codex", str(tmp_path))
+    command = observed["command"]
+    assert command[:4] == ["codex", "sandbox", "--permission-profile", "coordinator_judge"]
+    overrides = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--config"]
+    assert overrides == list(coordinator_module.judge_permission_overrides(str(tmp_path)))
+    assert observed["options"]["timeout"] == 15
+    assert not Path(command[-2]).exists()
+    assert not Path(command[-1]).exists()
+
+
+@pytest.mark.asyncio
+async def test_judge_read_probe_failure_prevents_exec(monkeypatch, tmp_path):
+    def run(_command, **_options):
+        return type("Result", (), {"returncode": 1})()
+
+    async def forbidden_spawn(*_command, **_options):
+        raise AssertionError("judge exec must not start")
+
+    monkeypatch.setattr(coordinator_module.subprocess, "run", run)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
+    with pytest.raises(RuntimeError, match="read isolation could not be verified"):
+        await codex_exec_json_runner("judge this")
+
+
+@pytest.mark.asyncio
 async def test_starts_worker_with_runtime_enforced_project_only_sandbox(tmp_path: Path):
     write_worker_config(tmp_path)
     client = FakeClient()
@@ -112,6 +254,7 @@ async def test_starts_worker_with_runtime_enforced_project_only_sandbox(tmp_path
     assert start["cwd"] == str(tmp_path.resolve())
     assert start["approvalPolicy"] == "on-request"
     assert start["approvalsReviewer"] == "user"
+    assert "historyMode" not in start
     assert turn["sandboxPolicy"] == {
         "type": "workspaceWrite",
         "writableRoots": [str(tmp_path.resolve())],
@@ -121,10 +264,44 @@ async def test_starts_worker_with_runtime_enforced_project_only_sandbox(tmp_path
     }
 
 
+@pytest.mark.asyncio
+async def test_worker_effort_uses_turn_start_schema_field(tmp_path: Path):
+    write_worker_config(tmp_path)
+    client = FakeClient()
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), StaticJudge())
+    await JudgedSessionSupervisor(
+        client, handler, tmp_path, worker_reasoning_effort="medium",
+    ).start("Do the work")
+    assert "reasoningEffort" not in client.calls[0][1]
+    assert client.calls[1][1]["effort"] == "medium"
+
+
 def test_rejects_dangerous_local_worker_permissions(tmp_path: Path):
     write_worker_config(tmp_path, "danger-full-access")
     with pytest.raises(ValueError, match="unsafe or unsupported"):
         WorkerPermissions.from_project(tmp_path)
+
+
+def test_worker_config_symlink_cannot_escape_project(tmp_path: Path):
+    project = tmp_path / "worker"
+    project.mkdir()
+    (project / ".codex").mkdir()
+    external = tmp_path / "external.toml"
+    external.write_text(
+        'approval_policy = "on-request"\n'
+        'approvals_reviewer = "user"\n'
+        'sandbox_mode = "read-only"\n'
+    )
+    link = project / ".codex/config.toml"
+    link.symlink_to(external)
+    with pytest.raises(ValueError, match="escapes the registered project"):
+        WorkerPermissions.from_project(project)
+
+    link.unlink()
+    internal = project / "worker-config.toml"
+    internal.write_bytes(external.read_bytes())
+    link.symlink_to(internal)
+    assert WorkerPermissions.from_project(project).sandbox_mode == "read-only"
 
 
 @pytest.mark.asyncio
@@ -285,7 +462,10 @@ async def test_traversal_and_outside_paths_are_denied(tmp_path: Path, path):
     judge = StaticJudge()
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
     handler.register_worker("worker-1")
-    assert await handler(file_request(changes=[{"path": path}])) == {"decision": "decline"}
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "fileChange", "changes": [{"path": path}],
+    }
+    assert await handler(file_request()) == {"decision": "decline"}
     assert judge.cases == []
 
 
@@ -309,16 +489,21 @@ async def test_prefix_confusion_and_symlink_escape_are_denied(tmp_path: Path):
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
     handler.register_worker("worker-1")
     for path in (str(sibling / "x"), "link/x"):
-        assert await handler(file_request(changes=[{"path": path}])) == {"decision": "decline"}
+        handler.items[("worker-1", "turn-1", "item-1")] = {
+            "id": "item-1", "type": "fileChange", "changes": [{"path": path}],
+        }
+        assert await handler(file_request()) == {"decision": "decline"}
     assert judge.cases == []
 
 
 @pytest.mark.asyncio
-async def test_conflicting_correlated_file_evidence_fails_closed(tmp_path: Path):
+async def test_file_changes_in_request_are_rejected_even_with_correlated_item(tmp_path: Path):
     judge = StaticJudge()
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
     handler.register_worker("worker-1")
-    handler.items[("worker-1", "item-1")] = {"changes": [{"path": "actual.txt"}]}
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "fileChange", "changes": [{"path": "actual.txt"}],
+    }
     assert await handler(file_request(changes=[{"path": "claimed.txt"}])) == {"decision": "decline"}
     assert judge.cases == []
 
@@ -328,11 +513,60 @@ async def test_conflicting_correlated_command_evidence_fails_closed(tmp_path: Pa
     judge = StaticJudge()
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
     handler.register_worker("worker-1")
-    handler.items[("worker-1", "item-1")] = {
+    handler.items[("worker-1", "turn-1", "item-1")] = {
         "id": "item-1", "type": "commandExecution", "command": "safe-command"
     }
     assert await handler(command_request(command="different-command")) == {"decision": "decline"}
     assert judge.cases == []
+
+
+@pytest.mark.asyncio
+async def test_nullable_command_uses_only_same_turn_item_evidence(tmp_path: Path):
+    judge = StaticJudge()
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
+    handler.register_worker("worker-1")
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "commandExecution",
+        "command": "safe-command", "cwd": str(subdir),
+    }
+    assert await handler(command_request(turnId="turn-2", command=None, cwd=None)) == {"decision": "decline"}
+    assert await handler(command_request(command=None, cwd=".")) == {"decision": "decline"}
+    assert await handler(command_request(command=None, cwd=None)) == {"decision": "accept"}
+    assert judge.cases[0].request["command"] == "safe-command"
+    assert judge.cases[0].request["cwd"] == str(subdir)
+
+
+@pytest.mark.asyncio
+async def test_file_approval_cannot_reuse_prior_turn_item_evidence(tmp_path: Path):
+    judge = StaticJudge()
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
+    handler.register_worker("worker-1")
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "fileChange", "changes": [{"path": "safe.txt"}],
+    }
+    assert await handler(file_request(turnId="turn-2")) == {"decision": "decline"}
+    assert judge.cases == []
+
+
+@pytest.mark.asyncio
+async def test_one_shot_item_evidence_is_removed_on_completion(tmp_path: Path):
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), StaticJudge())
+    handler.register_worker("worker-1")
+    item = {"id": "item-1", "type": "fileChange", "changes": [{"path": "safe.txt"}]}
+    await handler.notification({
+        "method": "item/started", "params": {
+            "threadId": "worker-1", "turnId": "turn-1", "item": item,
+        },
+    })
+    assert handler.items
+    await handler.notification({
+        "method": "item/completed", "params": {
+            "threadId": "worker-1", "turnId": "turn-1", "item": item,
+        },
+    })
+    assert handler.items == {}
 
 
 @pytest.mark.asyncio
@@ -355,13 +589,13 @@ async def test_prompt_injection_in_file_metadata_cannot_override_path_ceiling(tm
     judge = StaticJudge()
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
     handler.register_worker("worker-1")
-    handler.items[("worker-1", "item-1")] = {
+    handler.items[("worker-1", "turn-1", "item-1")] = {
         "id": "item-1",
         "type": "fileChange",
         "summary": injection,
         "changes": [{"path": "/etc/shadow", "description": injection}],
     }
-    assert await handler(file_request(changes=None)) == {"decision": "decline"}
+    assert await handler(file_request()) == {"decision": "decline"}
     assert judge.cases == []
 
 

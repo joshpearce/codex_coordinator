@@ -350,7 +350,9 @@ async def _relay_coordinator_events(
             event = line
         renderer.coordinator(event)
 
-    with path.open("w") as log:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w") as log:
         while chunk := await stream.read(64 * 1024):
             buffered.extend(chunk)
             while (newline := buffered.find(b"\n")) >= 0:
@@ -362,6 +364,8 @@ async def _relay_coordinator_events(
 
 
 async def run(args: argparse.Namespace) -> int:
+    # The child service and coordinator inherit this before redirecting logs.
+    os.umask(0o077)
     renderer = OutputRenderer(verbose=args.verbose, json_output=args.json)
     repo = Path(__file__).resolve().parents[2]
     if args.workspace:

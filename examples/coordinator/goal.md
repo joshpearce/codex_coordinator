@@ -56,6 +56,11 @@ long-running shell execution:
 ```sh
 cd "{{REPO_PATH}}" && \
   uv run codex-coordinator-service --port 0 \
+    --allowed-root "{{INVENTORY_APP_PATH}}" \
+    --allowed-root "{{INVENTORY_REPORT_PATH}}" \
+    --worker-model gpt-5.6-luna \
+    --worker-reasoning-effort low \
+    --verbose-events \
   > "{{COORDINATOR_PATH}}/service.jsonl" 2>&1
 ```
 

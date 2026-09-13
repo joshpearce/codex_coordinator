@@ -1,11 +1,13 @@
 import asyncio
 import json
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from codex_coordinator.coordinator import WorkerPermissions
+from codex_coordinator.coordinator import WorkerPermissions, judge_permission_overrides
 
 
 async def _send(process, message):
@@ -22,6 +24,58 @@ async def _response(process, request_id, timeout=15):
         raise RuntimeError("app-server exited before responding")
 
     return await asyncio.wait_for(read(), timeout)
+
+
+@pytest.mark.asyncio
+async def test_real_app_server_initializes_with_disposable_state(tmp_path: Path):
+    if shutil.which("codex") is None:
+        pytest.skip("Codex CLI is not installed")
+    state = tmp_path / "codex-state"
+    state.mkdir()
+    codex_env = os.environ.copy()
+    codex_env["CODEX_HOME"] = str(state)
+    process = await asyncio.create_subprocess_exec(
+        "codex", "app-server", "--stdio", env=codex_env,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        await _send(process, {
+            "method": "initialize", "id": 1,
+            "params": {"clientInfo": {"name": "coordinator-handshake-test", "version": "1"}},
+        })
+        assert "result" in await _response(process, 1)
+    finally:
+        if process.returncode is None:
+            process.terminate()
+        await asyncio.wait_for(process.wait(), 3)
+
+
+def test_judge_permission_profile_denies_unrelated_file_read(tmp_path: Path):
+    """Prove the runtime enforces the exact profile used by one-shot judges."""
+    codex = shutil.which("codex")
+    if codex is None:
+        pytest.skip("Codex CLI is not installed")
+    evidence = tmp_path / "judge-evidence"
+    evidence.mkdir()
+    allowed = evidence / "allowed.txt"
+    allowed.write_text("allowed")
+    unrelated = tmp_path / "unrelated.txt"
+    unrelated.write_text("must stay unavailable")
+    assert unrelated.read_text() == "must stay unavailable"
+
+    overrides = judge_permission_overrides(str(evidence))
+    command = [codex, "sandbox", "--permission-profile", "coordinator_judge", "--cd", str(evidence)]
+    for override in overrides:
+        command.extend(("--config", override))
+    command.extend((
+        "--", "/bin/sh", "-c",
+        'cat "$1" >/dev/null && ! cat "$2" >/dev/null 2>&1',
+        "judge-read-probe", str(allowed), str(unrelated),
+    ))
+    result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio
@@ -54,8 +108,15 @@ async def test_real_execution_boundary_blocks_standard_temp_api_write(tmp_path: 
     )
     targets = (outside_temp, outside_child, outside_link)
     assert not any(path.exists() for path in targets)
+    # Codex persists app-server state under CODEX_HOME. Keep this test's state
+    # in its disposable project rather than requiring writes to the user's home.
+    state = tmp_path / "codex-state"
+    state.mkdir()
+    codex_env = os.environ.copy()
+    codex_env["CODEX_HOME"] = str(state)
     process = await asyncio.create_subprocess_exec(
         "codex", "app-server", "--stdio",
+        env=codex_env,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

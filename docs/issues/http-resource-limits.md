@@ -1,14 +1,22 @@
 # The HTTP parser has no resource limits
 
+## Status
+
+Implemented in the local parser with header, body, request-line, read-time,
+response-write-time, and concurrency limits. Handler slots are now released
+even when a client stalls response draining or the handler is cancelled.
+Oversized, slow-client, and saturation unit tests
+pass; loopback integration testing remains pending outside this sandbox.
+
 ## Priority
 
 Low — resilience.
 
 ## Problem
 
-The hand-written HTTP handler has no limits for header size, body size, read time,
-concurrent connections, or slow clients. A local client can hold resources or force
-large allocations even without valid requests.
+Originally, the hand-written HTTP handler had no limits for header size, body
+size, read time, concurrent connections, or slow clients. A local client could
+hold resources or force large allocations without valid requests.
 
 ## Desired behavior
 

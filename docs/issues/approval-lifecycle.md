@@ -1,14 +1,20 @@
 # Approval requests can remain pending forever
 
+## Status
+
+Implemented with configurable expiry, session cancellation, shutdown denial,
+late-verdict rejection, and correlated lifecycle events. Unit tests pass;
+the real app-server integration gate remains pending.
+
 ## Priority
 
 Low — resilience.
 
 ## Problem
 
-Approval futures intentionally have no timeout. If a coordinator disappears or
-misses an event, the worker request and broker state can remain pending for the
-service lifetime. Shutdown and session cancellation semantics are not defined.
+Originally, approval futures had no timeout. If a coordinator disappeared or
+missed an event, a worker request could remain pending for the service
+lifetime. Shutdown and session cancellation semantics were undefined.
 
 ## Desired behavior
 

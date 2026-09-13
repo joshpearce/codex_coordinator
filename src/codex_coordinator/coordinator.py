@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import subprocess
+import tempfile
 import tomllib
 import uuid
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -55,8 +58,14 @@ class WorkerPermissions:
 
     @classmethod
     def from_project(cls, project: Path) -> "WorkerPermissions":
-        path = project.resolve() / ".codex" / "config.toml"
-        with path.open("rb") as stream:
+        root = project.resolve(strict=True)
+        path = root / ".codex" / "config.toml"
+        target = path.resolve(strict=True)
+        if root not in target.parents:
+            raise ValueError(f"worker config escapes the registered project: {path}")
+        if not target.is_file():
+            raise ValueError(f"worker config must be a regular file: {path}")
+        with target.open("rb") as stream:
             config = tomllib.load(stream)
         result = cls(
             approval_policy=str(config.get("approval_policy", "")),
@@ -97,7 +106,7 @@ class ApprovalPolicy:
         "approvalId", "additionalPermissions", "environmentId", "networkApprovalContext",
         "proposedExecpolicyAmendment", "proposedNetworkPolicyAmendments",
     })
-    _FILE_FIELDS = _BASE_FIELDS | frozenset({"grantRoot", "reason", "changes"})
+    _FILE_FIELDS = _BASE_FIELDS | frozenset({"grantRoot", "reason"})
     _PERMISSION_FIELDS = _BASE_FIELDS | frozenset({"cwd", "permissions", "reason", "environmentId"})
     __slots__ = (
         "project", "sandbox_mode", "allow_session_approval", "allowed_permissions", "_sealed"
@@ -122,7 +131,7 @@ class ApprovalPolicy:
             raise ValueError("unsupported policy sandbox mode")
         self.sandbox_mode = sandbox_mode
         self.allow_session_approval = bool(allow_session_approval)
-        ceiling = copy.deepcopy(dict(allowed_permissions or {}))
+        ceiling = mutable_evidence(allowed_permissions or {})
         for key in allowed_permission_keys:
             ceiling.setdefault(key, True)
         if set(ceiling) - {"network", "fileSystem"}:
@@ -209,18 +218,25 @@ class ApprovalPolicy:
         declared: dict[str, Any],
         item: Mapping[str, Any] | None,
     ) -> None:
+        if item is not None and (
+            item.get("id") != request["itemId"]
+            or item.get("type") != "commandExecution"
+        ):
+            raise ValueError("conflicting command evidence")
         command = request.get("command")
+        if command is None and item is not None:
+            command = item.get("command")
         if not isinstance(command, str) or not command.strip():
             raise ValueError("missing or malformed command")
         if request.get("kind", "command") != "command":
             raise ValueError("unsupported command approval kind")
-        if item is not None and (
-            item.get("id") != request["itemId"]
-            or item.get("type") != "commandExecution"
-            or (item.get("command") is not None and item.get("command") != command)
-        ):
+        if item is not None and item.get("command") is not None and item.get("command") != command:
             raise ValueError("conflicting command evidence")
-        request["cwd"] = self.normalize_path(request.get("cwd") or str(self.project))
+        request["command"] = command
+        cwd = request.get("cwd") or (item.get("cwd") if item is not None else None)
+        request["cwd"] = self.normalize_path(cwd or str(self.project))
+        if item is not None and item.get("cwd") is not None and self.normalize_path(item["cwd"]) != request["cwd"]:
+            raise ValueError("conflicting command evidence")
         decisions = request.get("availableDecisions")
         if decisions is not None and (
             not isinstance(decisions, list)
@@ -305,11 +321,7 @@ class ApprovalPolicy:
         grant_root = request.get("grantRoot")
         if grant_root is not None:
             request["grantRoot"] = self.normalize_path(grant_root)
-        request_changes = request.get("changes")
-        item_changes = item.get("changes") if isinstance(item, Mapping) else None
-        if request_changes is not None and item_changes is not None and request_changes != item_changes:
-            raise ValueError("conflicting file-change evidence")
-        changes = item_changes if item_changes is not None else request_changes
+        changes = item.get("changes") if isinstance(item, Mapping) else None
         if not isinstance(changes, list) or not changes:
             raise ValueError("missing file-change evidence")
         normalized_changes = []
@@ -432,7 +444,11 @@ class SessionRegistration:
 
 
 class OneShotCodexJudge:
-    """Ask an isolated, non-mutating Codex invocation for advisory JSON."""
+    """Ask a minimally permissioned Codex invocation for advisory JSON.
+
+    The permission profile is defense in depth, not a verified read boundary
+    until the runtime denied-read gate passes on the supported platform.
+    """
 
     def __init__(
         self,
@@ -492,7 +508,7 @@ class JudgedApprovalHandler:
         self.judge = judge
         self.on_decision = on_decision
         self.registrations: dict[str, SessionRegistration] = {}
-        self.items: dict[tuple[str, str], Mapping[str, Any]] = {}
+        self.items: OrderedDict[tuple[str, str, str], Mapping[str, Any]] = OrderedDict()
 
     @property
     def worker_thread_ids(self) -> set[str]:
@@ -509,7 +525,7 @@ class JudgedApprovalHandler:
 
     async def notification(self, message: dict[str, Any]) -> None:
         """Retain only managed, identity-bound item evidence for file approvals."""
-        if not isinstance(message, dict) or message.get("method") != "item/started":
+        if not isinstance(message, dict) or message.get("method") not in {"item/started", "item/completed"}:
             return
         params = message.get("params")
         if not isinstance(params, dict):
@@ -517,10 +533,20 @@ class JudgedApprovalHandler:
         thread_id = params.get("threadId")
         if thread_id not in self.registrations:
             return
+        turn_id = params.get("turnId")
+        if not isinstance(turn_id, str) or not turn_id:
+            return
         item = params.get("item")
         if not isinstance(item, dict) or not isinstance(item.get("id"), str):
             return
-        self.items[(thread_id, item["id"])] = copy.deepcopy(item)
+        if message["method"] == "item/completed":
+            self.items.pop((thread_id, turn_id, item["id"]), None)
+            return
+        if len(json.dumps(item).encode()) > 64 * 1024:
+            return
+        self.items[(thread_id, turn_id, item["id"])] = copy.deepcopy(item)
+        if len(self.items) > 256:
+            self.items.popitem(last=False)
 
     async def __call__(self, message: dict[str, Any]) -> dict[str, Any]:
         method = message.get("method") if isinstance(message, dict) else ""
@@ -530,7 +556,8 @@ class JudgedApprovalHandler:
         if registration is None:
             return self._deny(method)
         item_id = params.get("itemId")
-        item = self.items.get((thread_id, item_id)) if isinstance(item_id, str) else None
+        turn_id = params.get("turnId")
+        item = self.items.get((thread_id, turn_id, item_id)) if isinstance(item_id, str) and isinstance(turn_id, str) else None
         try:
             case = registration.policy.normalize(message, session_id=registration.session_id, thread_id=thread_id, item=item)
         except ValueError:
@@ -566,32 +593,43 @@ class JudgedApprovalHandler:
 
 
 class JudgedSessionSupervisor:
-    def __init__(self, client: ProtocolClient, approvals: JudgedApprovalHandler, project: Path) -> None:
+    def __init__(
+        self, client: ProtocolClient, approvals: JudgedApprovalHandler, project: Path,
+        *, worker_model: str | None = None, worker_reasoning_effort: str | None = None,
+    ) -> None:
         self.client = client
         self.approvals = approvals
         self.project = project.resolve()
         self.permissions = WorkerPermissions.from_project(self.project)
+        self.worker_model = worker_model
+        self.worker_reasoning_effort = worker_reasoning_effort
         if approvals.policy.project != self.project:
             raise ValueError("approval policy project does not match worker project")
         if approvals.policy.sandbox_mode != self.permissions.sandbox_mode:
             raise ValueError("approval policy sandbox does not match worker configuration")
 
     async def start(self, prompt: str) -> str:
-        result = await self.client.call("thread/start", {
+        start_params = {
             "cwd": str(self.project), "runtimeWorkspaceRoots": [str(self.project)],
-            "historyMode": "paginated", "approvalPolicy": self.permissions.approval_policy,
+            "approvalPolicy": self.permissions.approval_policy,
             "approvalsReviewer": self.permissions.approvals_reviewer, "sandbox": self.permissions.sandbox_mode,
-        })
+        }
+        if self.worker_model:
+            start_params["model"] = self.worker_model
+        result = await self.client.call("thread/start", start_params)
         thread = result.get("thread", result)
         thread_id = str(thread.get("id") or thread.get("threadId") or "")
         if not thread_id:
             raise RuntimeError("thread/start returned no thread ID")
         self.approvals.register_worker(thread_id)
-        await self.client.call("turn/start", {
+        turn_params = {
             "threadId": thread_id, "cwd": str(self.project),
             "input": [{"type": "text", "text": prompt}], "turnTrigger": "codex-judged-worker",
             "sandboxPolicy": self.permissions.enforced_sandbox(self.project),
-        })
+        }
+        if self.worker_reasoning_effort:
+            turn_params["effort"] = self.worker_reasoning_effort
+        await self.client.call("turn/start", turn_params)
         return thread_id
 
     async def monitor(self, thread_id: str, *, max_seconds: float = 21600) -> str:
@@ -607,19 +645,86 @@ class JudgedSessionSupervisor:
         return "watch-timeout"
 
 
+def judge_permission_overrides(readable_directory: str) -> tuple[str, str, str]:
+    """Config overrides for a judge with only runtime and evidence-dir reads."""
+    directory = Path(readable_directory).resolve(strict=True)
+    if not directory.is_dir():
+        raise ValueError("judge readable directory must exist")
+    filesystem = (
+        'permissions.coordinator_judge.filesystem={":root"="deny",'
+        '":minimal"="read",'
+        f'{json.dumps(str(directory))}="read"}}'
+    )
+    return (
+        'default_permissions="coordinator_judge"',
+        filesystem,
+        'permissions.coordinator_judge.network.enabled=false',
+    )
+
+
+def _probe_judge_read_boundary(codex_command: str, readable_directory: str) -> None:
+    """Fail closed unless the configured judge profile denies a sibling read."""
+    directory = Path(readable_directory).resolve(strict=True)
+    with (
+        tempfile.TemporaryDirectory(prefix="judge-allowed-", dir=directory) as allowed_dir,
+        tempfile.TemporaryDirectory(prefix="judge-unrelated-") as unrelated_dir,
+    ):
+        allowed = Path(allowed_dir) / "evidence.txt"
+        unrelated = Path(unrelated_dir) / "unrelated.txt"
+        allowed.write_text("allowed evidence")
+        unrelated.write_text("must be denied")
+        command = [
+            codex_command, "sandbox", "--permission-profile", "coordinator_judge",
+            "--cd", str(directory),
+        ]
+        for override in judge_permission_overrides(str(directory)):
+            command.extend(("--config", override))
+        command.extend((
+            "--", "/bin/sh", "-c",
+            '/bin/cat "$1" >/dev/null && ! /bin/cat "$2" >/dev/null 2>&1',
+            "judge-read-probe", str(allowed), str(unrelated),
+        ))
+        try:
+            result = subprocess.run(command, capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("Codex judge read isolation could not be verified") from exc
+        if result.returncode != 0:
+            raise RuntimeError("Codex judge read isolation could not be verified")
+
+
 async def codex_exec_json_runner(
     prompt: str, *, codex_command: str = "codex", timeout_seconds: float = 120
 ) -> str:
-    process = await asyncio.create_subprocess_exec(
-        codex_command, "exec", "--sandbox", "read-only", "--config", 'approval_policy="never"',
-        "--ephemeral", prompt, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise RuntimeError("Codex judge timed out")
-    if process.returncode:
-        raise RuntimeError(f"Codex judge failed: {stderr.decode(errors='replace')}")
-    return stdout.decode(errors="replace")
+    with tempfile.TemporaryDirectory(prefix="codex-judge-") as temporary:
+        isolated_cwd = str(Path(temporary).resolve(strict=True))
+        await asyncio.to_thread(_probe_judge_read_boundary, codex_command, isolated_cwd)
+        permission_args = [
+            argument for override in judge_permission_overrides(isolated_cwd)
+            for argument in ("--config", override)
+        ]
+        process = await asyncio.create_subprocess_exec(
+            codex_command, "exec", "--strict-config", "--config", 'approval_policy="never"',
+            *permission_args,
+            "--disable", "shell_tool", "--disable", "browser_use",
+            "--disable", "computer_use", "--disable", "apps",
+            "--disable", "plugins", "--disable", "multi_agent",
+            "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
+            "--ephemeral", "--cd", isolated_cwd, prompt,
+            cwd=isolated_cwd,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            raise RuntimeError("Codex judge timed out")
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            raise
+        if process.returncode:
+            raise RuntimeError(f"Codex judge failed: {stderr.decode(errors='replace')}")
+        return stdout.decode(errors="replace")

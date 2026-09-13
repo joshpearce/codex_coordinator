@@ -1,15 +1,23 @@
 # Session creation accepts arbitrary project paths
 
+## Status
+
+Implemented in the service; non-network tests cover missing projects,
+out-of-root paths, and symlink escapes before project configuration is read.
+Worker config symlinks that resolve outside the canonical worker project are
+also rejected before thread creation.
+The real loopback integration gate still needs to run outside this sandbox.
+
 ## Priority
 
 Medium — scope and isolation.
 
 ## Problem
 
-`POST /sessions` resolves any supplied filesystem path and treats a compatible
-`.codex/config.toml` there as a worker project. There is no configured set of
-allowed project roots. A caller that can reach the local API can therefore start
-Codex in directories outside the intended exercise.
+Originally, `POST /sessions` resolved any supplied filesystem path and treated a
+compatible `.codex/config.toml` there as a worker project. It had no
+configured set of allowed project roots, so a local caller could start Codex
+outside the intended exercise.
 
 ## Desired behavior
 

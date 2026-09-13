@@ -1,6 +1,20 @@
-# Security issue priorities
+# Issue index
 
-This index prioritizes issues according to one rule: **high priority is reserved
+## Reusable coordinator roadmap
+
+[Goal: installable coordinator for generic local workflows](generic-coordination-goal.md)
+tracks six implementation issues:
+
+1. [Expose a reusable coordination API](generic-coordination-api.md)
+2. [Externalize trusted runtime configuration](trusted-runtime-configuration.md)
+3. [Make the CLI and example portable](portable-cli-and-example.md)
+4. [Define session, approval, and event lifecycles](session-lifecycle-and-events.md)
+5. [Enforce the supported security boundary](generic-coordination-security.md)
+6. [Verify the installed artifact and Codex compatibility](installed-artifact-and-compatibility.md)
+
+## Security issue priorities
+
+The security list below prioritizes issues according to one rule: **high priority is reserved
 for paths by which a project Codex session can influence, bypass, or confuse its
 own governance**. Network exposure, authentication, and socket protection are
 intentionally deferred for this local proof of concept.

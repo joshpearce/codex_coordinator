@@ -3,6 +3,7 @@ import inspect
 import json
 import re
 import shutil
+import stat
 import tomllib
 from pathlib import Path
 
@@ -124,6 +125,25 @@ async def test_large_coordinator_event_is_relayed_without_stream_limit_failure(
 
     assert json.loads(log.read_text()) == event
     assert json.loads(capsys.readouterr().out) == {"source": "coordinator", "event": event}
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_coordinator_log_refuses_existing_file_or_symlink(tmp_path: Path):
+    stream = asyncio.StreamReader()
+    stream.feed_eof()
+    log = tmp_path / "coordinator.jsonl"
+    log.write_text("original")
+    with pytest.raises(FileExistsError):
+        await _relay_coordinator_events(stream, log, OutputRenderer())
+    assert log.read_text() == "original"
+    log.unlink()
+    target = tmp_path / "unrelated.txt"
+    target.write_text("private")
+    log.symlink_to(target)
+    with pytest.raises(FileExistsError):
+        await _relay_coordinator_events(stream, log, OutputRenderer())
+    assert target.read_text() == "private"
 
 
 def test_human_output_shows_prompts_and_suppresses_token_deltas(capsys):
