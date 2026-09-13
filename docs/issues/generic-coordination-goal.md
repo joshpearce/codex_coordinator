@@ -2,7 +2,8 @@
 
 ## Status
 
-Open. The API, trusted-configuration, lifecycle, and portable-CLI children are complete.
+Open. The API, trusted-configuration, lifecycle, portable-CLI, and
+installed-artifact children are complete.
 Preflight command, compatibility gate, installed-wheel fixture, and strict
 generic live gate have implementation and tests. The full suite passed on the
 operator host with 172 tests, including the denied-read and sandbox boundary
@@ -10,7 +11,9 @@ checks. The installed-artifact gate and strict live generic Codex gate also
 passed there, including the accepted and declined command outcomes and the
 completed follow-up. The judge fails closed when its pre-invocation
 read-isolation probe cannot pass, but a live one-shot judge turn with the
-minimal profile and a hosted `Verify` CI run remain outstanding. A real
+minimal profile remains outstanding. A hosted macOS
+[Verify run](https://github.com/joshpearce/codex_coordinator/actions/runs/34750886066)
+passed for commit `5fb0e35`, including 175 tests and the installed-wheel gate. A real
 app-server initialization handshake passes with disposable local state.
 The owner intentionally chose to keep the package unlicensed, so license
 metadata is omitted. This is the parent implementation goal for turning the
@@ -46,9 +49,6 @@ individual fixes; closing this goal must not silently mark them resolved.
   minimal permissions profile. The denied-read regression test and
   pre-invocation probe passed on the operator host, but the live generic gate
   uses the example's exact-command judge rather than the one-shot Codex judge.
-- After these changes are committed and pushed through an authorized workflow,
-  observe a successful hosted `Verify` run for that revision. A workflow file or
-  a green local subset does not establish that CI has run it.
 
 ## End-to-end acceptance criteria
 

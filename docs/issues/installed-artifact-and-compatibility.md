@@ -2,13 +2,14 @@
 
 ## Status
 
-Open — child of [the generic coordination goal](generic-coordination-goal.md).
+Complete — child of [the generic coordination goal](generic-coordination-goal.md).
 A wheel and sdist built in isolation, fresh off-checkout installation, all
 entry points, installed two-project fixture, and Codex 0.154.0 generated-schema
 gate passed locally using cached wheels. The strict live release gate now
 passes on an unrestricted operator host: two unrelated workers produced the
 correlated accepted and declined approvals, both terminal turns, and a
-completed follow-up. A hosted CI run remains outstanding. The owner chose to
+completed follow-up. The hosted macOS [Verify run](https://github.com/joshpearce/codex_coordinator/actions/runs/34750886066)
+for commit `5fb0e35` passed 175 tests and the installed-wheel gate. The owner chose to
 keep the repository unlicensed for now, so
 package metadata intentionally omits a license; this is a documented owner
 decision, not an accidental packaging omission.
@@ -18,8 +19,9 @@ It accepts two existing operator-selected project paths and leaves their
 configuration unchanged; the full gate supplies those paths before attempting
 the live example. Its release checks raise explicit failures rather than relying
 on Python assertions that `-O` could remove.
-The `Verify` workflow is configured to run the full suite and installed gate
-in CI, but a hosted run of that workflow has not yet been observed. The full
+The `Verify` workflow runs the full suite and installed gate on macOS CI because
+the Ubuntu-hosted runner cannot start Codex's `bwrap` sandbox (`RTM_NEWADDR`
+permission error). The full
 local suite passed on the operator host with 172 tests, including the real
 judge denied-read, execution-boundary, and loopback-listener tests.
 Preflight now probes an existing socket listener, and both the service and
