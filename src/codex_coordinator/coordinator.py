@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import uuid
@@ -667,7 +669,29 @@ def judge_permission_overrides(
         if not invoked_path.is_file():
             raise ValueError(f"Codex executable is not a file: {invoked_path}")
         readable_paths[str(invoked_path)] = "read"
-        readable_paths[str(invoked_path.resolve(strict=True))] = "read"
+        resolved_path = invoked_path.resolve(strict=True)
+        readable_paths[str(resolved_path)] = "read"
+        # The npm launcher resolves a sibling host-specific native package.
+        # Permit only these trusted installation artifacts, not node_modules.
+        package_dir = resolved_path.parent.parent
+        if (
+            resolved_path.name == "codex.js"
+            and resolved_path.parent.name == "bin"
+            and package_dir.name == "codex"
+            and package_dir.parent.name == "@openai"
+        ):
+            os_name = {"darwin": "darwin", "linux": "linux", "win32": "win32"}.get(sys.platform)
+            arch_name = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(platform.machine().lower())
+            if os_name is None or arch_name is None:
+                raise ValueError("unsupported Codex npm launcher platform")
+            native_name = f"codex-{os_name}-{arch_name}"
+            native_package = package_dir.parent / native_name
+            nested_package = package_dir / "node_modules" / "@openai" / native_name
+            if not native_package.is_dir() and not nested_package.is_dir():
+                raise ValueError(f"Codex native npm package not found: {native_name}")
+            readable_paths[str(package_dir.resolve(strict=True))] = "read"
+            if native_package.is_dir():
+                readable_paths[str(native_package.resolve(strict=True))] = "read"
     filesystem_entries = ",".join(
         f"{json.dumps(path)}={json.dumps(access)}"
         for path, access in readable_paths.items()

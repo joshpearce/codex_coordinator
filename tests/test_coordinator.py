@@ -1,5 +1,7 @@
 import json
 import asyncio
+import platform
+import sys
 import tomllib
 from pathlib import Path
 
@@ -125,6 +127,33 @@ def test_judge_profile_allows_only_invoked_cli_and_resolved_target(monkeypatch, 
     expected = {
         ":root": "deny", ":minimal": "read", str(evidence): "read",
         str(link): "read", str(target): "read",
+    }
+    openssl_config = Path("/System/Library/OpenSSL/openssl.cnf")
+    if openssl_config.is_file():
+        expected[str(openssl_config)] = "read"
+    assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == expected
+
+
+def test_judge_profile_allows_only_codex_npm_runtime(monkeypatch, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    packages = tmp_path / "node_modules" / "@openai"
+    launcher = packages / "codex" / "bin" / "codex.js"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("fake launcher")
+    os_name = {"darwin": "darwin", "linux": "linux", "win32": "win32"}[sys.platform]
+    arch_name = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}[platform.machine().lower()]
+    native_package = packages / f"codex-{os_name}-{arch_name}"
+    native_package.mkdir()
+    monkeypatch.setattr(coordinator_module.shutil, "which", lambda _command: str(launcher))
+    overrides = coordinator_module.judge_permission_overrides(
+        str(evidence), codex_command="codex",
+    )
+    filesystem = next(value.split("=", 1)[1] for value in overrides if value.startswith("permissions.coordinator_judge.filesystem="))
+    expected = {
+        ":root": "deny", ":minimal": "read", str(evidence): "read",
+        str(launcher): "read", str(launcher.parent.parent): "read",
+        str(native_package): "read",
     }
     openssl_config = Path("/System/Library/OpenSSL/openssl.cnf")
     if openssl_config.is_file():
