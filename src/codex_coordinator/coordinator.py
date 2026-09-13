@@ -654,6 +654,11 @@ def judge_permission_overrides(
     if not directory.is_dir():
         raise ValueError("judge readable directory must exist")
     readable_paths = {":root": "deny", ":minimal": "read", str(directory): "read"}
+    # Node-based Codex launchers on macOS read this system configuration even
+    # for --version; :minimal does not currently include it.
+    openssl_config = Path("/System/Library/OpenSSL/openssl.cnf")
+    if openssl_config.is_file():
+        readable_paths[str(openssl_config)] = "read"
     if codex_command is not None:
         executable = shutil.which(codex_command)
         if executable is None:

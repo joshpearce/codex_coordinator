@@ -122,10 +122,14 @@ def test_judge_profile_allows_only_invoked_cli_and_resolved_target(monkeypatch, 
         str(evidence), codex_command="codex",
     )
     filesystem = next(value.split("=", 1)[1] for value in overrides if value.startswith("permissions.coordinator_judge.filesystem="))
-    assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == {
+    expected = {
         ":root": "deny", ":minimal": "read", str(evidence): "read",
         str(link): "read", str(target): "read",
     }
+    openssl_config = Path("/System/Library/OpenSSL/openssl.cnf")
+    if openssl_config.is_file():
+        expected[str(openssl_config)] = "read"
+    assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == expected
 
 
 @pytest.mark.asyncio
@@ -159,10 +163,14 @@ async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypa
     assert 'default_permissions="coordinator_judge"' in overrides
     assert 'permissions.coordinator_judge.network.enabled=false' in overrides
     filesystem = next(value.split("=", 1)[1] for value in overrides if value.startswith("permissions.coordinator_judge.filesystem="))
-    assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == {
+    expected = {
         ":root": "deny", ":minimal": "read", captured["cwd"]: "read",
         str(fake_codex_executable): "read",
     }
+    openssl_config = Path("/System/Library/OpenSSL/openssl.cnf")
+    if openssl_config.is_file():
+        expected[str(openssl_config)] = "read"
+    assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == expected
     disabled = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--disable"]
     assert set(disabled) == {"shell_tool", "browser_use", "computer_use", "apps", "plugins", "multi_agent"}
     assert not Path(captured["cwd"]).exists()
