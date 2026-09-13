@@ -185,7 +185,7 @@ def _make_project(root: Path, examples: Path, name: str) -> Path:
     return project
 
 
-def _resolve_template(path: Path, replacements: dict[str, Path]) -> str:
+def _resolve_template(path: Path, replacements: dict[str, Path | int]) -> str:
     rendered = path.read_text()
     for name, value in replacements.items():
         rendered = rendered.replace("{{" + name + "}}", str(value))
@@ -193,6 +193,24 @@ def _resolve_template(path: Path, replacements: dict[str, Path]) -> str:
         raise ValueError(f"unresolved template marker in {path}")
     path.write_text(rendered)
     return rendered
+
+
+async def _wait_for_service_port(process: asyncio.subprocess.Process, log: Path) -> int:
+    """Wait for the trusted control plane before launching the coordinator."""
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if log.exists():
+            for line in log.read_text(errors="replace").splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "service.started" and isinstance(event.get("port"), int):
+                    return event["port"]
+        if process.returncode is not None:
+            raise RuntimeError(f"service exited before startup; inspect {log}")
+        await asyncio.sleep(0.1)
+    raise TimeoutError(f"service did not start within 60 seconds; inspect {log}")
 
 
 class OutputRenderer:
@@ -387,6 +405,8 @@ async def run(args: argparse.Namespace) -> int:
         {
             "INVENTORY_APP_PATH": api_project,
             "INVENTORY_REPORT_PATH": ui_project,
+            "OPERATOR_PATH": operator,
+            "COORDINATOR_PATH": coordinator,
         },
     )
     _resolve_template(
@@ -398,14 +418,32 @@ async def run(args: argparse.Namespace) -> int:
             )
         },
     )
+    service_log = coordinator / "service.jsonl"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(service_log, flags, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        service_process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "codex_coordinator.service",
+            "--port", "0", "--config", str(operator / "operator.toml"),
+            "--verbose-events", cwd=repo,
+            stdout=stream, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+    try:
+        service_port = await _wait_for_service_port(service_process, service_log)
+    except BaseException:
+        if service_process.returncode is None:
+            os.killpg(service_process.pid, signal.SIGTERM)
+        await service_process.wait()
+        raise
     _resolve_template(
         coordinator / "goal.md",
         {
-            "REPO_PATH": repo,
             "COORDINATOR_PATH": coordinator,
             "OPERATOR_PATH": operator,
             "INVENTORY_APP_PATH": api_project,
             "INVENTORY_REPORT_PATH": ui_project,
+            "SERVICE_PORT": service_port,
         },
     )
     command = [
@@ -431,6 +469,12 @@ async def run(args: argparse.Namespace) -> int:
         model=args.coordinator_model,
         reasoningEffort=args.coordinator_reasoning_effort,
     )
+    relay_stop = asyncio.Event()
+    service_relay = asyncio.create_task(
+        _relay_service_events(
+            service_log, relay_stop, renderer
+        )
+    )
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,
@@ -438,12 +482,6 @@ async def run(args: argparse.Namespace) -> int:
         start_new_session=True,
     )
     assert process.stdout is not None
-    relay_stop = asyncio.Event()
-    service_relay = asyncio.create_task(
-        _relay_service_events(
-            coordinator / "service.jsonl", relay_stop, renderer
-        )
-    )
     coordinator_relay = asyncio.create_task(
         _relay_coordinator_events(
             process.stdout, coordinator / "coordinator.jsonl", renderer
@@ -456,6 +494,9 @@ async def run(args: argparse.Namespace) -> int:
         if process.returncode is None:
             os.killpg(process.pid, signal.SIGTERM)
             await process.wait()
+        if service_process.returncode is None:
+            os.killpg(service_process.pid, signal.SIGTERM)
+        await service_process.wait()
         relay_stop.set()
         await service_relay
         try:

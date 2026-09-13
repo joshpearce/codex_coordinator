@@ -63,6 +63,8 @@ def check(config: OperatorConfig, projects: list[Path], *, require_socket: bool 
         "socketPath": str(config.socket_path),
         "projects": validated,
         "judgePolicyConfigured": bool(config.judge_policy.strip()),
+        "approvalMode": config.approval_mode,
+        "constitutionConfigured": bool(config.constitution_text),
     }
 
 

@@ -9,6 +9,7 @@ import math
 import os
 import sys
 import uuid
+from functools import partial
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -25,8 +26,10 @@ from .coordinator import (
     JudgeDecision,
     Judge,
     JudgedApprovalHandler,
+    OneShotCodexJudge,
     SessionRegistration,
     WorkerPermissions,
+    codex_exec_json_runner,
     mutable_evidence,
 )
 from .config import OperatorConfig
@@ -291,6 +294,7 @@ class ApprovalBroker:
         finally:
             if judge_task is not None:
                 judge_task.cancel()
+                await asyncio.gather(judge_task, return_exceptions=True)
             self.pending.pop(approval_id, None)
 
     async def _judge(self, approval_id: str, case: ApprovalCase) -> None:
@@ -750,7 +754,7 @@ class HttpControlServer:
             except Exception:
                 status, result = 500, {"error": "internal server error"}
             payload = json.dumps(result, sort_keys=True).encode()
-            reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 404: "Not Found", 408: "Request Timeout", 410: "Gone", 413: "Payload Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(status, "OK")
+            reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 410: "Gone", 413: "Payload Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(status, "OK")
             writer.write(
                 f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
                 + payload
@@ -824,6 +828,8 @@ class HttpControlServer:
         if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "cancel":
             return 202, await self.service.cancel_session(parts[1])
         if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
+            if self.service.approvals.judge is not None:
+                return 403, {"error": "service-owned judging does not accept HTTP verdicts"}
             if set(body) - {"sessionId", "verdict", "reason", "permissions"}:
                 raise ValueError("unsupported approval resolution fields")
             response = self.service.approvals.resolve(
@@ -889,6 +895,8 @@ async def run(args: argparse.Namespace) -> None:
     })
     if not config.allowed_roots:
         raise ValueError("configure at least one allowed root before starting the service")
+    if config.approval_mode is None:
+        raise ValueError("configure approval_mode = 'service' or 'external' before starting the service")
     if args.host != "127.0.0.1":
         raise ValueError("the unauthenticated service is restricted to 127.0.0.1")
     await asyncio.to_thread(check_codex_compatibility, config.codex_command)
@@ -899,8 +907,20 @@ async def run(args: argparse.Namespace) -> None:
         capacity=config.event_capacity, max_bytes=config.event_max_bytes,
         verbose_output=args.verbose_events,
     )
+    judge = None
+    if config.approval_mode == "service":
+        assert config.constitution_text is not None
+        judge = OneShotCodexJudge(
+            partial(
+                codex_exec_json_runner,
+                codex_command=config.codex_command,
+                timeout_seconds=config.judge_timeout_seconds,
+            ),
+            policy_instructions=config.constitution_text,
+        )
     approvals = ApprovalBroker(
         events, approval_timeout_seconds=config.approval_timeout_seconds,
+        judge=judge,
         item_capacity=config.item_capacity, item_max_bytes=config.item_max_bytes,
     )
     try:

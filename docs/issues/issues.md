@@ -12,13 +12,12 @@ tracks six implementation issues:
 5. [Enforce the supported security boundary](generic-coordination-security.md)
 6. [Verify the installed artifact and Codex compatibility](installed-artifact-and-compatibility.md)
 
-## Next: agent-driven coordination
+## Resolved: agent-driven coordination approval governance
 
 [Make the service own constitutional approval judging](service-owned-constitutional-judge.md)
-tracks mandatory independent review of worker approvals without asking the
-coordinating Codex session to post its own approving verdicts. It follows the
-resolved broker policy issue below; deterministic verdict constraints alone do
-not prove that a judge was invoked.
+implements mandatory independent review of worker approvals without asking the
+coordinating Codex session to post its own approving verdicts. The service
+applies the deterministic verdict constraints after independent judging.
 
 ## Security issue priorities
 

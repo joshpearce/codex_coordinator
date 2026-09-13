@@ -56,8 +56,10 @@ service startup or embedding code to enable it. Unavailable verdicts are denied,
 not converted to a different approving response. A judge can always deny or narrow
 a permission request, but cannot expand its permission or lifetime ceiling.
 
-The one-shot adapter calls a `Judge` directly. The live broker emits a normalized
-`approval.requested` event and accepts a verdict over HTTP. In both cases, invalid
+The one-shot adapter calls a `Judge` directly. In service-owned mode, the live
+broker also invokes an independent restricted judge and rejects HTTP verdicts;
+explicit external mode instead accepts verdicts over HTTP. Both modes emit a
+normalized `approval.requested` event. In all paths, invalid
 responses, judge errors, ambiguity, conflicting evidence, and ceiling violations
 fail closed.
 
@@ -85,8 +87,9 @@ registration and runtime sandbox policy.
 
 ## Deliberate remaining scope
 
-The service still binds to loopback by default and has no HTTP authentication,
-durable state, approval timeout, or event-retention limit. Those medium, low, and
+The service still binds to loopback and has no HTTP authentication or
+durable state. Approval timeouts and bounded in-memory event retention are
+implemented. Remaining medium, low, and
 deferred issues remain separately tracked; they do not weaken request normalization
 or the execution boundary described here.
 

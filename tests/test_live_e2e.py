@@ -35,11 +35,11 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
     goal_template = (source / "goal.md").read_text()
     report_template = (source / "goals/inventory-report.md").read_text()
     assert set(re.findall(r"{{([A-Z_]+)}}", goal_template)) == {
-        "REPO_PATH",
         "COORDINATOR_PATH",
         "OPERATOR_PATH",
         "INVENTORY_APP_PATH",
         "INVENTORY_REPORT_PATH",
+        "SERVICE_PORT",
     }
     assert re.findall(r"{{([A-Z_]+)}}", report_template) == [
         "INVENTORY_APP_PATH"
@@ -54,26 +54,31 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
         {
             "INVENTORY_APP_PATH": inventory_app,
             "INVENTORY_REPORT_PATH": inventory_report,
+            "OPERATOR_PATH": operator,
+            "COORDINATOR_PATH": coordinator,
         },
     )
     rendered = _resolve_template(
         coordinator / "goal.md",
         {
-            "REPO_PATH": repo,
             "COORDINATOR_PATH": coordinator,
             "OPERATOR_PATH": operator,
             "INVENTORY_APP_PATH": inventory_app,
             "INVENTORY_REPORT_PATH": inventory_report,
+            "SERVICE_PORT": 8765,
         },
     )
 
     assert "{{" not in rendered
     assert str(inventory_app) in rendered
     assert str(inventory_report) in rendered
-    assert f'--config "{operator / "operator.toml"}"' in rendered
-    assert str(operator / "constitution.md") in rendered
+    assert "http://127.0.0.1:8765" in rendered
+    assert "Never invent or infer a decision" not in rendered
+    assert "Do not launch judges or POST" in rendered
     config = OperatorConfig.load(path=operator / "operator.toml", environ={})
     assert config.allowed_roots == (inventory_app, inventory_report)
+    assert config.approval_mode == "service"
+    assert config.constitution_text == (operator / "constitution.md").read_text()
     assert str(inventory_app) in (
         coordinator / "goals/inventory-report.md"
     ).read_text()

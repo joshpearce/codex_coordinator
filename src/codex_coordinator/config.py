@@ -22,6 +22,7 @@ _FIELDS = frozenset({
     "worker_model", "worker_reasoning_effort", "allow_session_approval",
     "approval_timeout_seconds", "judge_policy", "judge_timeout_seconds",
     "event_capacity", "event_max_bytes", "item_capacity", "item_max_bytes",
+    "approval_mode", "constitution_path", "coordinator_root",
 })
 _ENV_FIELDS = {
     "CODEX_COORDINATOR_ALLOWED_ROOTS": "allowed_roots",
@@ -38,7 +39,28 @@ _ENV_FIELDS = {
     "CODEX_COORDINATOR_EVENT_MAX_BYTES": "event_max_bytes",
     "CODEX_COORDINATOR_ITEM_CAPACITY": "item_capacity",
     "CODEX_COORDINATOR_ITEM_MAX_BYTES": "item_max_bytes",
+    "CODEX_COORDINATOR_APPROVAL_MODE": "approval_mode",
+    "CODEX_COORDINATOR_CONSTITUTION_PATH": "constitution_path",
+    "CODEX_COORDINATOR_COORDINATOR_ROOT": "coordinator_root",
 }
+
+
+def _trusted_policy_file(path: Path, label: str) -> str:
+    info = path.lstat()
+    parent_info = path.parent.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError(f"{label} must be an owner-controlled regular file")
+    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o022:
+        raise ValueError(f"{label} parent must be owner-controlled")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ValueError(f"{label} must be an owner-controlled regular file") from exc
+    with os.fdopen(descriptor, encoding="utf-8") as stream:
+        opened = os.fstat(stream.fileno())
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError(f"{label} changed during validation")
+        return stream.read()
 
 
 def _absolute_path(value: Any, field: str) -> Path:
@@ -101,6 +123,10 @@ class OperatorConfig:
     event_max_bytes: int
     item_capacity: int
     item_max_bytes: int
+    approval_mode: str | None
+    constitution_path: Path | None
+    constitution_text: str | None
+    coordinator_root: Path | None
 
     @classmethod
     def load(
@@ -128,19 +154,15 @@ class OperatorConfig:
             "event_max_bytes": 8 * 1024 * 1024,
             "item_capacity": 256,
             "item_max_bytes": 64 * 1024,
+            "approval_mode": None,
+            "constitution_path": None,
+            "coordinator_root": None,
         }
         if config_path is not None:
             config_path = Path(config_path).expanduser()
             if not config_path.is_absolute():
                 raise ValueError("operator config path must be absolute")
-            info = config_path.lstat()
-            parent_info = config_path.parent.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-                raise ValueError("operator config must be an owner-controlled regular file")
-            if parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o022:
-                raise ValueError("operator config parent must be owner-controlled")
-            with config_path.open("rb") as stream:
-                loaded = tomllib.load(stream)
+            loaded = tomllib.loads(_trusted_policy_file(config_path, "operator config"))
             if set(loaded) - _FIELDS:
                 raise ValueError(f"unsupported operator config fields: {sorted(set(loaded) - _FIELDS)}")
             values.update(loaded)
@@ -180,6 +202,41 @@ class OperatorConfig:
                 for root in canonical_roots
             ):
                 raise ValueError("operator config must be outside worker-writable allowed roots")
+
+        mode = values["approval_mode"]
+        if mode is not None and mode not in {"service", "external"}:
+            raise ValueError("approval_mode must be 'service' or 'external'")
+        raw_constitution = values["constitution_path"]
+        raw_coordinator = values["coordinator_root"]
+        constitution_path = None
+        constitution_text = None
+        coordinator_root = None
+        if raw_coordinator is not None:
+            coordinator_root = _absolute_path(raw_coordinator, "coordinator_root")
+            if not coordinator_root.is_dir():
+                raise ValueError("coordinator_root must be an existing directory")
+        if mode == "service":
+            if raw_constitution is None or coordinator_root is None or config_path is None:
+                raise ValueError("service judging requires operator.toml, constitution_path, and coordinator_root")
+            if not isinstance(raw_constitution, (str, Path)):
+                raise ValueError("constitution_path must be an absolute path")
+            constitution_path = Path(raw_constitution).expanduser()
+            if not constitution_path.is_absolute():
+                raise ValueError("constitution_path must be an absolute path")
+            constitution_text = _trusted_policy_file(constitution_path, "constitution")
+            canonical_constitution = constitution_path.resolve(strict=True)
+            if any(
+                path == root or root in path.parents
+                for path in (canonical_constitution, config_path.resolve(strict=True))
+                for root in (*canonical_roots, coordinator_root)
+            ):
+                raise ValueError("trusted policy files must be outside coordinator- and worker-writable roots")
+            if canonical_constitution.parent != config_path.parent.resolve(strict=True):
+                raise ValueError("constitution must be alongside operator.toml")
+            if not constitution_text.strip():
+                raise ValueError("constitution must not be empty")
+        elif raw_constitution is not None:
+            raise ValueError("constitution_path requires approval_mode = 'service'")
 
         raw_ceilings = values["permission_ceilings"]
         if not isinstance(raw_ceilings, Mapping):
@@ -223,4 +280,8 @@ class OperatorConfig:
             event_max_bytes=_positive_count(values["event_max_bytes"], "event_max_bytes", 256),
             item_capacity=_positive_count(values["item_capacity"], "item_capacity"),
             item_max_bytes=_positive_count(values["item_max_bytes"], "item_max_bytes", 256),
+            approval_mode=mode,
+            constitution_path=constitution_path,
+            constitution_text=constitution_text,
+            coordinator_root=coordinator_root,
         )

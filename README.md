@@ -59,15 +59,17 @@ matches the pinned version.
 
 Keep `operator.toml` and `constitution.md` together outside worker-writable roots.
 Starting from the cloned repository, this creates a private workspace beside
-the checkout, with an operator directory and two sibling worker projects:
+the checkout, with an operator directory, a coordinating Codex project, and
+two sibling worker projects:
 
 ```sh
 umask 077
 WORKSPACE_DIR="$(cd .. && pwd -P)/codex-coordination-demo"
 COORD_DIR="$WORKSPACE_DIR/operator"
+COORDINATOR_PROJECT="$WORKSPACE_DIR/coordinator"
 PROJECT_A="$WORKSPACE_DIR/project-a"
 PROJECT_B="$WORKSPACE_DIR/project-b"
-mkdir -p "$COORD_DIR" "$PROJECT_A" "$PROJECT_B"
+mkdir -p "$COORD_DIR" "$COORDINATOR_PROJECT" "$PROJECT_A" "$PROJECT_B"
 ```
 
 To coordinate **existing** projects instead, set `PROJECT_A` and `PROJECT_B`
@@ -80,8 +82,8 @@ PROJECT_B="/absolute/path/to/existing-project-b"
 
 The projects must exist and must not be nested inside one another. Choose a
 fresh `WORKSPACE_DIR` for this example; its two operator files must remain
-outside both worker projects. The live E2E fixture uses the same layout and
-adds a separate `workspace/coordinator/` Codex project beside the two workers.
+outside the coordinator and both worker projects. The live E2E fixture uses
+the same four-directory layout.
 
 ### 4. Configure the workers and the operator
 
@@ -108,53 +110,47 @@ project; the coordinator disables worker network access. Choose `read-only`
 explicitly for inspection-only workers.
 
 Copy the example constitution, then create an operator-owned config outside the
-worker roots. The two project paths are the complete allowed-root list:
+coordinator and worker roots. The two worker paths are the complete allowed-root
+list; `coordinator_root` identifies the project that must not be able to edit
+trusted policy:
 
 ```sh
 cp examples/operator/constitution.md "$COORD_DIR/constitution.md"
-printf 'allowed_roots = ["%s", "%s"]\n' \
+printf 'approval_mode = "service"\nconstitution_path = "%s"\ncoordinator_root = "%s"\nallowed_roots = ["%s", "%s"]\n' \
+  "$COORD_DIR/constitution.md" "$COORDINATOR_PROJECT" \
   "$PROJECT_A" "$PROJECT_B" > "$COORD_DIR/operator.toml"
 ```
 
 Review both files before use. `operator.toml` must be an owner-controlled
-regular file in an owner-controlled directory, outside every worker-writable
-allowed root. Keep the constitution operator-controlled too: it supplies the
-judge's rules, not the worker's instructions. Do not put either file in a
+regular file in an owner-controlled directory, outside the coordinator and
+every worker-writable allowed root. Keep the constitution operator-controlled
+too: it supplies the judge's rules, not the worker's instructions. Do not put either file in a
 worker project's `.codex` directory. For paths containing a literal quote or
 backslash, write valid TOML strings by hand instead of using the simple
 `printf` template.
 
-### 5. Preflight and run a worker
+### 5. Preflight and start the service
 
 ```sh
 codex-coordinator-preflight --config "$COORD_DIR/operator.toml" \
   --project "$PROJECT_A" --project "$PROJECT_B"
-codex-coordinator --config "$COORD_DIR/operator.toml" \
-  "$PROJECT_A" "Inspect this project and report a short summary; do not edit files." \
-  "$(cat "$COORD_DIR/constitution.md")"
+codex-coordinator-service --config "$COORD_DIR/operator.toml" --port 8765
 ```
 
 Preflight checks the CLI version and schema, sign-in, allowed roots, worker
 settings, and socket safety. `"socketReady": false` is normal if the default
-Codex app-server daemon has not started; the one-shot command starts it as
-needed. The command prints a JSON report with the worker's final state and any
-approval decisions. Its independent one-shot Codex judge is advisory; invalid
-or unavailable verdicts are denied.
+Codex app-server daemon has not started; the service starts it as needed.
+Leave the service running while coordinating work. It loads `constitution.md`
+once at startup and runs an independent restricted judge for each valid worker
+approval; invalid or unavailable verdicts are denied.
 
 ## Coordinate multiple projects
 
-The service can run multiple workers concurrently. It uses the same
-`operator.toml` but **does not supply its own judge** or read `constitution.md`:
-an external trusted judge or an operator must read the constitution and each
-`approval.requested` event, then post verdicts.
+The service can run multiple workers concurrently. In the configured `service`
+mode, it owns judging and rejects HTTP approval verdicts, so a coordinating
+agent cannot bypass `constitution.md` by posting its own approval.
 Unanswered requests are denied after the configured timeout (300 seconds by
 default).
-
-Start it in one terminal with the virtual environment active:
-
-```sh
-codex-coordinator-service --config "$COORD_DIR/operator.toml" --port 8765
-```
 
 Open another terminal in the cloned repository and activate its environment.
 For the newly created projects, restore the same path variables; for existing
@@ -164,6 +160,7 @@ projects, set them to the absolute paths you chose in step 3:
 . .venv/bin/activate
 WORKSPACE_DIR="$(cd .. && pwd -P)/codex-coordination-demo"
 COORD_DIR="$WORKSPACE_DIR/operator"
+COORDINATOR_PROJECT="$WORKSPACE_DIR/coordinator"
 PROJECT_A="$WORKSPACE_DIR/project-a"
 PROJECT_B="$WORKSPACE_DIR/project-b"
 ```
@@ -181,17 +178,11 @@ curl -sS http://127.0.0.1:8765/sessions
 curl -sS 'http://127.0.0.1:8765/events?after=0'
 ```
 
-The returned session objects have IDs for follow-ups and cancellation. To
-resolve a pending approval, take its `approvalId` and `sessionId` from the
-event stream and send a verdict such as `deny`:
-
-```sh
-curl -sS -X POST "http://127.0.0.1:8765/approvals/APPROVAL_ID" \
-  -H 'Content-Type: application/json' \
-  -d '{"sessionId":"SESSION_ID","verdict":"deny","reason":"not approved"}'
-```
-
-Replace the two uppercase IDs with the actual values. The local API also
+The returned session objects have IDs for follow-ups and cancellation. Start a
+Codex session in `$COORDINATOR_PROJECT` and give it a cross-project goal: it
+can use these same HTTP operations to dispatch tasks, monitor event and session
+state, follow up, and verify results. It must not POST verdicts to `/approvals`.
+The local API also
 supports `POST /sessions/{id}/messages` after a turn completes,
 `POST /sessions/{id}/cancel`, `GET /health`, and `POST /shutdown`.
 For example, after a session reaches `completed`, send a follow-up and then
@@ -250,10 +241,14 @@ manual judge or an exact-command release gate.
 `OperatorConfig` loads built-in defaults, then an optional `operator.toml`, then
 `CODEX_COORDINATOR_*` environment variables, then explicit CLI options. The
 required setting is `allowed_roots`, which can also be supplied with
-`--allowed-root`. The one-shot command accepts the text of `constitution.md`
-as its third positional argument for its built-in judge; the HTTP service
-does not read `judge_policy` or run a judge. Optional
-settings include `codex_command`, `socket_path`,
+`--allowed-root`. The service requires an explicit `approval_mode`:
+`service` loads an operator-owned `constitution_path` and runs its own judge;
+`external` leaves verdicts to a trusted external actor and enables the HTTP
+approval endpoint. To use that legacy mode, set `approval_mode = "external"`
+and omit `constitution_path`; the caller must resolve every approval. There
+is no silent fallback between modes. The one-shot command still accepts
+judge-policy text as its third positional argument. Optional settings include
+`codex_command`, `socket_path`,
 `worker_model`, `worker_reasoning_effort`, `permission_ceilings`,
 `allow_session_approval`, approval/judge timeouts, and event/item retention
 limits. Paths in the config must be absolute. A custom app-server socket must

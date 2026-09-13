@@ -25,7 +25,11 @@ ambient temporary-directory write access. The coordinator process itself is
 not network-sandboxed; its network privileges must be considered trusted.
 Operator TOML must be an owner-controlled regular file outside every
 worker-writable allowed root; symlinked or group/other-writable files fail
-validation.
+validation. Service-owned judging also requires a same-directory constitution
+file and an explicit coordinator root. Both trusted policy files must be outside
+the coordinator and worker roots. The constitution is snapshotted at startup;
+HTTP verdict submissions are rejected in this mode. Explicit `external` mode
+allows a trusted actor to submit verdicts but does not itself run a judge.
 
 By default, stdout JSONL contains metadata only. `--verbose-events` opts into
 payload output for the source-only live experiment; known secret-bearing field
@@ -37,7 +41,7 @@ The live experiment sets a private umask for its generated files. Its
 coordinator JSONL log is created mode `0600` and refuses an existing file or
 symlink rather than overwriting it.
 
-The one-shot `codex exec` judge now requests a deny-by-default filesystem
+The one-shot and service-owned `codex exec` judges request a deny-by-default filesystem
 permission profile, grants reads only to Codex's minimal runtime paths, its
 resolved installed runtime (and macOS system OpenSSL configuration if present),
 and its empty temporary evidence directory. It disables auxiliary tools and

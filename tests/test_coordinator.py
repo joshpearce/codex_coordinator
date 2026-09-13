@@ -174,7 +174,10 @@ async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypa
     async def spawn(*command, **options):
         captured["command"] = command
         captured["cwd"] = options["cwd"]
-        assert list(Path(options["cwd"]).iterdir()) == []
+        files = list(Path(options["cwd"]).iterdir())
+        assert [item.name for item in files] == ["decision.schema.json"]
+        schema = json.loads(files[0].read_text())
+        assert schema["required"] == ["verdict", "reason"]
         return FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
@@ -186,6 +189,7 @@ async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypa
     assert "--cd" in captured["command"]
     assert "--sandbox" not in captured["command"]
     assert "--strict-config" in captured["command"]
+    assert "--output-schema" in captured["command"]
     command = captured["command"]
     assert command[0] == str(fake_codex_executable)
     overrides = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--config"]

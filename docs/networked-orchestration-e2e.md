@@ -4,12 +4,13 @@ This opt-in experiment makes the deliberately recursive architecture concrete:
 
 ```text
 live_e2e harness
-  └─ coordinating `codex exec`
-       ├─ starts `codex-coordinator-service` with no process timeout
-       │    └─ owns app-server WebSocket and child threads
+  ├─ starts trusted `codex-coordinator-service` outside the coordinator sandbox
+  │    ├─ owns app-server WebSocket and child threads
+  │    └─ independently judges worker approvals
+  └─ starts coordinating `codex exec`
        ├─ scans the service stdout JSONL file
        ├─ calls the loopback HTTP API with curl
-       └─ for each approval, starts a fresh `codex exec` judge
+       └─ observes approval outcomes and verifies worker results
 ```
 
 The two child sessions concurrently complete compatible inventory applications in
@@ -23,7 +24,8 @@ while the service remains the middle-man for creating the session and sending tu
 The inventory child is instructed to make an explicit approval-path request for a
 project-local test command and to attempt a network operation. The
 [constitution](../examples/operator/constitution.md) allows the former and denies
-the latter. The coordinator must observe at least one `approve_once` and one `deny`,
+the latter. The service judges approvals using the operator-owned constitution.
+The coordinator must observe at least one `approve_once` and one `deny`,
 reconcile the applications, run their tests, write `result.json`, and shut down the
 service.
 
@@ -38,7 +40,7 @@ under `workspace/coordinator/`. Its `AGENTS.md` documents that application write
 must be delegated over HTTP. The coordinator's workspace permission profile keeps the
 sibling projects outside its writable roots.
 
-Run it only when real Codex usage, outbound access for nested judges, and access to the
+Run it only when real Codex usage, outbound access for service-owned judges, and access to the
 local app-server socket are acceptable:
 
 ```sh
@@ -48,24 +50,28 @@ uv run python -m codex_coordinator.live_e2e \
 
 The top-level coordinator uses the `coordinator` permission profile from its copied
 `.codex/config.toml`. The profile extends the workspace baseline, enables networking
-for localhost and nested Codex judges, and allowlists only the resolved app-server Unix
+for localhost service calls, and allowlists only the resolved app-server Unix
 socket. It is instructed to make all child application edits through HTTP-managed
 sessions. The children and judges retain their narrower configurations. This
 separation demonstrates the mechanism; it is not a production security boundary.
 
 The harness defaults the coordinating session to `gpt-5.6-sol` with medium reasoning.
-Child workers and per-approval judges remain on `gpt-5.6-luna` with low reasoning to
-keep the repeated work quick. The coordinator model and reasoning effort can be
-overridden with command-line options.
+Child workers use `gpt-5.6-luna` with low reasoning to keep repeated work quick.
+Per-approval judges use the configured Codex CLI's default model and reasoning
+settings. The coordinator model and reasoning effort can be overridden with
+command-line options.
 
-The service has no approval timeout. The harness terminates the coordinator's process
-group if interrupted, preventing the nested service from being left behind. Every
+The service has a configurable approval timeout (300 seconds by default). The
+harness terminates both the coordinator and service process groups if interrupted.
+Every
 generated workspace is preserved, including the goal prompt, stdout events, final
 response, child projects, and summary, if produced.
 
-The coordinating session starts the service as a foreground command held by its shell
-execution session. It intentionally does not daemonize with `nohup`: managed execution
-hosts may reap detached descendants as soon as the launching tool call returns.
+The trusted harness starts the service before the coordinating session and passes
+its loopback port into the goal. The service is outside the coordinator's writable
+project, so its restricted judge can run without nesting inside the coordinator's
+Codex sandbox. The coordinator may call the control API but cannot start a second
+service or submit an approval verdict.
 The harness stores the full coordinator stream in `coordinator.jsonl`; the service
 already records its complete stream in `service.jsonl`. By default, the terminal
 filters both into a human-readable timeline. Initial child prompts and all follow-up
@@ -83,7 +89,7 @@ make live-e2e LIVE_E2E_ARGS=--verbose
 
 The ordinary `pytest` suite does not consume Codex usage. It deterministically covers
 the same critical plumbing: concurrent RPC multiplexing, stdout approval emission,
-HTTP verdict submission, and child-session creation.
+service-owned verdict resolution, and child-session creation.
 
 The live scenario is intentionally opt-in and is not part of the automated test
 suite; completion depends on model behavior and consumes Codex usage.

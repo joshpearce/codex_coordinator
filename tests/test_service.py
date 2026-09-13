@@ -145,6 +145,118 @@ async def test_managed_approval_is_resolved_through_session_bound_http(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_service_owned_judge_handles_concurrent_workers_without_http_bypass(tmp_path: Path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen = []
+
+    class Judge:
+        async def decide(self, case):
+            seen.append((case.session_id, case.request["command"]))
+            if len(seen) == 2:
+                entered.set()
+            await release.wait()
+            verdict = "deny" if "network" in case.request["command"] else "approve_once"
+            return JudgeDecision(verdict, "constitutional review")
+
+    socket = QueueSocket()
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    register(broker, first, thread="worker-1", session="session-1")
+    register(broker, second, thread="worker-2", session="session-2")
+    service = CoordinatorService(object(), broker, events)
+    server = HttpControlServer(service)
+    client = ProtocolClient(socket, broker, response_sent_handler=broker.response_sent)
+    await client.start()
+    await socket.incoming.put(command_request(thread="worker-1", command="python -m unittest"))
+    second_request = command_request(thread="worker-2", command="network curl example.com")
+    second_request["id"] = 8
+    await socket.incoming.put(second_request)
+    await asyncio.wait_for(entered.wait(), 1)
+    assert len(broker.pending) == 2
+    first_approval = next(iter(broker.pending))
+    status, response = await http_json(server, "POST", f"/approvals/{first_approval}", {
+        "sessionId": "session-1", "verdict": "approve_once", "reason": "bypass",
+    })
+    assert status == 403
+    assert "does not accept HTTP verdicts" in response["error"]
+    assert len(broker.pending) == 2
+    release.set()
+    await client.drain_requests(timeout=1)
+    assert {item["id"]: item["result"] for item in socket.sent if "result" in item} == {
+        7: {"decision": "accept"}, 8: {"decision": "decline"},
+    }
+    requests = {item["approvalId"]: item for item in events.events if item["type"] == "approval.requested"}
+    resolutions = {item["approvalId"]: item for item in events.events if item["type"] == "approval.resolved"}
+    sent = [item for item in events.events if item["type"] == "approval.wire_sent"]
+    assert requests.keys() == resolutions.keys()
+    assert {(requests[key]["sessionId"], resolutions[key]["sessionId"]) for key in requests} == {
+        ("session-1", "session-1"), ("session-2", "session-2"),
+    }
+    assert {item["rpcRequestId"] for item in sent} == {7, 8}
+    for session_id, thread_id, rpc_id in (
+        ("session-1", "worker-1", 7), ("session-2", "worker-2", 8),
+    ):
+        service.sessions[session_id] = Session(session_id, thread_id, str(first if rpc_id == 7 else second))
+        service.thread_sessions[thread_id] = session_id
+        await service.notification({
+            "method": "serverRequest/resolved",
+            "params": {"threadId": thread_id, "requestId": rpc_id},
+        })
+    receipts = [item for item in events.events if item["type"] == "approval.server_resolved"]
+    assert {(item["sessionId"], item["rpcRequestId"]) for item in receipts} == {
+        ("session-1", 7), ("session-2", 8),
+    }
+    assert len(seen) == 2
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_service_owned_judge_failure_timeout_and_shutdown_deny(tmp_path: Path):
+    class BrokenJudge:
+        async def decide(self, _case):
+            raise RuntimeError("judge unavailable")
+
+    class HangingJudge:
+        def __init__(self):
+            self.cancelled = asyncio.Event()
+
+        async def decide(self, _case):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled.set()
+
+    events = EventLog()
+    broken = ApprovalBroker(events, judge=BrokenJudge())
+    register(broken, tmp_path)
+    assert await broken(command_request()) == {"decision": "decline"}
+    assert any(item["type"] == "approval.resolved" and item["verdict"] == "deny" for item in events.events)
+
+    hanging = HangingJudge()
+    timed = ApprovalBroker(EventLog(), judge=hanging, approval_timeout_seconds=0.01)
+    register(timed, tmp_path)
+    assert await timed(command_request()) == {"decision": "decline"}
+    assert hanging.cancelled.is_set()
+    assert timed.pending == {}
+
+    hanging = HangingJudge()
+    closing = ApprovalBroker(EventLog(), judge=hanging)
+    register(closing, tmp_path)
+    waiting = asyncio.create_task(closing(command_request()))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    closing.close("shutdown")
+    assert await waiting == {"decision": "decline"}
+    assert hanging.cancelled.is_set()
+    assert closing.pending == {}
+
+
+@pytest.mark.asyncio
 async def test_wrong_session_and_invalid_verdict_do_not_resolve(tmp_path: Path):
     events = EventLog()
     broker = ApprovalBroker(events)
@@ -1277,6 +1389,7 @@ async def test_failed_shutdown_interrupt_is_reported_as_unknown(tmp_path: Path):
 async def test_service_startup_reports_unreachable_socket(monkeypatch, tmp_path: Path):
     config = OperatorConfig.load(environ={}, overrides={
         "allowed_roots": [str(tmp_path)], "socket_path": str(tmp_path / "stale.sock"),
+        "approval_mode": "external",
     })
     monkeypatch.setattr("codex_coordinator.service.OperatorConfig.load", lambda **_kwargs: config)
     monkeypatch.setattr("codex_coordinator.service.check_codex_compatibility", lambda _command: "0.154.0")
@@ -1298,6 +1411,73 @@ async def test_service_startup_reports_unreachable_socket(monkeypatch, tmp_path:
     )
     with pytest.raises(ConnectionError, match="codex-coordinator-preflight --require-socket"):
         await run(args)
+
+
+@pytest.mark.asyncio
+async def test_service_startup_requires_explicit_judging_mode(monkeypatch, tmp_path: Path):
+    config = OperatorConfig.load(environ={}, overrides={"allowed_roots": [str(tmp_path)]})
+    monkeypatch.setattr("codex_coordinator.service.OperatorConfig.load", lambda **_kwargs: config)
+    args = SimpleNamespace(
+        host="127.0.0.1", port=8765, config=None, allowed_root=None,
+        codex_command=None, worker_model=None, worker_reasoning_effort=None,
+        approval_timeout_seconds=None, event_capacity=None, event_max_bytes=None,
+        item_capacity=None, item_max_bytes=None, allow_session_approval=None,
+        socket=None, verbose_events=False,
+    )
+    with pytest.raises(ValueError, match="configure approval_mode"):
+        await run(args)
+
+
+@pytest.mark.asyncio
+async def test_service_startup_wires_snapshotted_constitution_to_judge(monkeypatch, tmp_path: Path):
+    operator = tmp_path / "operator"
+    coordinator = tmp_path / "coordinator"
+    worker = tmp_path / "worker"
+    for directory in (operator, coordinator, worker):
+        directory.mkdir()
+    constitution = operator / "constitution.md"
+    constitution.write_text("Deny network.\n")
+    config_path = operator / "operator.toml"
+    config_path.write_text(
+        'approval_mode = "service"\n'
+        f'constitution_path = "{constitution}"\n'
+        f'coordinator_root = "{coordinator}"\n'
+        f'allowed_roots = ["{worker}"]\n'
+    )
+    config = OperatorConfig.load(path=config_path, environ={})
+    constitution.write_text("Changed after startup.\n")
+    monkeypatch.setattr("codex_coordinator.service.OperatorConfig.load", lambda **_kwargs: config)
+    monkeypatch.setattr("codex_coordinator.service.check_codex_compatibility", lambda _command: "0.154.0")
+    captured = {}
+
+    class CapturingJudge:
+        def __init__(self, runner, *, policy_instructions):
+            captured["runner"] = runner
+            captured["policy"] = policy_instructions
+
+    async def noop(**_kwargs):
+        return None
+
+    async def unavailable(*_args, **_kwargs):
+        raise ConnectionRefusedError("stale socket")
+
+    monkeypatch.setattr("codex_coordinator.service.OneShotCodexJudge", CapturingJudge)
+    monkeypatch.setattr("codex_coordinator.service.ensure_daemon", noop)
+    monkeypatch.setattr("codex_coordinator.service.websockets.unix_connect", unavailable)
+    args = SimpleNamespace(
+        host="127.0.0.1", port=8765, config=config_path, allowed_root=None,
+        codex_command=None, worker_model=None, worker_reasoning_effort=None,
+        approval_timeout_seconds=None, event_capacity=None, event_max_bytes=None,
+        item_capacity=None, item_max_bytes=None, allow_session_approval=None,
+        socket=None, verbose_events=False,
+    )
+    with pytest.raises(ConnectionError, match="codex-coordinator-preflight --require-socket"):
+        await run(args)
+    assert captured["policy"] == "Deny network.\n"
+    assert captured["runner"].keywords == {
+        "codex_command": config.codex_command,
+        "timeout_seconds": config.judge_timeout_seconds,
+    }
 
 
 @pytest.mark.asyncio

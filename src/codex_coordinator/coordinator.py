@@ -480,7 +480,11 @@ class OneShotCodexJudge:
             "deterministic_ceiling": mutable_evidence(case.enforced_capabilities),
         }, sort_keys=True)
         try:
-            value = json.loads(await self._run(prompt))
+            raw = await self._run(prompt)
+        except Exception:
+            return JudgeDecision("deny", "judge unavailable")
+        try:
+            value = json.loads(raw)
             if not isinstance(value, dict) or set(value) - {"verdict", "reason", "permissions"}:
                 raise ValueError("invalid response fields")
             verdict = value["verdict"]
@@ -747,6 +751,16 @@ async def codex_exec_json_runner(
     with tempfile.TemporaryDirectory(prefix="codex-judge-") as temporary:
         isolated_cwd = str(Path(temporary).resolve(strict=True))
         await asyncio.to_thread(_probe_judge_read_boundary, resolved_command, isolated_cwd)
+        schema_path = Path(isolated_cwd) / "decision.schema.json"
+        schema_path.write_text(json.dumps({
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["verdict", "reason"],
+            "properties": {
+                "verdict": {"type": "string", "enum": ["approve_once", "approve_session", "deny"]},
+                "reason": {"type": "string", "minLength": 1},
+            },
+        }))
         permission_args = [
             argument for override in judge_permission_overrides(
                 isolated_cwd, codex_command=resolved_command,
@@ -760,7 +774,8 @@ async def codex_exec_json_runner(
             "--disable", "computer_use", "--disable", "apps",
             "--disable", "plugins", "--disable", "multi_agent",
             "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
-            "--ephemeral", "--cd", isolated_cwd, prompt,
+            "--ephemeral", "--cd", isolated_cwd,
+            "--output-schema", str(schema_path), prompt,
             cwd=isolated_cwd,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )

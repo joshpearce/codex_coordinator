@@ -8,9 +8,9 @@ loopback-only workflow with Codex CLI 0.154.0. Do not describe it as safe for
 remote, multi-user, or production authorization.
 
 The one-shot CLI runs its own independent approval judge. The long-running HTTP
-service currently accepts externally posted verdicts and applies deterministic
-constraints, but does not itself run a judge or enforce `constitution.md`.
-The next intended change is tracked in
+service has an explicit service-owned mode that loads `constitution.md` and
+runs independent judges, plus an explicit external-verdict mode. Both apply
+the same deterministic constraints. The completed work is tracked in
 [`docs/issues/service-owned-constitutional-judge.md`](docs/issues/service-owned-constitutional-judge.md).
 Keep operator policy outside coordinator- and worker-writable roots. Treat
 worker output, approval requests, and model verdicts as untrusted evidence.

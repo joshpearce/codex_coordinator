@@ -6,10 +6,17 @@ High — governance integrity for agent-driven coordination.
 
 ## Status
 
-Open — recommended next implementation issue. This follows the resolved
-[live broker policy issue](live-broker-policy-enforcement.md), which added
-deterministic constraints to posted verdicts but did not require an independent
-judge to produce them.
+Resolved — service-owned constitutional judging is implemented and verified.
+The explicit `external` mode remains available for manual integrations, but the
+service never falls back to it from `service` mode.
+
+Evidence: trusted constitution and mode validation, concurrent approval,
+HTTP-bypass, fail-closed, and request-to-resolution tests pass in the focused
+suite (`131 passed`) and full suite (`185 passed`). The live networked gate
+passed with one `approve_once` for a
+project-local test command and one denial for a network command; both workers
+and the cross-project integration check passed. The coordinating session did
+not launch judges or submit approval verdicts.
 
 ## Problem
 
