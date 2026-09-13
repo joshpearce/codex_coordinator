@@ -154,6 +154,7 @@ async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypa
     assert "--sandbox" not in captured["command"]
     assert "--strict-config" in captured["command"]
     command = captured["command"]
+    assert command[0] == str(fake_codex_executable)
     overrides = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--config"]
     assert 'default_permissions="coordinator_judge"' in overrides
     assert 'permissions.coordinator_judge.network.enabled=false' in overrides
@@ -239,8 +240,10 @@ def test_judge_read_probe_checks_allow_and_deny_with_same_profile(monkeypatch, t
     def run(command, **options):
         observed["command"] = command
         observed["options"] = options
-        assert Path(command[-2]).read_text() == "allowed evidence"
-        assert Path(command[-1]).read_text() == "must be denied"
+        assert Path(command[-3]).read_text() == "allowed evidence"
+        assert Path(command[-2]).read_text() == "must be denied"
+        assert command[-1] == "codex"
+        assert '"$3" --version' in command[-5]
         return type("Result", (), {"returncode": 0})()
 
     monkeypatch.setattr(coordinator_module.subprocess, "run", run)
@@ -252,8 +255,8 @@ def test_judge_read_probe_checks_allow_and_deny_with_same_profile(monkeypatch, t
         str(tmp_path), codex_command="codex",
     ))
     assert observed["options"]["timeout"] == 15
+    assert not Path(command[-3]).exists()
     assert not Path(command[-2]).exists()
-    assert not Path(command[-1]).exists()
 
 
 @pytest.mark.asyncio

@@ -65,14 +65,15 @@ def test_judge_permission_profile_denies_unrelated_file_read(tmp_path: Path):
     unrelated.write_text("must stay unavailable")
     assert unrelated.read_text() == "must stay unavailable"
 
-    overrides = judge_permission_overrides(str(evidence), codex_command=codex)
-    command = [codex, "sandbox", "--permission-profile", "coordinator_judge", "--cd", str(evidence)]
+    executable = str(Path(codex).resolve(strict=True))
+    overrides = judge_permission_overrides(str(evidence), codex_command=executable)
+    command = [executable, "sandbox", "--permission-profile", "coordinator_judge", "--cd", str(evidence)]
     for override in overrides:
         command.extend(("--config", override))
     command.extend((
         "--", "/bin/sh", "-c",
-        'cat "$1" >/dev/null && ! cat "$2" >/dev/null 2>&1',
-        "judge-read-probe", str(allowed), str(unrelated),
+        'cat "$1" >/dev/null && ! cat "$2" >/dev/null 2>&1 && "$3" --version >/dev/null',
+        "judge-read-probe", str(allowed), str(unrelated), executable,
     ))
     result = subprocess.run(command, capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr

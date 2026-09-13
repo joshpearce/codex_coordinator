@@ -694,8 +694,9 @@ def _probe_judge_read_boundary(codex_command: str, readable_directory: str) -> N
             command.extend(("--config", override))
         command.extend((
             "--", "/bin/sh", "-c",
-            '/bin/cat "$1" >/dev/null && ! /bin/cat "$2" >/dev/null 2>&1',
-            "judge-read-probe", str(allowed), str(unrelated),
+            '/bin/cat "$1" >/dev/null && ! /bin/cat "$2" >/dev/null 2>&1 '
+            '&& "$3" --version >/dev/null',
+            "judge-read-probe", str(allowed), str(unrelated), codex_command,
         ))
         try:
             result = subprocess.run(command, capture_output=True, timeout=15)
@@ -708,17 +709,23 @@ def _probe_judge_read_boundary(codex_command: str, readable_directory: str) -> N
 async def codex_exec_json_runner(
     prompt: str, *, codex_command: str = "codex", timeout_seconds: float = 120
 ) -> str:
+    executable = shutil.which(codex_command)
+    if executable is None:
+        raise RuntimeError(f"Codex executable not found: {codex_command}")
+    # macOS records the invoked path for sandboxed self-exec. A symlink under
+    # ~/.local/bin can be denied even when the resolved binary is readable.
+    resolved_command = str(Path(executable).resolve(strict=True))
     with tempfile.TemporaryDirectory(prefix="codex-judge-") as temporary:
         isolated_cwd = str(Path(temporary).resolve(strict=True))
-        await asyncio.to_thread(_probe_judge_read_boundary, codex_command, isolated_cwd)
+        await asyncio.to_thread(_probe_judge_read_boundary, resolved_command, isolated_cwd)
         permission_args = [
             argument for override in judge_permission_overrides(
-                isolated_cwd, codex_command=codex_command,
+                isolated_cwd, codex_command=resolved_command,
             )
             for argument in ("--config", override)
         ]
         process = await asyncio.create_subprocess_exec(
-            codex_command, "exec", "--strict-config", "--config", 'approval_policy="never"',
+            resolved_command, "exec", "--strict-config", "--config", 'approval_policy="never"',
             *permission_args,
             "--disable", "shell_tool", "--disable", "browser_use",
             "--disable", "computer_use", "--disable", "apps",
