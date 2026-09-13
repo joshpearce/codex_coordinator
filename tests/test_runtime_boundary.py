@@ -65,7 +65,7 @@ def test_judge_permission_profile_denies_unrelated_file_read(tmp_path: Path):
     unrelated.write_text("must stay unavailable")
     assert unrelated.read_text() == "must stay unavailable"
 
-    overrides = judge_permission_overrides(str(evidence))
+    overrides = judge_permission_overrides(str(evidence), codex_command=codex)
     command = [codex, "sandbox", "--permission-profile", "coordinator_judge", "--cd", str(evidence)]
     for override in overrides:
         command.extend(("--config", override))

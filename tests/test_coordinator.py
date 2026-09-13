@@ -102,8 +102,34 @@ def write_worker_config(project: Path, mode="workspace-write"):
     )
 
 
+@pytest.fixture
+def fake_codex_executable(monkeypatch, tmp_path):
+    executable = tmp_path / "codex-bin"
+    executable.write_text("fake executable")
+    monkeypatch.setattr(coordinator_module.shutil, "which", lambda _command: str(executable))
+    return executable
+
+
+def test_judge_profile_allows_only_invoked_cli_and_resolved_target(monkeypatch, tmp_path):
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    target = tmp_path / "codex-target"
+    target.write_text("fake executable")
+    link = tmp_path / "codex-link"
+    link.symlink_to(target)
+    monkeypatch.setattr(coordinator_module.shutil, "which", lambda _command: str(link))
+    overrides = coordinator_module.judge_permission_overrides(
+        str(evidence), codex_command="codex",
+    )
+    filesystem = next(value.split("=", 1)[1] for value in overrides if value.startswith("permissions.coordinator_judge.filesystem="))
+    assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == {
+        ":root": "deny", ":minimal": "read", str(evidence): "read",
+        str(link): "read", str(target): "read",
+    }
+
+
 @pytest.mark.asyncio
-async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypatch):
+async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypatch, fake_codex_executable):
     captured = {}
     monkeypatch.setattr(coordinator_module, "_probe_judge_read_boundary", lambda *_: None)
 
@@ -134,6 +160,7 @@ async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypa
     filesystem = next(value.split("=", 1)[1] for value in overrides if value.startswith("permissions.coordinator_judge.filesystem="))
     assert tomllib.loads(f"filesystem = {filesystem}")["filesystem"] == {
         ":root": "deny", ":minimal": "read", captured["cwd"]: "read",
+        str(fake_codex_executable): "read",
     }
     disabled = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--disable"]
     assert set(disabled) == {"shell_tool", "browser_use", "computer_use", "apps", "plugins", "multi_agent"}
@@ -141,7 +168,7 @@ async def test_one_shot_judge_uses_empty_cwd_and_ignores_project_config(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_cancelled_one_shot_judge_reaps_subprocess(monkeypatch):
+async def test_cancelled_one_shot_judge_reaps_subprocess(monkeypatch, fake_codex_executable):
     started = asyncio.Event()
     monkeypatch.setattr(coordinator_module, "_probe_judge_read_boundary", lambda *_: None)
 
@@ -177,7 +204,7 @@ async def test_cancelled_one_shot_judge_reaps_subprocess(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_timed_out_one_shot_judge_reaps_subprocess(monkeypatch):
+async def test_timed_out_one_shot_judge_reaps_subprocess(monkeypatch, fake_codex_executable):
     monkeypatch.setattr(coordinator_module, "_probe_judge_read_boundary", lambda *_: None)
     class FakeProcess:
         returncode = None
@@ -206,7 +233,7 @@ async def test_timed_out_one_shot_judge_reaps_subprocess(monkeypatch):
     assert process.killed and process.waited
 
 
-def test_judge_read_probe_checks_allow_and_deny_with_same_profile(monkeypatch, tmp_path):
+def test_judge_read_probe_checks_allow_and_deny_with_same_profile(monkeypatch, tmp_path, fake_codex_executable):
     observed = {}
 
     def run(command, **options):
@@ -221,14 +248,16 @@ def test_judge_read_probe_checks_allow_and_deny_with_same_profile(monkeypatch, t
     command = observed["command"]
     assert command[:4] == ["codex", "sandbox", "--permission-profile", "coordinator_judge"]
     overrides = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--config"]
-    assert overrides == list(coordinator_module.judge_permission_overrides(str(tmp_path)))
+    assert overrides == list(coordinator_module.judge_permission_overrides(
+        str(tmp_path), codex_command="codex",
+    ))
     assert observed["options"]["timeout"] == 15
     assert not Path(command[-2]).exists()
     assert not Path(command[-1]).exists()
 
 
 @pytest.mark.asyncio
-async def test_judge_read_probe_failure_prevents_exec(monkeypatch, tmp_path):
+async def test_judge_read_probe_failure_prevents_exec(monkeypatch, tmp_path, fake_codex_executable):
     def run(_command, **_options):
         return type("Result", (), {"returncode": 1})()
 

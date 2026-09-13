@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -645,16 +646,28 @@ class JudgedSessionSupervisor:
         return "watch-timeout"
 
 
-def judge_permission_overrides(readable_directory: str) -> tuple[str, str, str]:
-    """Config overrides for a judge with only runtime and evidence-dir reads."""
+def judge_permission_overrides(
+    readable_directory: str, *, codex_command: str | None = None,
+) -> tuple[str, str, str]:
+    """Config overrides for a judge with runtime, evidence, and CLI-file reads."""
     directory = Path(readable_directory).resolve(strict=True)
     if not directory.is_dir():
         raise ValueError("judge readable directory must exist")
-    filesystem = (
-        'permissions.coordinator_judge.filesystem={":root"="deny",'
-        '":minimal"="read",'
-        f'{json.dumps(str(directory))}="read"}}'
+    readable_paths = {":root": "deny", ":minimal": "read", str(directory): "read"}
+    if codex_command is not None:
+        executable = shutil.which(codex_command)
+        if executable is None:
+            raise ValueError(f"Codex executable not found: {codex_command}")
+        invoked_path = Path(executable).absolute()
+        if not invoked_path.is_file():
+            raise ValueError(f"Codex executable is not a file: {invoked_path}")
+        readable_paths[str(invoked_path)] = "read"
+        readable_paths[str(invoked_path.resolve(strict=True))] = "read"
+    filesystem_entries = ",".join(
+        f"{json.dumps(path)}={json.dumps(access)}"
+        for path, access in readable_paths.items()
     )
+    filesystem = f"permissions.coordinator_judge.filesystem={{{filesystem_entries}}}"
     return (
         'default_permissions="coordinator_judge"',
         filesystem,
@@ -677,7 +690,7 @@ def _probe_judge_read_boundary(codex_command: str, readable_directory: str) -> N
             codex_command, "sandbox", "--permission-profile", "coordinator_judge",
             "--cd", str(directory),
         ]
-        for override in judge_permission_overrides(str(directory)):
+        for override in judge_permission_overrides(str(directory), codex_command=codex_command):
             command.extend(("--config", override))
         command.extend((
             "--", "/bin/sh", "-c",
@@ -699,7 +712,9 @@ async def codex_exec_json_runner(
         isolated_cwd = str(Path(temporary).resolve(strict=True))
         await asyncio.to_thread(_probe_judge_read_boundary, codex_command, isolated_cwd)
         permission_args = [
-            argument for override in judge_permission_overrides(isolated_cwd)
+            argument for override in judge_permission_overrides(
+                isolated_cwd, codex_command=codex_command,
+            )
             for argument in ("--config", override)
         ]
         process = await asyncio.create_subprocess_exec(
