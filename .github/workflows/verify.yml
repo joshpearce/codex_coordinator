@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   test-and-install:
-    runs-on: ubuntu-latest
+    # Ubuntu-hosted runners cannot create the network namespace required by
+    # Codex's bwrap sandbox, so run real-boundary tests on a supported host.
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
