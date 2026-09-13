@@ -2,7 +2,8 @@
 
 ## Status
 
-Open — child of [the generic coordination goal](generic-coordination-goal.md).
+Complete for the supported local-only threat model — child of
+[the generic coordination goal](generic-coordination-goal.md).
 Local loopback, project-root, socket, origin/Host, and log-default controls
 are implemented. Item evidence is now bound to thread, turn, and item identity,
 so a repeated item ID cannot reuse a prior turn's command or file evidence.
@@ -10,12 +11,15 @@ File approvals now require the matching `item/started` change list; an approval
 request cannot supply or replace it.
 The one-shot judge now requests a deny-by-default permissions
 profile and fails closed if a pre-judge read-isolation probe does not pass.
-Its runtime denied-read regression test passed on the operator host as part
-of the 172-test full suite. A live one-shot judge decision using that same
-profile has not yet been verified, so this issue remains open. The pinned
-Codex CLI 0.154.0 generated schema also
+Its runtime denied-read regression test and a live one-shot judge decision
+using that profile passed on the operator host. The preflight also executes
+the resolved Codex binary inside the same profile; installed CLI runtime
+reads are narrowly allowlisted. The pinned Codex CLI 0.154.0 generated schema
+still
 does not expose the restricted-read turn policy described in current OpenAI App
-Server documentation; see [judge read scope](judge-read-scope.md).
+Server documentation; see the still-open [judge read scope](judge-read-scope.md)
+issue. Remote and multi-user use remain unsupported; this status does not
+close the detailed hardening issues below.
 
 ## Problem
 

@@ -18,12 +18,12 @@ covered by tests. Worker execution is constrained by an explicit app-server sand
 and judge verdicts cannot widen normalized requests or trusted permission ceilings.
 
 This is still suitable only for controlled, single-user local experiments. The HTTP
-control API is unauthenticated, a live one-shot judge turn using the restricted
-read profile remains unverified,
-the coordinator has unrestricted outbound network access, and logs may retain
+control API is unauthenticated, the coordinator has unrestricted outbound
+network access, and logs may retain
 sensitive content. The service now requires trusted allowed roots, caps request and
 in-memory state, expires approvals, and checks socket type, ownership, and mode,
-but listener authentication and durable audit storage remain unfinished. Do not
+and a live one-shot judge denial passed under the restricted read profile.
+Listener authentication and durable audit storage remain unfinished. Do not
 expose the service beyond loopback
 or use it as a production or multi-user authorization system. See
 the [security issue tracker](docs/issues/issues.md) for the current details.

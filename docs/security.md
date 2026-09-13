@@ -38,18 +38,17 @@ coordinator JSONL log is created mode `0600` and refuses an existing file or
 symlink rather than overwriting it.
 
 The one-shot `codex exec` judge now requests a deny-by-default filesystem
-permission profile, grants reads only to Codex's minimal runtime paths and its
-empty temporary evidence directory, disables auxiliary tools, and ignores user
-configuration and project rules. The exact profile has a denied-read regression
+permission profile, grants reads only to Codex's minimal runtime paths, its
+resolved installed runtime (and macOS system OpenSSL configuration if present),
+and its empty temporary evidence directory. It disables auxiliary tools and
+ignores user configuration and project rules. The exact profile has a denied-read regression
 test. Before every judge invocation, the runner probes the same profile with
-one allowed read and one unrelated-file read; if the probe cannot run or the
-unrelated read succeeds, the judge fails closed. The runtime denied-read
-regression test passed on an unrestricted operator host, but it cannot launch
-a nested sandbox in the current development workspace. A live `codex exec`
-judge turn using the same profile still needs verification before claiming
-that judge-turn read isolation is established. Do not use this judge when
-unrelated files or secrets must be hidden from it until that check passes.
+one allowed read, one unrelated-file read, and execution of the resolved Codex
+binary; if the probe cannot run or the unrelated read succeeds, the judge fails
+closed. The runtime denied-read regression test and a live `codex exec` judge
+decision passed on an unrestricted operator host. The nested sandbox cannot
+launch in the restricted development workspace. This check is specific to the
+supported CLI and host; keep the fail-closed probe when changing either.
 A caller-supplied judge in the Python API can operate on the frozen, minimal
 `ApprovalCase` evidence, but the caller is responsible for isolating its own
-implementation. This is a remaining requirement before the generic security
-issue can close.
+implementation. This remains a requirement for caller-supplied judges.

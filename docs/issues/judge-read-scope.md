@@ -33,14 +33,16 @@ also describes deny-by-default filesystem profiles. The one-shot judge now
 requests such a profile without the legacy `--sandbox` override, disables
 auxiliary tools, and probes an allowed read plus an unrelated denied read
 before each judge invocation. Probe failure stops the judge. There is also a
-runtime denied-read regression test. The pinned CLI
-exposes `codex sandbox --permission-profile`; the regression test passed on an
-unrestricted operator host as part of the 172-test full suite. The same test
-cannot start inside the restricted development workspace
-(`sandbox-exec: sandbox_apply: Operation not permitted`). Confirmation that
-the CLI honors the profile during an actual `codex exec` judge turn and a live
-judge decision are still required. Do not relax the judge boundary based on
-CLI flags or mocked subprocess tests alone.
+runtime denied-read regression test. The pinned CLI exposes
+`codex sandbox --permission-profile`; the regression test passed on an
+unrestricted operator host and in hosted macOS CI. The same test cannot start
+inside the restricted development workspace
+(`sandbox-exec: sandbox_apply: Operation not permitted`). A live `codex exec`
+judge decision returned a valid denial under this profile after a successful
+allowed-read, denied-read, and executable preflight. This one-shot route is
+verified for the supported local CLI; the App Server restricted-read field
+remains absent from the pinned generated schema, so this detailed issue stays
+open for that separate compatibility path.
 
 ## Acceptance criteria
 

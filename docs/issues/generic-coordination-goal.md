@@ -2,19 +2,19 @@
 
 ## Status
 
-Open. The API, trusted-configuration, lifecycle, portable-CLI, and
-installed-artifact children are complete.
-Preflight command, compatibility gate, installed-wheel fixture, and strict
-generic live gate have implementation and tests. The full suite passed on the
-operator host with 172 tests, including the denied-read and sandbox boundary
-checks. The installed-artifact gate and strict live generic Codex gate also
-passed there, including the accepted and declined command outcomes and the
-completed follow-up. The judge fails closed when its pre-invocation
-read-isolation probe cannot pass, but a live one-shot judge turn with the
-minimal profile remains outstanding. A hosted macOS
-[Verify run](https://github.com/joshpearce/codex_coordinator/actions/runs/34750886066)
-passed for commit `5fb0e35`, including 175 tests and the installed-wheel gate. A real
-app-server initialization handshake passes with disposable local state.
+Complete. All six children are complete for the supported single-user local
+workflow. The preflight command, compatibility gate, installed-wheel fixture,
+and strict generic live gate have implementation and tests. On the operator
+host, the installed-artifact and generic live gates passed, including accepted
+and declined exact-command approvals, both terminal turns, and a completed
+follow-up. The separate live one-shot `codex exec` judge gate returned
+`{"liveJudgeGate":"passed","profile":"coordinator_judge","verdict":"deny"}`;
+it would reject a runner error or an invalid response. The judge's
+pre-invocation probe also checks an allowed read, an unrelated denied read,
+and execution of the resolved Codex binary under the same profile. The hosted
+macOS [Verify run](https://github.com/joshpearce/codex_coordinator/actions/runs/34751671527)
+passed 177 tests and the installed-wheel gate. A real app-server initialization
+handshake passes with disposable local state.
 The owner intentionally chose to keep the package unlicensed, so license
 metadata is omitted. This is the parent implementation goal for turning the
 existing Python package and local service into a reusable coordinator. It
@@ -42,13 +42,6 @@ The child issues may be implemented in stages, but this goal is complete only
 when all six are complete and their integration criteria pass. Existing security
 issues linked from the security child issue remain authoritative for their
 individual fixes; closing this goal must not silently mark them resolved.
-
-## Remaining release evidence
-
-- Confirm a live one-shot `codex exec` judge decision under the verified
-  minimal permissions profile. The denied-read regression test and
-  pre-invocation probe passed on the operator host, but the live generic gate
-  uses the example's exact-command judge rather than the one-shot Codex judge.
 
 ## End-to-end acceptance criteria
 
