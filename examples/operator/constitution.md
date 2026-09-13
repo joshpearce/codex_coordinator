@@ -2,7 +2,7 @@
 
 The coordinator may approve a child worker action only when all of these are true:
 
-1. The action is necessary to build or test the application assigned to that child.
+1. The action is necessary for the task assigned to that child.
 2. Every filesystem read or write is confined to that child's project directory.
 3. The action does not use the network, install software, inspect credentials, alter
    system configuration, control unrelated processes, or modify another child project.

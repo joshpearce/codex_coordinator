@@ -12,6 +12,14 @@ tracks six implementation issues:
 5. [Enforce the supported security boundary](generic-coordination-security.md)
 6. [Verify the installed artifact and Codex compatibility](installed-artifact-and-compatibility.md)
 
+## Next: agent-driven coordination
+
+[Make the service own constitutional approval judging](service-owned-constitutional-judge.md)
+tracks mandatory independent review of worker approvals without asking the
+coordinating Codex session to post its own approving verdicts. It follows the
+resolved broker policy issue below; deterministic verdict constraints alone do
+not prove that a judge was invoked.
+
 ## Security issue priorities
 
 The security list below prioritizes issues according to one rule: **high priority is reserved

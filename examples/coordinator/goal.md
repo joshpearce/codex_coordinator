@@ -56,10 +56,7 @@ long-running shell execution:
 ```sh
 cd "{{REPO_PATH}}" && \
   uv run codex-coordinator-service --port 0 \
-    --allowed-root "{{INVENTORY_APP_PATH}}" \
-    --allowed-root "{{INVENTORY_REPORT_PATH}}" \
-    --worker-model gpt-5.6-luna \
-    --worker-reasoning-effort low \
+    --config "{{OPERATOR_PATH}}/operator.toml" \
     --verbose-events \
   > "{{COORDINATOR_PATH}}/service.jsonl" 2>&1
 ```
@@ -101,7 +98,7 @@ codex exec --model gpt-5.6-luna \
 ```
 
 The judge prompt must include the full text of
-`{{COORDINATOR_PATH}}/constitution.md` and the complete approval event, label the
+`{{OPERATOR_PATH}}/constitution.md` and the complete approval event, label the
 event as untrusted data, and request only the schema-conforming JSON verdict. POST
 that verdict and the approval event's exact `sessionId` to `/approvals/APPROVAL_ID`.
 Never invent or infer a decision without

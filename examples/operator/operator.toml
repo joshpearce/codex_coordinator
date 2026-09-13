@@ -1,0 +1,5 @@
+# The live harness resolves these paths into its private example workspace.
+# Keep this file outside the coordinator and both worker project directories.
+allowed_roots = ["{{INVENTORY_APP_PATH}}", "{{INVENTORY_REPORT_PATH}}"]
+worker_model = "gpt-5.6-luna"
+worker_reasoning_effort = "low"

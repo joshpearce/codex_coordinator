@@ -22,16 +22,19 @@ one implementation module containing the TODOs. Their checked-in
 while the service remains the middle-man for creating the session and sending turns.
 The inventory child is instructed to make an explicit approval-path request for a
 project-local test command and to attempt a network operation. The
-[constitution](../examples/coordinator/constitution.md) allows the former and denies
+[constitution](../examples/operator/constitution.md) allows the former and denies
 the latter. The coordinator must observe at least one `approve_once` and one `deny`,
 reconcile the applications, run their tests, write `result.json`, and shut down the
 service.
 
 The top-level session runs from the checked-in
 [`examples/coordinator`](../examples/coordinator) template. A live workspace has three
-sibling projects, and all coordinator artifacts—including the path-resolved `goal.md`,
-child goal prompts, constitution, event stream, decisions, and result—live under
-`workspace/coordinator/`. Its `AGENTS.md` explicitly documents that application writes
+sibling projects plus `workspace/operator/`. The latter contains a path-resolved
+[`operator.toml`](../examples/operator/operator.toml) and the
+[`constitution.md`](../examples/operator/constitution.md), outside the coordinator's
+writable project and both worker roots. Coordinator artifacts—including the
+path-resolved `goal.md`, child goal prompts, event stream, decisions, and result—live
+under `workspace/coordinator/`. Its `AGENTS.md` documents that application writes
 must be delegated over HTTP. The coordinator's workspace permission profile keeps the
 sibling projects outside its writable roots.
 

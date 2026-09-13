@@ -374,12 +374,20 @@ async def run(args: argparse.Namespace) -> int:
     else:
         root = Path(tempfile.mkdtemp(prefix="codex-orchestration-e2e-"))
     examples = repo / "examples"
+    operator = _make_project(root, examples, "operator")
     coordinator = _make_project(root, examples, "coordinator")
     api_project = _make_project(root, examples, "inventory-app")
     ui_project = _make_project(root, examples, "inventory-report")
     _resolve_template(
         coordinator / "goals/inventory-report.md",
         {"INVENTORY_APP_PATH": api_project},
+    )
+    _resolve_template(
+        operator / "operator.toml",
+        {
+            "INVENTORY_APP_PATH": api_project,
+            "INVENTORY_REPORT_PATH": ui_project,
+        },
     )
     _resolve_template(
         coordinator / ".codex/config.toml",
@@ -395,6 +403,7 @@ async def run(args: argparse.Namespace) -> int:
         {
             "REPO_PATH": repo,
             "COORDINATOR_PATH": coordinator,
+            "OPERATOR_PATH": operator,
             "INVENTORY_APP_PATH": api_project,
             "INVENTORY_REPORT_PATH": ui_project,
         },

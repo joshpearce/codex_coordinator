@@ -17,21 +17,27 @@ from codex_coordinator.live_e2e import (
     _resolve_template,
     run,
 )
+from codex_coordinator.config import OperatorConfig
 
 
 def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
     repo = Path(__file__).resolve().parents[1]
     source = repo / "examples/coordinator"
     coordinator = tmp_path / "coordinator"
+    operator = tmp_path / "operator"
     inventory_app = tmp_path / "inventory-app"
     inventory_report = tmp_path / "inventory-report"
     shutil.copytree(source, coordinator)
+    shutil.copytree(repo / "examples/operator", operator)
+    inventory_app.mkdir()
+    inventory_report.mkdir()
 
     goal_template = (source / "goal.md").read_text()
     report_template = (source / "goals/inventory-report.md").read_text()
     assert set(re.findall(r"{{([A-Z_]+)}}", goal_template)) == {
         "REPO_PATH",
         "COORDINATOR_PATH",
+        "OPERATOR_PATH",
         "INVENTORY_APP_PATH",
         "INVENTORY_REPORT_PATH",
     }
@@ -43,11 +49,19 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
         coordinator / "goals/inventory-report.md",
         {"INVENTORY_APP_PATH": inventory_app},
     )
+    _resolve_template(
+        operator / "operator.toml",
+        {
+            "INVENTORY_APP_PATH": inventory_app,
+            "INVENTORY_REPORT_PATH": inventory_report,
+        },
+    )
     rendered = _resolve_template(
         coordinator / "goal.md",
         {
             "REPO_PATH": repo,
             "COORDINATOR_PATH": coordinator,
+            "OPERATOR_PATH": operator,
             "INVENTORY_APP_PATH": inventory_app,
             "INVENTORY_REPORT_PATH": inventory_report,
         },
@@ -56,6 +70,10 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
     assert "{{" not in rendered
     assert str(inventory_app) in rendered
     assert str(inventory_report) in rendered
+    assert f'--config "{operator / "operator.toml"}"' in rendered
+    assert str(operator / "constitution.md") in rendered
+    config = OperatorConfig.load(path=operator / "operator.toml", environ={})
+    assert config.allowed_roots == (inventory_app, inventory_report)
     assert str(inventory_app) in (
         coordinator / "goals/inventory-report.md"
     ).read_text()
