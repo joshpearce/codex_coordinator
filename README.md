@@ -152,55 +152,94 @@ agent cannot bypass `constitution.md` by posting its own approval.
 Unanswered requests are denied after the configured timeout (300 seconds by
 default).
 
-Open another terminal in the cloned repository and activate its environment.
-For the newly created projects, restore the same path variables; for existing
-projects, set them to the absolute paths you chose in step 3:
+Leave the service from step 5 running. Open a **second terminal** in the cloned
+repository and restore the project paths. For existing worker projects, replace
+the last two assignments with the absolute paths you chose in step 3. This
+terminal does not need the Python virtual environment; it runs `codex` and
+`curl`, not a Python entry point.
 
 ```sh
-. .venv/bin/activate
 WORKSPACE_DIR="$(cd .. && pwd -P)/codex-coordination-demo"
-COORD_DIR="$WORKSPACE_DIR/operator"
 COORDINATOR_PROJECT="$WORKSPACE_DIR/coordinator"
 PROJECT_A="$WORKSPACE_DIR/project-a"
 PROJECT_B="$WORKSPACE_DIR/project-b"
 ```
 
-Then start two sessions and inspect their progress:
+Give the coordinator project its role instructions and a Codex permission
+profile. Run this from the cloned repository. The profile allows the
+coordinating session to call the loopback service and the default private
+app-server socket; it does **not** make either worker project writable. It does
+give the coordinator general outbound network access, so use it only in the
+trusted local environment described above.
 
 ```sh
-curl -sS -X POST http://127.0.0.1:8765/sessions \
-  -H 'Content-Type: application/json' \
-  -d "{\"project\":\"$PROJECT_A\",\"prompt\":\"Inspect project A and report findings.\"}"
-curl -sS -X POST http://127.0.0.1:8765/sessions \
-  -H 'Content-Type: application/json' \
-  -d "{\"project\":\"$PROJECT_B\",\"prompt\":\"Inspect project B and report findings.\"}"
-curl -sS http://127.0.0.1:8765/sessions
-curl -sS 'http://127.0.0.1:8765/events?after=0'
+mkdir -p "$COORDINATOR_PROJECT/.codex"
+if [ ! -e "$COORDINATOR_PROJECT/AGENTS.md" ] &&
+   [ ! -L "$COORDINATOR_PROJECT/AGENTS.md" ]; then
+  cp examples/coordinator/AGENTS.md "$COORDINATOR_PROJECT/AGENTS.md"
+fi
+if [ ! -e "$COORDINATOR_PROJECT/.codex/config.toml" ] &&
+   [ ! -L "$COORDINATOR_PROJECT/.codex/config.toml" ]; then
+  {
+    printf '%s\n' \
+      'approval_policy = "never"' \
+      'default_permissions = "coordinator"' \
+      '[permissions.coordinator]' \
+      'extends = ":workspace"' \
+      '[permissions.coordinator.network]' \
+      'enabled = true' \
+      'mode = "full"' \
+      '[permissions.coordinator.network.unix_sockets]'
+    printf '"%s" = "allow"\n' \
+      "$HOME/.codex/app-server-control/app-server-control.sock"
+  } > "$COORDINATOR_PROJECT/.codex/config.toml"
+fi
 ```
 
-The returned session objects have IDs for follow-ups and cancellation. Start a
-Codex session in `$COORDINATOR_PROJECT` and give it a cross-project goal: it
-can use these same HTTP operations to dispatch tasks, monitor event and session
-state, follow up, and verify results. It must not POST verdicts to `/approvals`.
-The local API also
-supports `POST /sessions/{id}/messages` after a turn completes,
-`POST /sessions/{id}/cancel`, `GET /health`, and `POST /shutdown`.
-For example, after a session reaches `completed`, send a follow-up and then
-stop the service when finished:
+If either coordinator file already existed, review it rather than replacing it:
+the coordinator needs access to `http://127.0.0.1:8765`, and the socket entry
+must match `socket_path` if you changed that operator setting. Now start an
+**interactive Codex session in the coordinator project** with a cross-project
+goal. This example gives two initially empty projects compatible producer and
+consumer tasks; replace it with your own goal for existing projects.
 
 ```sh
-curl -sS -X POST "http://127.0.0.1:8765/sessions/SESSION_ID/messages" \
-  -H 'Content-Type: application/json' \
-  -d '{"prompt":"Review your findings and list next steps."}'
+codex -C "$COORDINATOR_PROJECT" \
+  "Use the coordinator service at http://127.0.0.1:8765 to manage two worker sessions.
+  In $PROJECT_A, build a small offline Python CLI that writes inventory records as JSON.
+  In $PROJECT_B, build a Python CLI that reads those records and prints a total.
+  Agree on the JSON contract and dispatch both workers; do not edit either worker project directly.
+  While they work, repeatedly call GET /events?after=N (starting at N=0) and GET /sessions.
+  After each response, set N to the highest event sequence received. Keep polling every few seconds
+  until both workers' turns finish, including any follow-up turns; do not stop after the first
+  empty response or first completed worker.
+  If an event cursor expires with 410 Gone, use oldestSequence minus one to resume retained events,
+  reconcile current states from GET /sessions, and disclose the missing event history.
+  Follow up through the service on failed or incomplete work, then run tests and a cross-project
+  integration check. Finish only after both results are verified. The service owns approval judging:
+  observe approval outcomes, but do not launch a judge or POST approval verdicts. Report the results."
+```
+
+The coordinating Codex session calls `POST /sessions` for each project and
+`POST /sessions/{id}/messages` for corrections after a worker turn ends. The
+service receives worker events and independently judges valid permission
+requests, but it does **not** push events to the coordinating Codex session.
+That session must keep its turn active and poll until it has verified the
+outcomes; once it stops, nothing wakes it for a later event. If events were
+evicted, current session state cannot reconstruct missing approval evidence,
+so the coordinator must report that gap rather than claim it verified those
+approvals. When Codex finishes, stop the service from this second terminal:
+
+```sh
 curl -sS -X POST http://127.0.0.1:8765/shutdown
 ```
 
-Replace `SESSION_ID` with that session's ID. The service does not persist
-sessions or event cursors across restarts.
-`GET /events?after=N` uses an in-memory cursor; an evicted cursor returns
-`410 Gone` with `oldestSequence`. Connection loss and interrupted turns are
-reported explicitly, not as successful completion. Keep this unauthenticated
-service on `127.0.0.1`; it refuses non-loopback binding.
+The service also supports `POST /sessions/{id}/cancel` and `GET /health`. It
+does not persist sessions or event cursors across restarts. `GET /events?after=N`
+uses an in-memory cursor; an evicted cursor returns `410 Gone` with
+`oldestSequence`. Connection loss and interrupted turns are reported explicitly,
+not as successful completion. Keep this unauthenticated service on `127.0.0.1`;
+it refuses non-loopback binding.
 
 For a Python-owned workflow, use the public API instead of hand-building HTTP
 requests:

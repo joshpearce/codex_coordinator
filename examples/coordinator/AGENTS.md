@@ -1,6 +1,6 @@
 # Coordinator role
 
-This project is the control room for the orchestration experiment.
+This project is the control room for a local cross-project workflow.
 
 - Start and control child Codex sessions only through the coordinator service HTTP API.
 - Send child implementation instructions through `/sessions` or
