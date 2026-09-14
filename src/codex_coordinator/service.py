@@ -30,7 +30,9 @@ from .coordinator import (
     OneShotCodexJudge,
     SessionRegistration,
     WorkerPermissions,
+    WorkerProjectRules,
     codex_exec_json_runner,
+    refuse_worker_project_rules,
     select_worker_permissions,
     mutable_evidence,
 )
@@ -534,6 +536,27 @@ class CoordinatorService:
     def _within_allowed_roots(self, project: Path) -> bool:
         return any(project == root or root in project.parents for root in self.allowed_roots)
 
+    def _refuse_project_rules(self, project: Path, session_id: str | None = None) -> None:
+        """Refuse a worker project that carries Codex rules of its own (#0017).
+
+        The runtime reads ``<cwd>/.codex/rules`` at thread start, and an
+        ``allow`` rule found there suppresses the approval request before
+        anything reaches this service. The check runs before every
+        ``thread/start`` and before every ``turn/start`` on an existing thread,
+        because a project can acquire such a file mid-session.
+        """
+        try:
+            refuse_worker_project_rules(project)
+        except ValueError as exc:
+            self.events.emit(
+                "session.project_rules_refused",
+                **({"sessionId": session_id} if session_id else {}),
+                project=str(project),
+                rulesPath=str(getattr(exc, "path", "")) or None,
+                reason=str(exc),
+            )
+            raise
+
     async def start_session(self, project_value: str, prompt: str) -> dict[str, Any]:
         if self.stopping.is_set() or self.approvals.closed:
             raise RuntimeError("service is stopping or disconnected")
@@ -554,6 +577,9 @@ class CoordinatorService:
                 "no project constitution governs this project; add one under "
                 "[project_constitutions] in the operator configuration"
             )
+        # Refused before the thread exists: the runtime would load the
+        # project's own rules at thread start and decide approvals itself.
+        self._refuse_project_rules(project)
         permissions = self.permissions_for(project)
         policy = ApprovalPolicy(
             project,
@@ -624,6 +650,9 @@ class CoordinatorService:
             raise ValueError("session already has an active turn")
         if session.state != "completed":
             raise ValueError("follow-up requires a completed turn")
+        # Defense in depth: rules were observed to load only at thread start,
+        # but a project that acquires one mid-session gets no further turn.
+        self._refuse_project_rules(Path(session.project), session_id)
         session.state = "active"
         session.turn_id = None
         try:

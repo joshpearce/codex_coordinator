@@ -86,6 +86,16 @@ thread, turn, and item ID; an approval cannot borrow a prior turn's item when
 an ID is reused. File approvals require that matching item's change list;
 request-supplied change lists are rejected.
 
+A session is never started in a worker project whose tree carries Codex
+execpolicy rules of its own — a `.codex/rules` entry, a `*.rules` file under a
+`.codex` directory, or a symlinked `.codex` the scan cannot see through. The
+runtime would load those at thread start and decide approvals before the
+coordinator saw them. `start_session` refuses before `thread/start`, emits
+`session.project_rules_refused` naming the path, and answers HTTP `400`; the
+same check runs before every follow-up `turn/start`, so a project that acquires
+such a file mid-session gets no further turn. The file's contents are never
+read.
+
 `Coordinator.wait(timeout=...)` raises `TimeoutError` if no terminal turn state
 arrives. Observation timeout does not cancel the worker or imply success.
 `Coordinator.close()` denies pending approvals, attempts to interrupt active

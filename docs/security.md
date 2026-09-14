@@ -19,7 +19,9 @@ Projects must be under startup-configured canonical allowed roots before any
 session is started for them. Existing symlinks that escape those roots are
 rejected. A worker project's own files are never read as configuration; its
 boundary comes from an operator-owned permissions file validated at startup
-under the same ownership and location rules as a constitution. The configured
+under the same ownership and location rules as a constitution. A project whose
+tree carries Codex execpolicy rules of its own is refused a session outright;
+see "A worker project may not carry Codex rules" below. The configured
 app-server endpoint must be a Unix socket owned
 by the current user with no group/other permissions, inside an owner-controlled
 directory. Workers receive explicit Codex sandbox policies with no network or
@@ -116,6 +118,40 @@ file still lints with `codex execpolicy check --rules`. A rules file that uses a
 decision or shape this evaluator does not fully account for fails startup, the
 same as a malformed allow rule.
 
+## A worker project may not carry Codex rules
+
+The Codex runtime loads execpolicy rules from `$CODEX_HOME/rules` and from
+`<cwd>/.codex/rules`, where `cwd` is the worker project. Live probing of the
+pinned CLI, repeated after this refusal was designed, shows the loading is
+unchanged: a thread started in a project containing
+`.codex/rules/worker.rules` logs `loaded 1 .rules files in
+<project>/.codex/rules` at thread start, and under `approval_policy =
+"untrusted"` with `sandbox_mode = "workspace-write"` an `allow` rule there
+suppressed the approval request entirely — the worker's `cat NOTES.md` ran with
+no approval at all. Rules are read at thread start, not per turn, so a worker
+cannot change its current session's policy; but one in-scope, in-sandbox write —
+the kind of write a judge has every reason to approve, since writing project
+files is the assignment — would remove judging from every later session of that
+project, with no signal in this codebase's events. `--strict-config` rejects
+`exec_policy`, `execpolicy`, and `rules` as unknown app-server fields, and
+`--ignore-rules` exists for `codex exec` but not for the app-server, so there is
+no setting that turns this off.
+
+The coordinator therefore refuses the project. `CoordinatorService.start_session`
+and `JudgedSessionSupervisor.start` scan the project tree before `thread/start`,
+and both scan again before every `turn/start` on an existing thread, so a
+project that acquires such a file mid-session gets no further turn. A finding is
+a `.codex/rules` entry, any `*.rules` file under a `.codex` directory, or a
+symlinked `.codex` the scan does not follow and therefore cannot clear; a scan
+that cannot finish within its bound is refused rather than passed. The file's
+contents are never read: presence is the finding. The service emits
+`session.project_rules_refused` naming the path and answers `POST /sessions`
+with HTTP 400 carrying the same text, and `codex-coordinator-preflight` reports
+it when validating a project. The check applies to worker roots only; the
+coordinator's own project and the operator directory are not worker roots and
+are not scanned. If a later pinned CLI offers an app-server or per-thread switch
+to ignore project rules, the refusal stays until that switch is proven live.
+
 ## Commands decided by operator rule rather than by a judge
 
 The one place commands are named is a separate kind of file: an operator-owned
@@ -163,7 +199,8 @@ pinned CLI established that the runtime does unwrap the shell wrapper and does
 evaluate `&&` chains per command, but also that it has no per-thread
 configuration key for rules (`--strict-config` rejects every candidate), that it
 reads rules from the worker project's own `.codex/rules` directory at thread
-start (#0017), that its `prefix_rule` never constrains paths so a `sed -n` rule
+start (which is why such a project is refused a session), that its
+`prefix_rule` never constrains paths so a `sed -n` rule
 would admit a read of any file on the machine, and that it does not decide the
 `if … fi` guard shape workers actually issue. Under `granular` approval an
 unmatched command ran with no approval at all, so `untrusted` remains the only

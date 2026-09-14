@@ -4,6 +4,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -333,6 +334,84 @@ class WorkerPermissions:
             "excludeTmpdirEnvVar": True,
             "excludeSlashTmp": True,
         }
+
+
+#: Where the Codex runtime reads a project's own execpolicy rules. Probed
+#: live against the pinned CLI: rules under ``<cwd>/.codex/rules`` are loaded
+#: at thread start ("loaded 1 .rules files in <project>/.codex/rules") and an
+#: ``allow`` rule found there suppresses the approval request entirely, so one
+#: in-sandbox write by a worker removes judging from every later session of
+#: that project. There is no configuration key that turns this off, so a
+#: project carrying such a file is refused a session instead.
+CODEX_DIRECTORY = ".codex"
+RULES_SUFFIX = ".rules"
+#: Bound on the refusal scan so a pathological tree cannot stall a start.
+RULES_SCAN_LIMIT = 200_000
+
+
+class WorkerProjectRules(ValueError):
+    """A worker project carries Codex execpolicy rules the runtime would load."""
+
+    def __init__(self, project: Path, path: Path) -> None:
+        self.project = Path(project)
+        self.path = Path(path)
+        super().__init__(
+            f"project {self.project} carries Codex rules of its own at {self.path}; "
+            "the runtime loads those at thread start and they would decide "
+            "approvals before the coordinator sees them. Remove the path, or "
+            "run this worker in a project that has none."
+        )
+
+
+class WorkerProjectScanIncomplete(ValueError):
+    """The refusal scan could not finish, so the project is refused unchecked."""
+
+    def __init__(self, project: Path) -> None:
+        self.project = Path(project)
+        super().__init__(
+            f"project {self.project} could not be scanned for Codex rules within "
+            f"{RULES_SCAN_LIMIT} entries; refusing rather than starting unchecked"
+        )
+
+
+def find_worker_project_rules(
+    project: Path, *, limit: int = RULES_SCAN_LIMIT,
+) -> Path | None:
+    """Return the first Codex rules path in a worker project tree, or ``None``.
+
+    The contents are never read: presence is the finding. A ``.codex``
+    directory that is a symlink is also a finding, because the scan does not
+    follow it and so cannot say what the runtime would load through it.
+    """
+    root = Path(project)
+    visited = 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        visited += 1 + len(dirnames) + len(filenames)
+        if visited > limit:
+            raise WorkerProjectScanIncomplete(root)
+        inside_codex = current.name == CODEX_DIRECTORY or CODEX_DIRECTORY in (
+            current.relative_to(root).parts if current != root else ()
+        )
+        if inside_codex:
+            for name in sorted(filenames):
+                if name.endswith(RULES_SUFFIX):
+                    return current / name
+            if current.name == CODEX_DIRECTORY and "rules" in dirnames:
+                return current / "rules"
+            if current.name == CODEX_DIRECTORY and (current / "rules").is_symlink():
+                return current / "rules"
+        for name in sorted(dirnames):
+            if name == CODEX_DIRECTORY and (current / name).is_symlink():
+                return current / name
+    return None
+
+
+def refuse_worker_project_rules(project: Path) -> None:
+    """Raise unless ``project`` carries no Codex rules of its own."""
+    found = find_worker_project_rules(project)
+    if found is not None:
+        raise WorkerProjectRules(project, found)
 
 
 def select_worker_permissions(
@@ -1035,6 +1114,10 @@ class JudgedSessionSupervisor:
             )
 
     async def start(self, prompt: str) -> str:
+        # The runtime loads <project>/.codex/rules at thread start and an
+        # allow rule there decides approvals before this process sees them,
+        # so a project carrying one never gets a thread (#0017).
+        refuse_worker_project_rules(self.project)
         start_params = {
             "cwd": str(self.project), "runtimeWorkspaceRoots": [str(self.project)],
             "approvalPolicy": self.permissions.approval_policy,
@@ -1055,6 +1138,7 @@ class JudgedSessionSupervisor:
         }
         if self.worker_reasoning_effort:
             turn_params["effort"] = self.worker_reasoning_effort
+        refuse_worker_project_rules(self.project)
         await self.client.call("turn/start", turn_params)
         return thread_id
 

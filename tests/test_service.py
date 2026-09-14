@@ -1,5 +1,6 @@
 import asyncio
 import json
+import shutil
 import socket
 from pathlib import Path
 from types import SimpleNamespace
@@ -2111,3 +2112,122 @@ async def test_a_file_change_never_carries_the_judge_a_grant_root(tmp_path: Path
     assert events.events[0]["reason"] == ApprovalPolicy.GRANT_ROOT_RULE
     capsys.readouterr()
 
+
+# --- #0017: a project carrying Codex rules of its own gets no session -------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("planted", "named"),
+    [
+        # The rules directory itself is the finding; its contents are not read.
+        (".codex/rules/worker.rules", ".codex/rules"),
+        (".codex/worker.rules", ".codex/worker.rules"),
+    ],
+)
+async def test_planted_project_rules_prevent_a_session(tmp_path: Path, capsys, planted, named):
+    """The runtime would load these at thread start; no thread is started."""
+    project = tmp_path / "worker"
+    project.mkdir()
+    planted_path = project / planted
+    planted_path.parent.mkdir(parents=True, exist_ok=True)
+    planted_path.write_text('prefix_rule(pattern=["cat"], decision="allow", justification="mine")\n')
+    rules = project / named
+    events = EventLog()
+    client = _StartClient()
+    service = CoordinatorService(client, ApprovalBroker(events), events, allowed_roots=(project,))
+    server = HttpControlServer(service)
+
+    status, error = await http_json(
+        server, "POST", "/sessions", {"project": str(project), "prompt": "Build"},
+    )
+    assert status == 400
+    assert str(rules) in error["error"]
+    assert client.calls == []
+    refused = next(
+        event for event in events.events if event["type"] == "session.project_rules_refused"
+    )
+    assert refused["rulesPath"] == str(rules)
+    assert refused["project"] == str(project)
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_a_nested_or_symlinked_codex_directory_is_also_refused(tmp_path: Path, capsys):
+    project = tmp_path / "worker"
+    (project / "pkg/.codex/rules").mkdir(parents=True)
+    (project / "pkg/.codex/rules/deep.rules").write_text("x")
+    events = EventLog()
+    service = CoordinatorService(
+        _StartClient(), ApprovalBroker(events), events, allowed_roots=(project,),
+    )
+    with pytest.raises(ValueError, match=r"pkg/\.codex/rules"):
+        await service.start_session(str(project), "Build")
+
+    shutil.rmtree(project / "pkg/.codex")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (project / ".codex").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(ValueError, match=r"\.codex"):
+        await service.start_session(str(project), "Build")
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_a_project_without_codex_rules_is_unaffected(tmp_path: Path, capsys):
+    project = tmp_path / "worker"
+    (project / ".codex").mkdir(parents=True)
+    # A worker project holds no Codex configuration in the supported setup, but
+    # the refusal is about rules the runtime loads, not about the directory.
+    (project / ".codex/config.toml").write_text('sandbox_mode = "workspace-write"\n')
+    (project / "notes.rules").write_text("not under .codex\n")
+    events = EventLog()
+    service = CoordinatorService(
+        _StartClient(), ApprovalBroker(events), events, allowed_roots=(project,),
+    )
+    started = await service.start_session(str(project), "Build")
+    assert started["state"] == "active"
+    assert not [
+        event for event in events.events if event["type"] == "session.project_rules_refused"
+    ]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_rules_appearing_mid_session_prevent_the_next_turn(tmp_path: Path, capsys):
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    client = _StartClient()
+    service = CoordinatorService(client, ApprovalBroker(events), events, allowed_roots=(project,))
+    started = await service.start_session(str(project), "Build")
+    service.sessions[started["id"]].state = "completed"
+
+    rules = project / ".codex/rules/worker.rules"
+    rules.parent.mkdir(parents=True)
+    rules.write_text('prefix_rule(pattern=["cat"], decision="allow", justification="mine")\n')
+    with pytest.raises(ValueError, match=r"\.codex/rules"):
+        await service.send_message(started["id"], "Keep going")
+    assert [method for method, _params in client.calls] == ["thread/start", "turn/start"]
+    refused = next(
+        event for event in events.events if event["type"] == "session.project_rules_refused"
+    )
+    assert refused["sessionId"] == started["id"]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_the_one_shot_supervisor_also_refuses_project_rules(tmp_path: Path):
+    from codex_coordinator.coordinator import JudgedApprovalHandler, JudgedSessionSupervisor
+
+    project = tmp_path / "worker"
+    (project / ".codex/rules").mkdir(parents=True)
+    (project / ".codex/rules/worker.rules").write_text("x")
+    policy = ApprovalPolicy(project)
+    client = _StartClient()
+    supervisor = JudgedSessionSupervisor(
+        client, JudgedApprovalHandler(project, policy, object()), project,
+    )
+    with pytest.raises(ValueError, match=r"\.codex/rules"):
+        await supervisor.start("Build")
+    assert client.calls == []

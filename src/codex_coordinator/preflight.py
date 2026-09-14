@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .compatibility import check_codex_compatibility
 from .config import OperatorConfig
+from .coordinator import refuse_worker_project_rules
 from .daemon import default_daemon_socket, probe_local_socket
 
 
@@ -42,6 +43,9 @@ def check(config: OperatorConfig, projects: list[Path], *, require_socket: bool 
             project == root or root in project.parents for root in config.allowed_roots
         ):
             raise ValueError(f"project is outside configured allowed roots: {raw}")
+        # A project whose tree carries Codex rules of its own gets no session,
+        # so report that here rather than at the first start (#0017).
+        refuse_worker_project_rules(project)
         worker = config.permissions_for(project)
         validated.append({
             "project": str(project),

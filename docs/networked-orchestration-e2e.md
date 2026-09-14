@@ -64,6 +64,11 @@ code with that sandbox mode named, and no such ceiling is ever put to a judge.
 An earlier `workspace-write` run judged all 13 of its file changes, denying
 eight identical comment cleanups; those are now decided by containment.
 
+Neither child project may carry Codex rules of its own. The runtime loads
+`<project>/.codex/rules` at thread start, so the service refuses a session in
+such a project before starting a thread and answers `POST /sessions` with an
+error naming the path.
+
 The judge applies two tiers to whatever arrives: the overall
 [constitution](../examples/operator/constitution.md), which governs both children
 and treats a new dependency, network reach, or run-time-fetched code as a

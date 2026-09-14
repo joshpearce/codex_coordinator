@@ -15,6 +15,7 @@ from .coordinator import (
     PolicyUnavailable,
     SessionRegistration,
     WorkerPermissions,
+    WorkerProjectRules,
     codex_exec_json_runner,
 )
 
@@ -37,5 +38,6 @@ __all__ = [
     "TerminalResult",
     "SessionRegistration",
     "WorkerPermissions",
+    "WorkerProjectRules",
     "codex_exec_json_runner",
 ]

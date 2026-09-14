@@ -212,6 +212,22 @@ prompts the user", so `codex execpolicy check --rules "$COORD_DIR/project-a.rule
 codex-coordinator-file-change test_project_a.py` still lints the file. This is
 the only case in which an in-project file change is judged, and it is opt-in.
 
+## A worker project may not carry Codex rules of its own
+
+The Codex runtime loads execpolicy rules from `<project>/.codex/rules` at thread
+start, and an `allow` rule found there suppresses the approval request before
+anything reaches the coordinator. The pinned CLI offers no per-thread setting
+that turns this off. A single in-sandbox write — the kind of write a judge has
+every reason to approve, since writing project files is the assignment — would
+therefore remove judging from every later session of that project.
+
+So a project whose tree contains a `.codex/rules` entry, any `*.rules` file
+under a `.codex` directory, or a symlinked `.codex` the scan cannot see through
+gets no session: `POST /sessions` fails with an error naming the path,
+`codex-coordinator-preflight` reports it, and the check runs again before every
+turn on an existing thread. The file's contents are never read; its presence is
+the finding.
+
 The constitution has two tiers. The **overall** constitution at
 `constitution_path` applies to every project and is a ceiling. Each project also
 has its **own** constitution under `[project_constitutions]`, which can only

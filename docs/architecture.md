@@ -165,6 +165,27 @@ wrapper and evaluates chains per command, but offers no per-thread way to load
 rules, reads worker-writable project rules (#0017), ignores paths in its prefix
 match, and does not decide the guard shape workers issue.
 
+## Refusing a worker project that carries Codex rules
+
+The Codex runtime loads execpolicy rules from `<cwd>/.codex/rules` at thread
+start; `--strict-config` rejects every candidate key for turning that off, and
+an `allow` rule found there suppresses the approval request before anything
+reaches this codebase. One in-sandbox write would therefore remove judging from
+every later session of that project.
+
+`find_worker_project_rules` walks a worker project without following symlinks
+and reports the first `.codex/rules` entry, `*.rules` file under a `.codex`
+directory, or symlinked `.codex` the scan cannot see through. The contents are
+never read: presence is the finding, and an unfinishable scan is refused rather
+than passed. `CoordinatorService.start_session` and
+`JudgedSessionSupervisor.start` call it before `thread/start`, both callers call
+it again before every `turn/start` on an existing thread, and
+`codex-coordinator-preflight` calls it when validating a project. The service
+emits `session.project_rules_refused` naming the path and answers
+`POST /sessions` with HTTP 400 carrying the same text. The rule is about worker
+roots only; the coordinator's own project and the operator directory are not
+worker roots and are not scanned.
+
 ## Two-tier constitution
 
 `Constitution` holds one overall `PolicyDocument` and a mapping of canonical

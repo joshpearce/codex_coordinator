@@ -84,6 +84,12 @@ control for it, since a judge shown one in-scope diff could not see the
 feedback either, and the eight denials of a harmless comment cleanup in the
 recorded run are what that misapplied control actually produced.
 
+One class of this is now closed rather than accepted: a worker writing
+`.codex/rules` inside its own project, which the Codex runtime would load at
+the next thread start, is refused a session outright (see `docs/security.md`).
+That is the same shape as this finding — an in-scope write that changes later
+sessions — resolved by refusing the project rather than by judging the write.
+
 **Acceptance criteria**
 
 - An operator can name the paths that influence later turns (agent instruction
@@ -115,7 +121,11 @@ unenumerated.
 - The set of keys Codex honors from a project config under an app-server thread
   is enumerated in `docs/security.md` with a stated reason each is harmless
   under the explicit `approvalPolicy` and `sandboxPolicy` the coordinator sends,
-  or a worker project carrying such a file is rejected at session start.
+  or a worker project carrying such a file is rejected at session start. One
+  member of this unenumerated set has since been settled by live probing and
+  closed: the runtime loads `<cwd>/.codex/rules` at thread start, and a project
+  carrying those is now refused a session. `.codex/config.toml` itself is still
+  unenumerated and still not refused.
 - A live test starts a session for a project holding a `.codex/config.toml` that
   contradicts the operator declaration and shows which side the runtime used.
 
