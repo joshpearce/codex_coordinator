@@ -189,6 +189,38 @@ app-server or per-thread switch to ignore project rules, the coordinator sets
 it and asserts it loaded, and the refusal stays until that switch is proven
 live. That follow-up is tracked as issue #0019.
 
+## The coordinating session's sandbox is declared on its command line
+
+The coordinating session needs one capability its workers must never have: it
+must reach the loopback control plane. Codex CLI 0.154.0 does not grant that
+from a permission profile written inside the project the session runs in. Live
+probing of the pinned CLI shows `codex exec --cd <project>` ignoring a
+`[permissions]` profile in `<project>/.codex/config.toml` entirely: ten
+consecutive `curl` attempts over thirty seconds, from inside a session started
+that way, were refused by `ECONNREFUSED` while the service was listening,
+healthy, and idle; the same profile passed as `--config` overrides on the same
+command reached the service on the first attempt. Nothing warns that the file
+was ignored, and the session keeps the default sandbox, which has no network.
+
+The live harness therefore builds the coordinator profile itself and passes it
+on the `codex exec` command line, and the coordinator project ships no Codex
+configuration at all. That is the boundary this project already requires of a
+worker, applied to the coordinator for the same reason: the one root a session
+can write must not be where its own permissions are declared. The runtime
+ignoring such a file is the safe direction of the two — a session cannot widen
+itself by writing one — but it is not a substitute for keeping the declaration
+outside, because the ignoring is unannounced and is not a documented guarantee
+of the pinned CLI.
+
+A control plane that is listening and a control plane that is reachable are not
+the same claim, and the difference is invisible in the service's own log: every
+route that changes anything emits an event, so an idle service and an exited one
+both leave a log holding nothing but `service.started`. The harness reports the
+distinction rather than leaving it to be inferred — see
+`_control_plane_error` in `live_e2e.py`, which names an unreachable control
+plane, and whether the service was still running, ahead of the downstream
+symptoms that follow from it.
+
 ## Commands decided by operator rule rather than by a judge
 
 The one place commands are named is a separate kind of file: an operator-owned

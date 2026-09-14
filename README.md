@@ -316,46 +316,43 @@ PROJECT_A="$WORKSPACE_DIR/project-a"
 PROJECT_B="$WORKSPACE_DIR/project-b"
 ```
 
-Give the coordinator project its role instructions and a Codex permission
-profile. Run this from the cloned repository. The profile allows the
-coordinating session to call the loopback service and the default private
-app-server socket; it does **not** make either worker project writable. It does
-give the coordinator general outbound network access, so use it only in the
-trusted local environment described above.
+Give the coordinator project its role instructions, and declare its Codex
+permission profile on the command line rather than inside the project. Run this
+from the cloned repository. The profile lets the coordinating session call the
+loopback service and the default private app-server socket; it does **not** make
+either worker project writable. It does give the coordinator general outbound
+network access, so use it only in the trusted local environment described above.
 
 ```sh
-mkdir -p "$COORDINATOR_PROJECT/.codex"
 if [ ! -e "$COORDINATOR_PROJECT/AGENTS.md" ] &&
    [ ! -L "$COORDINATOR_PROJECT/AGENTS.md" ]; then
   cp examples/coordinator/AGENTS.md "$COORDINATOR_PROJECT/AGENTS.md"
 fi
-if [ ! -e "$COORDINATOR_PROJECT/.codex/config.toml" ] &&
-   [ ! -L "$COORDINATOR_PROJECT/.codex/config.toml" ]; then
-  {
-    printf '%s\n' \
-      'approval_policy = "never"' \
-      'default_permissions = "coordinator"' \
-      '[permissions.coordinator]' \
-      'extends = ":workspace"' \
-      '[permissions.coordinator.network]' \
-      'enabled = true' \
-      'mode = "full"' \
-      '[permissions.coordinator.network.unix_sockets]'
-    printf '"%s" = "allow"\n' \
-      "$HOME/.codex/app-server-control/app-server-control.sock"
-  } > "$COORDINATOR_PROJECT/.codex/config.toml"
-fi
+COORDINATOR_SOCKET="$HOME/.codex/app-server-control/app-server-control.sock"
+set -- \
+  -c 'default_permissions="coordinator"' \
+  -c 'approval_policy="never"' \
+  -c 'permissions.coordinator.extends=":workspace"' \
+  -c 'permissions.coordinator.network.enabled=true' \
+  -c 'permissions.coordinator.network.mode="full"' \
+  -c "permissions.coordinator.network.unix_sockets={\"$COORDINATOR_SOCKET\"=\"allow\"}"
 ```
 
-If either coordinator file already existed, review it rather than replacing it:
-the coordinator needs access to `http://127.0.0.1:8765`, and the socket entry
-must match `socket_path` if you changed that operator setting. Now start an
+Pass `"$@"` to `codex` below. The socket entry must match `socket_path` if you
+changed that operator setting. Do not write this profile into
+`$COORDINATOR_PROJECT/.codex/config.toml` instead. Under `codex exec`, Codex CLI
+0.154.0 ignores a `[permissions]` profile found there: the session keeps the
+default sandbox, which has no network, every call to the service is refused, and
+nothing reports that the file was discarded (`docs/security.md`). The command
+line is the form this project verifies, and it is also the rule this project
+applies to workers: the one root a session can write declares none of its own
+permissions. Now start an
 **interactive Codex session in the coordinator project** with a cross-project
 goal. This example gives two initially empty projects compatible producer and
 consumer tasks; replace it with your own goal for existing projects.
 
 ```sh
-codex -C "$COORDINATOR_PROJECT" \
+codex "$@" -C "$COORDINATOR_PROJECT" \
   "Use the coordinator service at http://127.0.0.1:8765 to manage two worker sessions.
   In $PROJECT_A, build a small offline Python CLI that writes inventory records as JSON.
   In $PROJECT_B, build a Python CLI that reads those records and prints a total.

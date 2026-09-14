@@ -13,6 +13,8 @@ from codex_coordinator.live_e2e import (
     OutputRenderer,
     _approval_errors,
     _approval_summary,
+    _control_plane_error,
+    _coordinator_permission_overrides,
     _relay_coordinator_events,
     _relay_service_events,
     _resolve_template,
@@ -480,13 +482,10 @@ def test_approval_validation_requires_per_project_constitution_provenance(tmp_pa
     assert _approval_errors(log) == ["approvals cite more than one overall constitution"]
 
 
-def test_coordinator_template_has_safe_baseline():
+def test_coordinator_project_carries_no_codex_configuration():
+    """The one root the coordinator can write declares none of its boundary."""
     repo = Path(__file__).resolve().parents[1]
-    config = (repo / "examples/coordinator/.codex/config.toml").read_text()
-    assert 'default_permissions = "coordinator"' in config
-    assert 'extends = ":workspace"' in config
-    assert '"{{APP_SERVER_SOCKET}}" = "allow"' in config
-    assert 'sandbox_mode = "danger-full-access"' not in config
+    assert not (repo / "examples/coordinator/.codex").exists()
 
 
 def test_live_e2e_allows_its_generated_non_git_workspace():
@@ -494,18 +493,54 @@ def test_live_e2e_allows_its_generated_non_git_workspace():
     assert '"--skip-git-repo-check"' in source
 
 
-def test_coordinator_config_resolves_only_the_socket_path(tmp_path: Path):
-    repo = Path(__file__).resolve().parents[1]
-    config = tmp_path / "config.toml"
-    shutil.copy(repo / "examples/coordinator/.codex/config.toml", config)
+def test_coordinator_permission_overrides_declare_a_usable_sandbox(tmp_path: Path):
     socket = tmp_path / "app-server-control.sock"
 
-    rendered = _resolve_template(config, {"APP_SERVER_SOCKET": socket})
+    overrides = _coordinator_permission_overrides(socket)
 
-    assert "{{" not in rendered
-    assert f'"{socket}" = "allow"' in rendered
-    parsed = tomllib.loads(rendered)
+    assert overrides[::2] == ["--config"] * (len(overrides) // 2)
+    settings = overrides[1::2]
+    assert 'default_permissions="coordinator"' in settings
+    assert 'permissions.coordinator.extends=":workspace"' in settings
+    # Without this the session cannot reach the loopback control plane at all.
+    assert "permissions.coordinator.network.enabled=true" in settings
+    assert not any("danger-full-access" in setting for setting in settings)
+    parsed = tomllib.loads("\n".join(settings))
     profile = parsed["permissions"]["coordinator"]
-    assert profile["extends"] == ":workspace"
-    assert profile["network"]["enabled"] is True
+    assert profile["network"]["mode"] == "full"
     assert profile["network"]["unix_sockets"][str(socket)] == "allow"
+
+
+def test_started_processes_do_not_inherit_a_stdin_that_may_never_close():
+    """`codex exec` waits for EOF on a pipe, and the coordinator is untimed."""
+    source = inspect.getsource(run)
+    assert source.count("stdin=asyncio.subprocess.DEVNULL") == 2
+
+
+def test_coordinator_command_carries_its_permission_profile():
+    """A profile inside the coordinator's project would be silently ignored."""
+    source = inspect.getsource(run)
+    assert "*permission_overrides," in source
+    assert '.codex/config.toml' not in source
+
+
+def test_idle_service_log_is_reported_as_an_unreachable_control_plane(tmp_path: Path):
+    log = tmp_path / "service.jsonl"
+    log.write_text(json.dumps({"sequence": 1, "type": "service.started"}) + "\n")
+
+    running = _control_plane_error(log, 8765, True)
+    stopped = _control_plane_error(log, 8765, False)
+
+    assert running is not None and "still running and idle" in running
+    assert "8765" in running
+    assert stopped is not None and "no longer running" in stopped
+
+
+def test_a_used_control_plane_reports_no_reachability_error(tmp_path: Path):
+    log = tmp_path / "service.jsonl"
+    log.write_text(
+        json.dumps({"sequence": 1, "type": "service.started"}) + "\n"
+        + json.dumps({"sequence": 2, "type": "session.created"}) + "\n"
+    )
+
+    assert _control_plane_error(log, 8765, True) is None

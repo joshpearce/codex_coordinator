@@ -105,6 +105,30 @@ def _approval_errors(service_log: Path) -> list[str]:
     return errors
 
 
+def _control_plane_error(
+    service_log: Path, port: int, service_running: bool
+) -> str | None:
+    """Name an unreachable control plane before its many downstream symptoms.
+
+    Every route that changes anything emits an event, so a log holding nothing
+    but `service.started` means no coordinator request ever arrived. An idle
+    service looks exactly like a dead one from the log alone, which is why the
+    message says which of the two this was.
+    """
+    if any(event.get("type") != "service.started" for event in _events(service_log)):
+        return None
+    if service_running:
+        return (
+            f"the coordinator never reached the control plane at 127.0.0.1:{port}; "
+            "the service was still running and idle, so check the sandbox the "
+            "coordinating session runs under rather than the service"
+        )
+    return (
+        f"the coordinator never reached the control plane at 127.0.0.1:{port}; "
+        "the service was no longer running"
+    )
+
+
 def _approval_summary(service_log: Path) -> dict[str, Any]:
     """Describe what the children actually asked for, for the run report.
 
@@ -332,6 +356,29 @@ def _make_project(root: Path, examples: Path, name: str) -> Path:
         raise FileExistsError(f"live E2E project already exists: {project}")
     shutil.copytree(examples / name, project)
     return project
+
+
+def _coordinator_permission_overrides(socket_path: Path) -> list[str]:
+    """Give the coordinating session its sandbox from outside its own project.
+
+    Codex CLI 0.154.0 does not apply a `[permissions]` profile written in the
+    working directory's `.codex/config.toml` to `codex exec`. A profile left
+    there is silently ignored, the session keeps the default sandbox with no
+    network, and every loopback call to the control plane is refused with
+    `ECONNREFUSED` while the service is healthy and idle. Declaring the profile
+    on the command line is also the boundary this project already requires of a
+    worker: the one root a session can write holds none of its own permissions.
+    """
+    settings = (
+        'default_permissions="coordinator"',
+        'approval_policy="never"',
+        'permissions.coordinator.extends=":workspace"',
+        "permissions.coordinator.network.enabled=true",
+        'permissions.coordinator.network.mode="full"',
+        "permissions.coordinator.network.unix_sockets="
+        f"{{{json.dumps(str(socket_path))}={json.dumps('allow')}}}",
+    )
+    return [argument for setting in settings for argument in ("--config", setting)]
 
 
 def _resolve_template(path: Path, replacements: dict[str, Path | int]) -> str:
@@ -619,14 +666,8 @@ async def run(args: argparse.Namespace) -> int:
             "COORDINATOR_PATH": coordinator,
         },
     )
-    _resolve_template(
-        coordinator / ".codex/config.toml",
-        {
-            "APP_SERVER_SOCKET": (
-                Path.home()
-                / ".codex/app-server-control/app-server-control.sock"
-            )
-        },
+    permission_overrides = _coordinator_permission_overrides(
+        Path.home() / ".codex/app-server-control/app-server-control.sock"
     )
     service_log = coordinator / "service.jsonl"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -636,6 +677,7 @@ async def run(args: argparse.Namespace) -> int:
             sys.executable, "-m", "codex_coordinator.service",
             "--port", "0", "--config", str(operator / "operator.toml"),
             "--verbose-events", cwd=repo,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=stream, stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
         )
@@ -663,6 +705,7 @@ async def run(args: argparse.Namespace) -> int:
         args.coordinator_model,
         "--config",
         f'model_reasoning_effort="{args.coordinator_reasoning_effort}"',
+        *permission_overrides,
         "--json",
         "--color",
         "never",
@@ -687,6 +730,10 @@ async def run(args: argparse.Namespace) -> int:
     )
     process = await asyncio.create_subprocess_exec(
         *command,
+        # `codex exec` waits for EOF on a non-terminal stdin before it starts.
+        # The coordinator is deliberately untimed, so an inherited pipe that
+        # never closes would hang the experiment rather than run it.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,
@@ -701,6 +748,7 @@ async def run(args: argparse.Namespace) -> int:
         # Deliberately no timeout: this is the experiment's long-running coordinator.
         return_code = await process.wait()
     finally:
+        service_was_running = service_process.returncode is None
         if process.returncode is None:
             os.killpg(process.pid, signal.SIGTERM)
             await process.wait()
@@ -725,6 +773,9 @@ async def run(args: argparse.Namespace) -> int:
     validation_errors = await _post_run_errors(
         coordinator, api_project, ui_project, summary
     )
+    unreachable = _control_plane_error(service_log, service_port, service_was_running)
+    if unreachable is not None:
+        validation_errors.insert(0, unreachable)
     final_return_code = return_code or (1 if validation_errors else 0)
     renderer.harness(
         "live_e2e.completed",

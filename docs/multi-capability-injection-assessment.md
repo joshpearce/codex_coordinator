@@ -121,11 +121,17 @@ unenumerated.
 - The set of keys Codex honors from a project config under an app-server thread
   is enumerated in `docs/security.md` with a stated reason each is harmless
   under the explicit `approvalPolicy` and `sandboxPolicy` the coordinator sends,
-  or a worker project carrying such a file is rejected at session start. One
-  member of this unenumerated set has since been settled by live probing and
-  closed: the runtime loads `<cwd>/.codex/rules` at thread start, and a project
-  carrying those is now refused a session. `.codex/config.toml` itself is still
-  unenumerated and still not refused.
+  or a worker project carrying such a file is rejected at session start. Two
+  members of this unenumerated set have since been settled by live probing. The
+  runtime loads `<cwd>/.codex/rules` at thread start, and a project carrying
+  those is now refused a session. A `[permissions]` profile in
+  `<cwd>/.codex/config.toml` is, under `codex exec`, ignored outright: the
+  session keeps the default sandbox with no network, and nothing reports that
+  the file was read and discarded (see `docs/security.md`). That is the safe
+  direction, since a session cannot widen itself by writing one, but it settles
+  only `codex exec` and only the permissions table; the rest of that file, and
+  what an app-server thread does with it, remain unenumerated and still not
+  refused.
 - A live test starts a session for a project holding a `.codex/config.toml` that
   contradicts the operator declaration and shows which side the runtime used.
 
