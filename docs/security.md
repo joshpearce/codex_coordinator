@@ -25,10 +25,49 @@ ambient temporary-directory write access. The coordinator process itself is
 not network-sandboxed; its network privileges must be considered trusted.
 Operator TOML must be an owner-controlled regular file outside every
 worker-writable allowed root; symlinked or group/other-writable files fail
-validation. Service-owned judging also requires a same-directory constitution
-file and an explicit coordinator root. Both trusted policy files must be outside
-the coordinator and worker roots. The constitution is snapshotted at startup;
-HTTP verdict submissions are rejected in this mode. Explicit `external` mode
+validation. Service-owned judging also requires a same-directory overall
+constitution file, an explicit coordinator root, and a project constitution
+covering every allowed root. Every
+trusted policy file must sit beside `operator.toml` under the same ownership
+rules and outside the coordinator and worker roots, and a project constitution
+may not reuse the overall one. All tiers are snapshotted at startup; HTTP
+verdict submissions are rejected in this mode.
+
+The two tiers are a scoping control, not just an authoring convenience. The
+overall document is a ceiling; a project document may only narrow it. A judge
+invoked for one project receives that project's document and no other, so
+policy written for a permissive worker cannot be read while judging a sensitive
+one, and the operator is not forced to write the union of every worker's needs.
+Both tiers are mandatory in service mode, so no worker is governed by the shared
+ceiling alone: startup rejects an allowed root with no project constitution,
+`POST /sessions` refuses an ungoverned project, and a judge asked about one
+denies without invoking a model. Tier selection is derived
+from the trusted session registration, never from request content. Both tiers
+are recorded by source path and text digest on `approval.requested` and
+`approval.resolved`, so an audit can show which documents a verdict was made
+under. Precedence between the tiers is prose evaluated by a model: it guides a
+judge and does not replace the deterministic path, sandbox, permission, and
+session limits.
+
+What escalates into a judged approval is decided by the worker project's
+`.codex/config.toml` and the sandbox derived from it, never by instructing a
+worker to stage approval requests: worker prompts in the examples contain no
+mention of judging, and the example child project trees contain none either.
+That file currently sits inside the worker's own writable root, so a worker can
+widen its `sandbox_mode` for a later session; the current session is unaffected
+because registration snapshots the boundary and every turn replays it. See
+[#0014](../issues/0014-high-new-worker-controls-its-own-permission-configuration.md).
+
+Both tiers are written as principles rather than command lists. That is a
+security property, not a style preference: a judge meets requests nobody
+anticipated, and an enumerating constitution is silent — which reads as
+permissive — on everything it failed to foresee. `scripts/judge_live_gate.py`
+holds a catalogue of realistic requests the constitutions deliberately do not
+name, and a unit test fails if any of those requests later appears verbatim in a
+policy document. Note that some scope expansions never reach a judge at all: a
+network permission request is rejected by `normalize_permissions` against the
+operator ceiling first, so an install attempt reaches the constitution as a
+command, which is also how a real worker issues it. Explicit `external` mode
 allows a trusted actor to submit verdicts but does not itself run a judge.
 
 By default, stdout JSONL contains metadata only. `--verbose-events` opts into

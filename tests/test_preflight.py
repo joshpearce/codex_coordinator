@@ -84,3 +84,41 @@ def test_preflight_reports_executable_and_login_probe_failures(monkeypatch, tmp_
     monkeypatch.setattr("codex_coordinator.preflight.subprocess.run", expired)
     with pytest.raises(ValueError, match="cannot check Codex sign-in"):
         check(config, [])
+
+
+def test_preflight_reports_two_tier_constitution_coverage(monkeypatch, tmp_path: Path):
+    operator = tmp_path / "operator"
+    coordinator = tmp_path / "coordinator"
+    for directory in (operator, coordinator):
+        directory.mkdir()
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    governed = _project(allowed, "governed")
+    nested = _project(allowed, "nested")
+    (operator / "constitution.md").write_text("No worker may use the network.\n")
+    (operator / "allowed.md").write_text("These workers run their own tests.\n")
+    config_path = operator / "operator.toml"
+    config_path.write_text(
+        'approval_mode = "service"\n'
+        f'constitution_path = "{operator / "constitution.md"}"\n'
+        f'coordinator_root = "{coordinator}"\n'
+        f'allowed_roots = ["{allowed}"]\n'
+        "[project_constitutions]\n"
+        f'"{allowed}" = "{operator / "allowed.md"}"\n'
+    )
+    config = OperatorConfig.load(path=config_path, environ={})
+    monkeypatch.setattr("codex_coordinator.preflight.check_codex_compatibility", lambda _command: "0.154.0")
+    monkeypatch.setattr("codex_coordinator.preflight.shutil.which", lambda _command: "/bin/codex")
+    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda: config.socket_path)
+
+    class Result:
+        returncode = 0
+
+    monkeypatch.setattr("codex_coordinator.preflight.subprocess.run", lambda *_args, **_kwargs: Result())
+    report = check(config, [governed, nested])
+    assert report["constitutionConfigured"] is True
+    # An operator can see which policy file governs each registered project
+    # before starting the service.
+    assert report["projectConstitutions"] == [str(allowed)]
+    assert config.constitution.for_project(governed).source == str(operator / "allowed.md")
+    assert config.constitution.for_project(nested).source == str(operator / "allowed.md")

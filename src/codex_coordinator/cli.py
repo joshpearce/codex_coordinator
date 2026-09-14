@@ -13,6 +13,7 @@ import websockets
 
 from .coordinator import (
     ApprovalPolicy,
+    Constitution,
     JudgedApprovalHandler,
     JudgedSessionSupervisor,
     OneShotCodexJudge,
@@ -89,7 +90,9 @@ async def run(args: argparse.Namespace) -> dict:
             codex_command=config.codex_command,
             timeout_seconds=config.judge_timeout_seconds,
         ),
-        policy_instructions=config.judge_policy,
+        constitution=config.constitution or Constitution.single(
+            config.judge_policy, source="judge_policy"
+        ),
     )
     worker_permissions = WorkerPermissions.from_project(project)
     policy = ApprovalPolicy(

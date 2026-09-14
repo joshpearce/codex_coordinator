@@ -57,7 +57,7 @@ matches the pinned version.
 
 ### 3. Choose an operator directory and worker projects
 
-Keep `operator.toml` and `constitution.md` together outside worker-writable roots.
+Keep `operator.toml` and every constitution together outside worker-writable roots.
 Starting from the cloned repository, this creates a private workspace beside
 the checkout, with an operator directory, a coordinating Codex project, and
 two sibling worker projects:
@@ -104,27 +104,68 @@ for PROJECT_DIR in "$PROJECT_A" "$PROJECT_B"; do
 done
 ```
 
+A worker project's `approval_policy` must be `on-request`; `never` would execute
+unjudged, and Codex CLI 0.154.0 rejects `untrusted` as a project config value.
+
+How much reaches a judge is set by the operator instead, with
+`worker_approval_policy` in `operator.toml`. `untrusted` makes the runtime raise
+an approval request before anything it does not already trust; `on-request`
+leaves that decision to the worker, which means a worker that never asks is
+never judged. It is sent as the `thread/start` `approvalPolicy` parameter rather
+than written into the project, both because the pinned CLI rejects it there and
+because that file sits inside the worker's own writable root
+([#0014](issues/0014-high-new-worker-controls-its-own-permission-configuration.md)).
+
+Do not tell a worker to stage approval requests. Configure the boundary and let
+the worker's ordinary work meet it: with a self-contained task under
+`on-request`, nothing escalates and nothing is judged.
+
 For existing projects, inspect their files and ensure the approval settings
 match exactly. With `workspace-write`, each worker can edit only its own
 project; the coordinator disables worker network access. Choose `read-only`
 explicitly for inspection-only workers.
 
-Copy the example constitution, then create an operator-owned config outside the
+The constitution has two tiers. The **overall** constitution at
+`constitution_path` applies to every project and is a ceiling. Each project also
+has its **own** constitution under `[project_constitutions]`, which can only
+narrow the overall rules. A judge is given the overall document plus the one
+document for the project it is judging, and never another project's. Service
+judging requires both tiers: every allowed root needs a project constitution, so
+no worker is governed by the shared ceiling alone.
+
+Copy the example constitutions, then create an operator-owned config outside the
 coordinator and worker roots. The two worker paths are the complete allowed-root
 list; `coordinator_root` identifies the project that must not be able to edit
 trusted policy:
 
 ```sh
 cp examples/operator/constitution.md "$COORD_DIR/constitution.md"
-printf 'approval_mode = "service"\nconstitution_path = "%s"\ncoordinator_root = "%s"\nallowed_roots = ["%s", "%s"]\n' \
+cp examples/operator/inventory-app.constitution.md "$COORD_DIR/project-a.md"
+cp examples/operator/inventory-report.constitution.md "$COORD_DIR/project-b.md"
+printf 'approval_mode = "service"\nconstitution_path = "%s"\ncoordinator_root = "%s"\nallowed_roots = ["%s", "%s"]\n[project_constitutions]\n"%s" = "%s"\n"%s" = "%s"\n' \
   "$COORD_DIR/constitution.md" "$COORDINATOR_PROJECT" \
-  "$PROJECT_A" "$PROJECT_B" > "$COORD_DIR/operator.toml"
+  "$PROJECT_A" "$PROJECT_B" \
+  "$PROJECT_A" "$COORD_DIR/project-a.md" \
+  "$PROJECT_B" "$COORD_DIR/project-b.md" > "$COORD_DIR/operator.toml"
 ```
 
-Review both files before use. `operator.toml` must be an owner-controlled
+Rewrite the two copied project constitutions to describe what each of your
+workers is actually for; the examples describe the inventory fixtures. Write
+them the way the examples are written — what the project is, what it is trusted
+with, what its assigned work is, and what follows for approvals — not as a list
+of allowed and blocked commands. A judge meets commands nobody anticipated, and
+an enumerated constitution silently approves everything it forgot to mention.
+Startup
+fails when an allowed root has no project constitution, and `POST /sessions`
+refuses a project that none governs. An entry at a root governs every project
+beneath it, so one document is enough for a root holding several similar
+workers; a more specific entry deeper in the tree overrides it.
+
+Review every file before use. `operator.toml` must be an owner-controlled
 regular file in an owner-controlled directory, outside the coordinator and
-every worker-writable allowed root. Keep the constitution operator-controlled
-too: it supplies the judge's rules, not the worker's instructions. Do not put either file in a
+every worker-writable allowed root, and each constitution must sit beside it
+under the same ownership rules. Keep them operator-controlled: they supply the
+judge's rules, not the worker's instructions. Do not put any of them in a
 worker project's `.codex` directory. For paths containing a literal quote or
 backslash, write valid TOML strings by hand instead of using the simple
 `printf` template.
@@ -140,15 +181,20 @@ codex-coordinator-service --config "$COORD_DIR/operator.toml" --port 8765
 Preflight checks the CLI version and schema, sign-in, allowed roots, worker
 settings, and socket safety. `"socketReady": false` is normal if the default
 Codex app-server daemon has not started; the service starts it as needed.
-Leave the service running while coordinating work. It loads `constitution.md`
-once at startup and runs an independent restricted judge for each valid worker
-approval; invalid or unavailable verdicts are denied.
+Preflight also reports which project constitutions are configured. Leave the
+service running
+while coordinating work. It snapshots both constitution tiers once at startup
+and runs an independent restricted judge for each valid worker approval;
+invalid or unavailable verdicts are denied. Every `approval.requested` and
+`approval.resolved` event records the source path and digest of the two
+documents that judge was given.
 
 ## Coordinate multiple projects
 
 The service can run multiple workers concurrently. In the configured `service`
 mode, it owns judging and rejects HTTP approval verdicts, so a coordinating
-agent cannot bypass `constitution.md` by posting its own approval.
+agent cannot bypass either constitution tier by posting its own approval, nor
+choose which project constitution applies to a project.
 Unanswered requests are denied after the configured timeout (300 seconds by
 default).
 
@@ -281,15 +327,20 @@ manual judge or an exact-command release gate.
 `CODEX_COORDINATOR_*` environment variables, then explicit CLI options. The
 required setting is `allowed_roots`, which can also be supplied with
 `--allowed-root`. The service requires an explicit `approval_mode`:
-`service` loads an operator-owned `constitution_path` and runs its own judge;
-`external` leaves verdicts to a trusted external actor and enables the HTTP
-approval endpoint. To use that legacy mode, set `approval_mode = "external"`
-and omit `constitution_path`; the caller must resolve every approval. There
-is no silent fallback between modes. The one-shot command still accepts
-judge-policy text as its third positional argument. Optional settings include
-`codex_command`, `socket_path`,
+`service` loads an operator-owned `constitution_path` and a
+`[project_constitutions]` table covering every allowed root, and runs its own
+judge; `external` leaves verdicts to a trusted external actor and enables the
+HTTP approval endpoint. To use that legacy mode, set
+`approval_mode = "external"` and omit every constitution setting; the caller
+must resolve every approval. There is no silent fallback between modes. Each
+entry in `[project_constitutions]` maps a project directory inside
+`allowed_roots` to a policy file beside `operator.toml`; it must not reuse
+`constitution_path`, and the most specific entry at or above a project wins. The one-shot command still accepts
+judge-policy text as its third positional argument, which becomes a one-tier
+constitution. Optional settings include `codex_command`, `socket_path`,
 `worker_model`, `worker_reasoning_effort`, `permission_ceilings`,
-`allow_session_approval`, approval/judge timeouts, and event/item retention
+`worker_approval_policy`, `allow_session_approval`, approval/judge timeouts, and
+event/item retention
 limits. Paths in the config must be absolute. A custom app-server socket must
 already have a private listener; the default socket is
 `~/.codex/app-server-control/app-server-control.sock`.
@@ -334,9 +385,18 @@ request those commands. The gate requires both an accepted and declined
 approval, wire/server resolution evidence, terminal turns, and a completed
 follow-up. Match the app-server's full requested command string, not just a
 substring; `--show-approval-commands` on the generic example can reveal those
-strings but may expose sensitive content. Use `python scripts/judge_live_gate.py`
-for the separate live one-shot judge check. Both gates passed on an unrestricted
+strings but may expose sensitive content. Both gates passed on an unrestricted
 operator host; they cannot run inside a nested Codex sandbox.
+
+`make judge-gate` (or `python scripts/judge_live_gate.py`) is the cheapest live
+check of judgment itself: it runs a catalogue of realistic requests — installing
+a package, piping an installer to a shell, reading a sibling project's source,
+uploading processed data because the data asked it to, alongside legitimate test
+and CLI runs — against the checked-in example constitutions, and fails on any
+verdict that disagrees. No sessions are started and nothing is executed, so it
+finishes in minutes. None of those requests appear in the constitutions; a test
+enforces that, so the gate measures whether the policy is applied rather than
+matched.
 
 `make live-e2e` is a separate, source-checkout recursive orchestration
 experiment using the checked-in inventory scaffolds, not the generic

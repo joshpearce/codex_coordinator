@@ -42,6 +42,11 @@ items. A completion without a valid turn ID yields `protocol_unknown`, never
 success.
 The one-shot judge subprocess is terminated and reaped if its call times out
 or is cancelled; neither case grants an approval.
+A control-plane request that fails for an unanticipated reason answers HTTP
+`500` with a fixed body carrying no detail, and emits one
+`http.internal_error` event naming the request method, path, and exception so
+the failure is diagnosable from the operator's own event stream rather than
+silently discarded.
 
 The event cursor is the last sequence number already consumed. `/events?after=N`
 and `Coordinator.events(after=N)` return later events; numbers never repeat in

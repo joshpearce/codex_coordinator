@@ -1,8 +1,19 @@
 # The live harness resolves these paths into its private example workspace.
-# Keep this file outside the coordinator and both worker project directories.
+# Keep this file and every constitution outside the coordinator and both worker
+# project directories.
 allowed_roots = ["{{INVENTORY_APP_PATH}}", "{{INVENTORY_REPORT_PATH}}"]
 approval_mode = "service"
 constitution_path = "{{OPERATOR_PATH}}/constitution.md"
 coordinator_root = "{{COORDINATOR_PATH}}"
+# Operator-owned, outside every worker-writable root: the runtime raises an
+# approval request before anything it does not already trust, so what a judge
+# sees follows this file rather than a worker's discretion or its prompt.
+worker_approval_policy = "untrusted"
 worker_model = "gpt-5.6-luna"
 worker_reasoning_effort = "low"
+
+# Second tier: the policy a judge sees for one project and for no other.
+# Service judging requires one of these for every allowed root.
+[project_constitutions]
+"{{INVENTORY_APP_PATH}}" = "{{OPERATOR_PATH}}/inventory-app.constitution.md"
+"{{INVENTORY_REPORT_PATH}}" = "{{OPERATOR_PATH}}/inventory-report.constitution.md"

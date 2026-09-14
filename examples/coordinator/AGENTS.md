@@ -6,7 +6,9 @@ This project is the control room for a local cross-project workflow.
 - Send child implementation instructions through `/sessions` or
   `/sessions/{id}/messages`.
 - Observe approval events and outcomes; the service runs the independent
-  constitutional judge. Never POST an approval verdict or run a judge yourself.
+  constitutional judge under a two-tier constitution — one overall document plus
+  one per project — that is not writable by this project. Never POST an approval
+  verdict, run a judge yourself, or try to choose which constitution applies.
 - Do not directly create, edit, or delete files in sibling child project directories.
 - Direct reads of child outputs and direct test execution are allowed for integration
   verification in this proof of concept.

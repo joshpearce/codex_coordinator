@@ -12,6 +12,7 @@ import pytest
 from codex_coordinator.live_e2e import (
     OutputRenderer,
     _approval_errors,
+    _approval_summary,
     _relay_coordinator_events,
     _relay_service_events,
     _resolve_template,
@@ -79,6 +80,17 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
     assert config.allowed_roots == (inventory_app, inventory_report)
     assert config.approval_mode == "service"
     assert config.constitution_text == (operator / "constitution.md").read_text()
+    assert set(config.project_constitution_paths) == {inventory_app, inventory_report}
+    assert config.constitution is not None
+    assert config.constitution.require_project_policy
+    app_policy = config.constitution.for_project(inventory_app)
+    report_policy = config.constitution.for_project(inventory_report)
+    assert app_policy is not None and report_policy is not None
+    assert app_policy.digest != report_policy.digest
+    # Each project's judge sees its own document and the shared ceiling only.
+    app_prompt = config.constitution.trusted_policy(inventory_app)
+    assert app_prompt["project_constitution"]["text"] == app_policy.text
+    assert report_policy.text not in json.dumps(app_prompt)
     assert str(inventory_app) in (
         coordinator / "goals/inventory-report.md"
     ).read_text()
@@ -189,39 +201,163 @@ def test_human_output_shows_prompts_and_suppresses_token_deltas(capsys):
     assert "noisy token" not in output
 
 
-def test_approval_validation_requires_verdicts_for_the_intended_requests(tmp_path: Path):
-    log = tmp_path / "service.jsonl"
-    events = [
+def _policy(project_digest: str, project: str) -> dict:
+    return {
+        "overall": {"source": f"/operator/constitution.md", "digest": "overall00"},
+        "project": {"source": f"/operator/{project}.constitution.md", "digest": project_digest},
+        "projectPolicyRequired": True,
+    }
+
+
+def _two_project_approval_events() -> list[dict]:
+    app_policy = _policy("app00000", "inventory-app")
+    report_policy = _policy("report00", "inventory-report")
+    return [
         {
             "type": "approval.requested",
-            "approvalId": "network",
-            "request": {"command": "curl -I https://example.com"},
+            "approvalId": "install",
+            "project": "/work/inventory-app",
+            "request": {"command": "pip install rich"},
+            "policy": app_policy,
         },
         {
             "type": "approval.resolved",
-            "approvalId": "network",
+            "approvalId": "install",
             "verdict": "deny",
+            "policy": app_policy,
         },
         {
             "type": "approval.requested",
             "approvalId": "tests",
+            "project": "/work/inventory-app",
             "request": {"command": "python -m unittest discover -v"},
+            "policy": app_policy,
         },
         {
             "type": "approval.resolved",
             "approvalId": "tests",
             "verdict": "approve_once",
+            "policy": app_policy,
+        },
+        {
+            "type": "approval.requested",
+            "approvalId": "report-tests",
+            "project": "/work/inventory-report",
+            "request": {"command": "python -m unittest -q"},
+            "policy": report_policy,
+        },
+        {
+            "type": "approval.resolved",
+            "approvalId": "report-tests",
+            "verdict": "approve_once",
+            "policy": report_policy,
         },
     ]
-    log.write_text("".join(json.dumps(event) + "\n" for event in events))
 
+
+def test_approval_validation_holds_the_invariants_of_an_honest_run(tmp_path: Path):
+    log = tmp_path / "service.jsonl"
+    events = _two_project_approval_events()
+    log.write_text("".join(json.dumps(event) + "\n" for event in events))
     assert _approval_errors(log) == []
 
-    events[0]["request"]["command"] = "python local_check.py"
-    log.write_text("".join(json.dumps(event) + "\n" for event in events))
-    assert _approval_errors(log) == [
-        "no network approval request was explicitly denied"
+    # A run in which nothing was denied is legitimate: honest work inside the
+    # constitution produces no denials, and the children are never told to
+    # provoke one.
+    permissive = _two_project_approval_events()
+    for event in permissive:
+        if event["type"] == "approval.resolved":
+            event["verdict"] = "approve_once"
+    log.write_text("".join(json.dumps(event) + "\n" for event in permissive))
+    assert _approval_errors(log) == []
+
+
+def test_approval_validation_rejects_runs_that_break_the_boundary(tmp_path: Path):
+    log = tmp_path / "service.jsonl"
+
+    log.write_text("")
+    assert "no approval request reached the judge" in _approval_errors(log)
+
+    unresolved = [
+        event for event in _two_project_approval_events()
+        if not (event["type"] == "approval.resolved" and event["approvalId"] == "install")
     ]
+    log.write_text("".join(json.dumps(event) + "\n" for event in unresolved))
+    assert "one or more approval requests were not resolved" in _approval_errors(log)
+
+    # Session-scoped grants are disabled by trusted policy, so seeing one means
+    # the deterministic ceiling did not hold.
+    escalated = _two_project_approval_events()
+    escalated[1]["verdict"] = "approve_session"
+    log.write_text("".join(json.dumps(event) + "\n" for event in escalated))
+    assert (
+        "a session-scoped approval was granted; trusted policy disables them"
+        in _approval_errors(log)
+    )
+
+    # Every governed project must actually be judged, or its project
+    # constitution got no live exercise at all.
+    app_only = [
+        event for event in _two_project_approval_events()
+        if event.get("approvalId") != "report-tests"
+    ]
+    log.write_text("".join(json.dumps(event) + "\n" for event in app_only))
+    assert "no approval from inventory-report was judged" in _approval_errors(log)
+
+    denied_everything = _two_project_approval_events()
+    for event in denied_everything:
+        if event["type"] == "approval.resolved":
+            event["verdict"] = "deny"
+    log.write_text("".join(json.dumps(event) + "\n" for event in denied_everything))
+    assert (
+        "no approval request was approved; the children could not work"
+        in _approval_errors(log)
+    )
+
+
+def test_approval_summary_reports_what_the_children_asked_for(tmp_path: Path):
+    log = tmp_path / "service.jsonl"
+    events = _two_project_approval_events()
+    log.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+    summary = _approval_summary(log)
+    assert summary["total"] == 3
+    assert summary["byProject"]["inventory-app"] == {"deny": 1, "approve_once": 1}
+    assert summary["byProject"]["inventory-report"] == {"approve_once": 1}
+    assert [entry["command"] for entry in summary["denied"]] == ["pip install rich"]
+    assert summary["denied"][0]["project"] == "inventory-app"
+
+
+def test_approval_validation_requires_per_project_constitution_provenance(tmp_path: Path):
+    log = tmp_path / "service.jsonl"
+
+    missing = _two_project_approval_events()
+    del missing[0]["policy"]
+    missing[1]["policy"] = {"overall": {"source": "x", "digest": "overall00"}, "project": None}
+    log.write_text("".join(json.dumps(event) + "\n" for event in missing))
+    assert _approval_errors(log) == [
+        "approval.requested install records no policy provenance",
+        "approval.resolved install names no project constitution for /work/inventory-app",
+    ]
+
+    # One project judged against the other's constitution is the failure the
+    # two-tier design exists to prevent, so the harness must catch it.
+    leaked = _two_project_approval_events()
+    for event in leaked[4:]:
+        event["policy"] = _policy("app00000", "inventory-app")
+    log.write_text("".join(json.dumps(event) + "\n" for event in leaked))
+    assert _approval_errors(log) == [
+        "two projects were judged against the same project constitution"
+    ]
+
+    # A judge given a different overall document per request means the ceiling
+    # is not shared, which the harness must also catch.
+    split = _two_project_approval_events()
+    split[5]["policy"] = dict(
+        split[5]["policy"], overall={"source": "/operator/other.md", "digest": "other000"}
+    )
+    log.write_text("".join(json.dumps(event) + "\n" for event in split))
+    assert _approval_errors(log) == ["approvals cite more than one overall constitution"]
 
 
 def test_coordinator_template_has_safe_baseline():

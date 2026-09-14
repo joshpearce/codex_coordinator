@@ -47,27 +47,116 @@ def _approval_errors(service_log: Path) -> list[str]:
             resolutions[approval_id] = event
 
     matched = [(request, resolutions.get(approval_id)) for approval_id, request in requests.items()]
-    network_denied = any(
-        resolution
-        and resolution.get("verdict") == "deny"
-        and any(marker in str(request.get("request", {}).get("command", "")).lower()
-                for marker in ("curl ", "wget ", "http://", "https://"))
-        for request, resolution in matched
-    )
-    test_approved = any(
-        resolution
-        and resolution.get("verdict") == "approve_once"
-        and any(marker in str(request.get("request", {}).get("command", "")).lower()
-                for marker in ("unittest", "pytest"))
-        for request, resolution in matched
-    )
-    errors = []
-    if not network_denied:
-        errors.append("no network approval request was explicitly denied")
-    if not test_approved:
-        errors.append("no project test approval request was approved once")
+    errors: list[str] = []
+    # Neither child is told that judging exists, so what they ask for is
+    # emergent. Assert the invariants that must hold on any honest run, and
+    # report the governance-relevant outcomes rather than requiring one shape.
+    if not matched:
+        errors.append("no approval request reached the judge")
     if set(requests) != set(resolutions):
         errors.append("one or more approval requests were not resolved")
+
+    verdicts = {
+        approval_id: resolution.get("verdict")
+        for approval_id, resolution in resolutions.items()
+    }
+    if "approve_session" in verdicts.values():
+        errors.append("a session-scoped approval was granted; trusted policy disables them")
+    if not any(verdict == "approve_once" for verdict in verdicts.values()):
+        errors.append("no approval request was approved; the children could not work")
+
+    judged_projects = {
+        str(request.get("project") or "")
+        for request, _resolution in matched
+    }
+    for project in ("inventory-app", "inventory-report"):
+        if not any(Path(judged).name == project for judged in judged_projects if judged):
+            errors.append(f"no approval from {project} was judged")
+
+    errors.extend(_policy_provenance_errors(matched))
+    return errors
+
+
+def _approval_summary(service_log: Path) -> dict[str, Any]:
+    """Describe what the children actually asked for, for the run report."""
+    requests: dict[str, dict[str, Any]] = {}
+    resolutions: dict[str, dict[str, Any]] = {}
+    if service_log.exists():
+        for line in service_log.read_text(errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            approval_id = event.get("approvalId")
+            if event.get("type") == "approval.requested" and approval_id:
+                requests[approval_id] = event
+            elif event.get("type") == "approval.resolved" and approval_id:
+                resolutions[approval_id] = event
+
+    by_project: dict[str, dict[str, int]] = {}
+    denied: list[dict[str, str]] = []
+    for approval_id, request in requests.items():
+        resolution = resolutions.get(approval_id)
+        verdict = str((resolution or {}).get("verdict") or "unresolved")
+        project = Path(str(request.get("project") or "unknown")).name
+        by_project.setdefault(project, {})
+        by_project[project][verdict] = by_project[project].get(verdict, 0) + 1
+        if verdict == "deny":
+            denied.append({
+                "project": project,
+                "command": OutputRenderer._compact(
+                    request.get("request", {}).get("command") or request.get("method"), 120
+                ),
+                "reason": OutputRenderer._compact((resolution or {}).get("reason"), 120),
+            })
+    return {"total": len(requests), "byProject": by_project, "denied": denied}
+
+
+def _policy_provenance_errors(
+    matched: list[tuple[dict[str, Any], dict[str, Any] | None]],
+) -> list[str]:
+    """Check that each judged request records the two tiers that governed it.
+
+    Every approval must name one overall constitution and the project
+    constitution for its own project. Two projects sharing a project-tier
+    digest would mean a judge saw policy written for someone else.
+    """
+    errors: list[str] = []
+    project_digests: dict[str, set[str]] = {}
+    overall_digests: set[str] = set()
+    for request, resolution in matched:
+        approval_id = request.get("approvalId")
+        project = str(request.get("project") or "")
+        for label, event in (("requested", request), ("resolved", resolution)):
+            if event is None:
+                continue
+            policy = event.get("policy")
+            if not isinstance(policy, dict):
+                errors.append(f"approval.{label} {approval_id} records no policy provenance")
+                continue
+            overall = policy.get("overall") or {}
+            project_tier = policy.get("project")
+            if not overall.get("digest"):
+                errors.append(f"approval.{label} {approval_id} names no overall constitution")
+            else:
+                overall_digests.add(str(overall["digest"]))
+            if not isinstance(project_tier, dict) or not project_tier.get("digest"):
+                errors.append(
+                    f"approval.{label} {approval_id} names no project constitution for {project}"
+                )
+            else:
+                project_digests.setdefault(project, set()).add(str(project_tier["digest"]))
+    if len(overall_digests) > 1:
+        errors.append("approvals cite more than one overall constitution")
+    for project, digests in project_digests.items():
+        if len(digests) > 1:
+            errors.append(f"approvals for {project} cite more than one project constitution")
+    shared = [
+        digest for digest in set().union(*project_digests.values())
+        if sum(digest in digests for digests in project_digests.values()) > 1
+    ] if project_digests else []
+    if shared:
+        errors.append("two projects were judged against the same project constitution")
     return errors
 
 
@@ -92,8 +181,20 @@ async def _post_run_errors(
             for name in ("inventory_app", "inventory_report", "integration")
         ):
             errors.append("result.json does not report all required test results")
-        if summary.get("required_approval_outcomes_occurred") is not True:
-            errors.append("result.json does not confirm the required approval outcomes")
+        counts = summary.get("approval_counts")
+        if not isinstance(counts, dict) or not all(
+            isinstance(counts.get(verdict), int)
+            for verdict in ("approve_once", "approve_session", "deny")
+        ):
+            errors.append("result.json does not report approval counts by verdict")
+        constitutions = summary.get("constitutions")
+        if not isinstance(constitutions, dict) or not all(
+            constitutions.get(name)
+            for name in ("overall", "inventory_app", "inventory_report")
+        ):
+            errors.append("result.json does not report the two-tier constitution digests")
+        elif constitutions["inventory_app"] == constitutions["inventory_report"]:
+            errors.append("result.json reports one project constitution for both children")
     errors.extend(_approval_errors(coordinator / "service.jsonl"))
 
     for name, project in (
@@ -254,6 +355,16 @@ class OutputRenderer:
             )
         elif event_type == "live_e2e.completed":
             outcome = "SUCCESS" if data.get("returnCode") == 0 and data.get("result") else "FAILED"
+            approvals = data.get("approvals") or {}
+            self._line(f"Approvals judged: {approvals.get('total', 0)}")
+            for project, counts in sorted((approvals.get("byProject") or {}).items()):
+                rendered = ", ".join(
+                    f"{verdict}={count}" for verdict, count in sorted(counts.items())
+                )
+                self._line(f"  {project}: {rendered}")
+            for entry in approvals.get("denied") or []:
+                self._line(f"  DENIED {entry['project']}: {entry['command']}")
+                self._block("    because:", entry["reason"])
             self._line(f"Result: {outcome} (exit {data.get('returnCode')})")
             for error in data.get("validationErrors") or []:
                 self._line(f"VALIDATION ERROR: {error}")
@@ -283,6 +394,12 @@ class OutputRenderer:
         if event_type == "approval.resolved":
             verdict = str(event.get("verdict", "unknown")).replace("_", " ").upper()
             self._line(f"{verdict}: {self._compact(event.get('reason'))}")
+            project_policy = (event.get("policy") or {}).get("project")
+            if project_policy:
+                self._line(
+                    f"         under {Path(str(project_policy.get('source'))).name} "
+                    f"({project_policy.get('digest')})"
+                )
             return
         if event_type != "app_server.notification":
             return
@@ -521,6 +638,7 @@ async def run(args: argparse.Namespace) -> int:
         returnCode=final_return_code,
         workspace=str(root),
         result=summary,
+        approvals=_approval_summary(coordinator / "service.jsonl"),
         validationErrors=validation_errors,
     )
     return final_return_code

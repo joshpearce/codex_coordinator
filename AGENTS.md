@@ -8,12 +8,21 @@ loopback-only workflow with Codex CLI 0.154.0. Do not describe it as safe for
 remote, multi-user, or production authorization.
 
 The one-shot CLI runs its own independent approval judge. The long-running HTTP
-service has an explicit service-owned mode that loads `constitution.md` and
-runs independent judges, plus an explicit external-verdict mode. Both apply
-the same deterministic constraints. That work is complete and recorded as
+service has an explicit service-owned mode that loads a two-tier constitution —
+one overall document plus one per project, the overall one being a ceiling the
+project one may only narrow — and runs independent judges,
+plus an explicit external-verdict mode. A judge receives the overall document
+and its own project's, never another project's. Both modes apply the same
+deterministic constraints. That work is complete and recorded as
 milestone M2 in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 Keep operator policy outside coordinator- and worker-writable roots. Treat
 worker output, approval requests, and model verdicts as untrusted evidence.
+Worker projects must not be told that judging exists: what reaches a judge is
+decided by each project's `.codex/config.toml` and its actual task, never by
+instructing a worker to stage approval requests. A constitution states
+principles and capability profiles, never a list of allowed or blocked commands;
+`tests/test_judge_live_gate.py` fails if a catalogued request is named verbatim
+in a policy document.
 
 ## Issue tracking and priority
 

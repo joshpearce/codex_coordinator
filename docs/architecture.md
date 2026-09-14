@@ -11,7 +11,21 @@ and server approval requests. `JudgedSessionSupervisor` is the one-shot adapter;
 
 Both read the worker project's `.codex/config.toml` once at registration, accept
 only `on-request`, the `user` reviewer, and `read-only` or `workspace-write`, and
-send those values explicitly on `thread/start`. A managed thread is then registered
+send those values explicitly on `thread/start`. `never` is rejected because it
+would execute unjudged. The protocol's `AskForApproval` enum also lists
+`untrusted`, but Codex CLI 0.154.0 removed it as a config value and fails
+`thread/start` with "no longer supported", so it is rejected at startup rather
+than deferred into an opaque runtime error.
+
+How much reaches a judge is operator-owned. `worker_approval_policy` in
+`operator.toml` accepts `on-request` or `untrusted` and is sent as the
+`thread/start` `approvalPolicy` parameter, overriding the project's declared
+value. The same CLI that rejects `untrusted` in a project config accepts it on
+the wire, and sending it keeps the setting outside the worker's own writable
+root. Under `untrusted` the runtime raises an approval request before anything
+it does not already trust; under `on-request` a worker that never asks is never
+judged. The turn sandbox derived from `sandbox_mode` is unchanged either way and
+still disables network access. Worker prompts are never the mechanism. A managed thread is then registered
 with an immutable session ID, canonical project root, and `ApprovalPolicy`.
 
 Every `turn/start`, including follow-up turns, carries the sandbox policy captured
@@ -59,7 +73,23 @@ a permission request, but cannot expand its permission or lifetime ceiling.
 The one-shot adapter calls a `Judge` directly. In service-owned mode, the live
 broker also invokes an independent restricted judge and rejects HTTP verdicts;
 explicit external mode instead accepts verdicts over HTTP. Both modes emit a
-normalized `approval.requested` event. In all paths, invalid
+normalized `approval.requested` event.
+
+## Two-tier constitution
+
+`Constitution` holds one overall `PolicyDocument` and a mapping of canonical
+project directories to their own documents. `for_project` selects the most
+specific entry at or above a project; `trusted_policy` returns the overall
+document plus that one project document and nothing else, so a judge for one
+project cannot read another project's policy. Service-mode configuration always
+sets `require_project_policy`, so an uncovered project raises
+`PolicyUnavailable`, which the judge converts to a denial without calling a
+model, and `start_session` refuses the project outright. The flag exists because
+the one-shot path builds a one-tier `Constitution.single` from judge-policy text
+and has no per-project documents to require. `provenance` returns the source path and text
+digest of each tier for the audit record. Tier selection is keyed on the
+registered project path, never on request content, and the keys are the
+canonical paths the operator config validated. In all paths, invalid
 responses, judge errors, ambiguity, conflicting evidence, and ceiling violations
 fail closed.
 
@@ -83,7 +113,12 @@ boundary. Decisions bind to normalized fields and registered identity.
 
 Audit events record `declaredIntent` separately from `enforcedCapabilities`. The
 former may contain worker-authored prose; the latter is derived solely from trusted
-registration and runtime sandbox policy.
+registration and runtime sandbox policy. A third field, `policy`, records which
+constitution tiers the judge was given by source and digest; it is derived from
+trusted configuration and is absent in external mode, where the service runs no
+judge. The judge prompt carries the normalized `declared_intent` alongside the
+raw request so the two constitutions are applied to what the coordinator
+actually parsed, not only to the worker's own wording.
 
 ## Deliberate remaining scope
 

@@ -92,9 +92,9 @@ async def test_one_shot_cli_uses_operator_judge_settings(monkeypatch, tmp_path: 
     captured = {}
 
     class CapturingJudge:
-        def __init__(self, runner, *, policy_instructions):
+        def __init__(self, runner, *, constitution):
             captured["runner"] = runner
-            captured["policy"] = policy_instructions
+            captured["constitution"] = constitution
 
     async def noop(**_kwargs):
         return None
@@ -107,7 +107,11 @@ async def test_one_shot_cli_uses_operator_judge_settings(monkeypatch, tmp_path: 
     monkeypatch.setattr("codex_coordinator.cli.websockets.unix_connect", unavailable)
     with pytest.raises(ConnectionError, match="codex-coordinator-preflight"):
         await run(_args(project))
-    assert captured["policy"] == "Only approve reviewed commands."
+    constitution = captured["constitution"]
+    assert constitution.overall.text == "Only approve reviewed commands."
+    assert constitution.overall.source == "judge_policy"
+    assert constitution.projects == {}
+    assert not constitution.require_project_policy
     assert captured["runner"].keywords == {
         "codex_command": config.codex_command,
         "timeout_seconds": 42,

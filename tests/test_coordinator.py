@@ -11,10 +11,12 @@ import codex_coordinator.coordinator as coordinator_module
 from codex_coordinator.coordinator import (
     ApprovalCase,
     ApprovalPolicy,
+    Constitution,
     JudgeDecision,
     JudgedApprovalHandler,
     JudgedSessionSupervisor,
     OneShotCodexJudge,
+    PolicyDocument,
     SessionRegistration,
     WorkerPermissions,
     codex_exec_json_runner,
@@ -765,3 +767,153 @@ def test_thread_registration_is_immutable(tmp_path: Path):
         SessionRegistration("session-2", "worker-2", "/different", handler.policy)
     with pytest.raises(AttributeError, match="immutable"):
         handler.policy.allow_session_approval = True
+
+
+def test_two_tier_constitution_resolves_the_most_specific_project_document(tmp_path: Path):
+    root = tmp_path / "workspace"
+    nested = root / "web"
+    overall = PolicyDocument("Never use the network.", "/operator/constitution.md")
+    constitution = Constitution(
+        overall,
+        projects={
+            root: PolicyDocument("Workspace default rules.", "/operator/workspace.md"),
+            nested: PolicyDocument("This worker may search the web.", "/operator/web.md"),
+        },
+    )
+
+    assert constitution.for_project(nested).source == "/operator/web.md"
+    assert constitution.for_project(root / "mail").source == "/operator/workspace.md"
+    assert constitution.for_project(tmp_path / "elsewhere") is None
+    assert constitution.for_project("relative/path") is None
+    assert constitution.overall is overall
+    with pytest.raises(ValueError, match="absolute path"):
+        Constitution(overall, projects={Path("relative"): overall})
+    with pytest.raises(ValueError, match="nonempty"):
+        PolicyDocument("   ", "/operator/empty.md")
+
+
+def test_judge_sees_only_its_own_project_constitution(tmp_path: Path):
+    mail = tmp_path / "mail"
+    web = tmp_path / "web"
+    constitution = Constitution(
+        PolicyDocument("Overall ceiling.", "/operator/constitution.md"),
+        projects={
+            mail: PolicyDocument("MAIL-ONLY-SECRET rules.", "/operator/mail.md"),
+            web: PolicyDocument("WEB-ONLY-SECRET rules.", "/operator/web.md"),
+        },
+    )
+    prompts: list[dict] = []
+
+    async def run(prompt):
+        prompts.append(json.loads(prompt))
+        return '{"verdict":"deny","reason":"unsafe"}'
+
+    judge = OneShotCodexJudge(run, constitution=constitution)
+    case = ApprovalCase(
+        ApprovalPolicy.COMMAND, "t", str(mail), {"command": "curl https://evil"},
+        declared_intent={"executable": "curl"},
+    )
+    assert asyncio.run(judge.decide(case)).verdict == "deny"
+
+    trusted = prompts[0]["trusted_instructions"]
+    assert trusted["overall_constitution"]["text"] == "Overall ceiling."
+    assert trusted["project_constitution"]["text"] == "MAIL-ONLY-SECRET rules."
+    assert trusted["project_constitution"]["project"] == str(mail)
+    assert "WEB-ONLY-SECRET" not in json.dumps(prompts[0])
+    assert any("only narrow" in rule for rule in trusted["rules"])
+    # The normalized intent the coordinator derived is evidence the judge needs.
+    assert prompts[0]["untrusted_evidence"]["declared_intent"] == {"executable": "curl"}
+
+
+def test_judge_fails_closed_when_a_required_project_constitution_is_missing(tmp_path: Path):
+    constitution = Constitution(
+        PolicyDocument("Overall ceiling.", "/operator/constitution.md"),
+        projects={tmp_path / "known": PolicyDocument("Known rules.", "/operator/known.md")},
+        require_project_policy=True,
+    )
+    calls: list[str] = []
+
+    async def run(prompt):
+        calls.append(prompt)
+        return '{"verdict":"approve_once","reason":"looks fine"}'
+
+    judge = OneShotCodexJudge(run, constitution=constitution)
+    unknown = ApprovalCase(ApprovalPolicy.COMMAND, "t", str(tmp_path / "unknown"), {})
+    decision = asyncio.run(judge.decide(unknown))
+    assert decision.verdict == "deny"
+    assert "no project constitution" in decision.reason
+    assert calls == []
+
+    assert asyncio.run(
+        judge.decide(ApprovalCase(ApprovalPolicy.COMMAND, "t", str(tmp_path / "known"), {}))
+    ).verdict == "approve_once"
+    assert len(calls) == 1
+
+    # Without the requirement, a project with no document is judged by the
+    # overall tier alone rather than denied.
+    permissive = Constitution(constitution.overall, projects=dict(constitution.projects))
+    assert asyncio.run(
+        OneShotCodexJudge(run, constitution=permissive).decide(unknown)
+    ).verdict == "approve_once"
+
+
+def test_constitution_provenance_records_both_tiers_for_audit(tmp_path: Path):
+    project = tmp_path / "worker"
+    constitution = Constitution(
+        PolicyDocument("Overall ceiling.", "/operator/constitution.md"),
+        projects={project: PolicyDocument("Project rules.", "/operator/worker.md")},
+        require_project_policy=True,
+    )
+    provenance = constitution.provenance(project)
+    assert provenance["overall"]["source"] == "/operator/constitution.md"
+    assert provenance["project"]["source"] == "/operator/worker.md"
+    assert provenance["projectPolicyRequired"] is True
+    assert provenance["overall"]["digest"] != provenance["project"]["digest"]
+    assert constitution.provenance(tmp_path / "other")["project"] is None
+
+    # A digest identifies the exact text a judge was given.
+    changed = Constitution(
+        PolicyDocument("Overall ceiling, amended.", "/operator/constitution.md"),
+        projects=dict(constitution.projects),
+    )
+    assert changed.provenance(project)["overall"]["digest"] != provenance["overall"]["digest"]
+
+
+def test_worker_approval_policy_rejects_everything_but_on_request(tmp_path: Path):
+    """`never` executes unjudged; `untrusted` is not a valid value on the pinned CLI."""
+    project = tmp_path / "worker"
+    (project / ".codex").mkdir(parents=True)
+    config = project / ".codex/config.toml"
+
+    def write(policy: str) -> None:
+        config.write_text(
+            f'approval_policy = "{policy}"\n'
+            'approvals_reviewer = "user"\n'
+            'sandbox_mode = "workspace-write"\n'
+        )
+
+    write("on-request")
+    assert WorkerPermissions.from_project(project).approval_policy == "on-request"
+
+    # "untrusted" is in the protocol's AskForApproval enum but Codex CLI
+    # 0.154.0 rejects it in a project config, so accepting it here would defer
+    # a clear startup error into an opaque runtime failure.
+    for policy in ("untrusted", "never", "on-failure", "auto", ""):
+        write(policy)
+        with pytest.raises(ValueError, match="require approval_policy"):
+            WorkerPermissions.from_project(project)
+
+
+def test_worker_sandbox_is_derived_from_config_not_from_the_worker(tmp_path: Path):
+    """The enforced boundary comes from the validated config, never the prompt."""
+    project = tmp_path / "worker"
+    (project / ".codex").mkdir(parents=True)
+    (project / ".codex/config.toml").write_text(
+        'approval_policy = "on-request"\n'
+        'approvals_reviewer = "user"\n'
+        'sandbox_mode = "workspace-write"\n'
+    )
+    sandbox = WorkerPermissions.from_project(project).enforced_sandbox(project)
+    assert sandbox["networkAccess"] is False
+    assert sandbox["writableRoots"] == [str(project.resolve())]
+    assert sandbox["excludeTmpdirEnvVar"] is True

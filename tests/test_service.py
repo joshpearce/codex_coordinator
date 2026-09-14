@@ -6,7 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from codex_coordinator.coordinator import ApprovalPolicy, JudgeDecision, SessionRegistration
+from codex_coordinator.coordinator import (
+    ApprovalPolicy,
+    Constitution,
+    JudgeDecision,
+    PolicyDocument,
+    SessionRegistration,
+    WorkerPermissions,
+)
 from codex_coordinator.config import OperatorConfig
 from codex_coordinator.protocol import ProtocolClient
 from codex_coordinator.service import ApprovalBroker, CoordinatorService, EventCursorExpired, EventLog, HttpControlServer, RequestTooLarge, Session, run
@@ -1437,23 +1444,28 @@ async def test_service_startup_wires_snapshotted_constitution_to_judge(monkeypat
         directory.mkdir()
     constitution = operator / "constitution.md"
     constitution.write_text("Deny network.\n")
+    worker_policy = operator / "worker.md"
+    worker_policy.write_text("This worker runs its own tests.\n")
     config_path = operator / "operator.toml"
     config_path.write_text(
         'approval_mode = "service"\n'
         f'constitution_path = "{constitution}"\n'
         f'coordinator_root = "{coordinator}"\n'
         f'allowed_roots = ["{worker}"]\n'
+        "[project_constitutions]\n"
+        f'"{worker}" = "{worker_policy}"\n'
     )
     config = OperatorConfig.load(path=config_path, environ={})
     constitution.write_text("Changed after startup.\n")
+    worker_policy.write_text("Changed after startup too.\n")
     monkeypatch.setattr("codex_coordinator.service.OperatorConfig.load", lambda **_kwargs: config)
     monkeypatch.setattr("codex_coordinator.service.check_codex_compatibility", lambda _command: "0.154.0")
     captured = {}
 
     class CapturingJudge:
-        def __init__(self, runner, *, policy_instructions):
+        def __init__(self, runner, *, constitution):
             captured["runner"] = runner
-            captured["policy"] = policy_instructions
+            captured["constitution"] = constitution
 
     async def noop(**_kwargs):
         return None
@@ -1473,7 +1485,11 @@ async def test_service_startup_wires_snapshotted_constitution_to_judge(monkeypat
     )
     with pytest.raises(ConnectionError, match="codex-coordinator-preflight --require-socket"):
         await run(args)
-    assert captured["policy"] == "Deny network.\n"
+    wired = captured["constitution"]
+    assert wired.overall.text == "Deny network.\n"
+    assert wired.overall.source == str(constitution)
+    assert wired.for_project(worker).text == "This worker runs its own tests.\n"
+    assert wired.require_project_policy
     assert captured["runner"].keywords == {
         "codex_command": config.codex_command,
         "timeout_seconds": config.judge_timeout_seconds,
@@ -1516,3 +1532,220 @@ async def test_http_request_limits_and_expired_cursor(tmp_path: Path):
     rebinding.feed_eof()
     with pytest.raises(ValueError, match="Host must"):
         await server._read_request(rebinding)
+
+
+def _worker_project(root: Path, name: str) -> Path:
+    project = root / name
+    (project / ".codex").mkdir(parents=True)
+    (project / ".codex/config.toml").write_text(
+        'approval_policy = "on-request"\napprovals_reviewer = "user"\nsandbox_mode = "workspace-write"\n'
+    )
+    return project
+
+
+class _StartClient:
+    def __init__(self):
+        self.calls = []
+        self.threads = 0
+
+    async def call(self, method, params):
+        self.calls.append((method, params))
+        if method == "thread/start":
+            self.threads += 1
+            return {"thread": {"id": f"thread-{self.threads}"}}
+        return {"turn": {"id": "turn-1"}}
+
+
+@pytest.mark.asyncio
+async def test_session_start_fails_closed_without_a_required_project_constitution(
+    tmp_path: Path, capsys
+):
+    governed = _worker_project(tmp_path, "governed")
+    ungoverned = _worker_project(tmp_path, "ungoverned")
+    constitution = Constitution(
+        PolicyDocument("Overall ceiling.", "/operator/constitution.md"),
+        projects={governed: PolicyDocument("Governed rules.", "/operator/governed.md")},
+        require_project_policy=True,
+    )
+    events = EventLog()
+    broker = ApprovalBroker(events, constitution=constitution)
+    service = CoordinatorService(
+        _StartClient(), broker, events,
+        allowed_roots=(tmp_path,), constitution=constitution,
+    )
+    server = HttpControlServer(service)
+
+    status, error = await http_json(
+        server, "POST", "/sessions", {"project": str(ungoverned), "prompt": "Build"}
+    )
+    assert status == 400
+    assert "no project constitution" in json.dumps(error)
+    assert service.sessions == {}
+
+    status, _session = await http_json(
+        server, "POST", "/sessions", {"project": str(governed), "prompt": "Build"}
+    )
+    assert status == 201
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_approval_events_record_the_two_tiers_the_judge_was_given(
+    tmp_path: Path, capsys
+):
+    first = _worker_project(tmp_path, "first")
+    second = _worker_project(tmp_path, "second")
+    constitution = Constitution(
+        PolicyDocument("Overall ceiling.", "/operator/constitution.md"),
+        projects={
+            first: PolicyDocument("First project rules.", "/operator/first.md"),
+            second: PolicyDocument("Second project rules.", "/operator/second.md"),
+        },
+        require_project_policy=True,
+    )
+    events = EventLog(verbose_output=True)
+    broker = ApprovalBroker(events, constitution=constitution)
+    register(broker, first, thread="worker-1", session="session-1")
+    register(broker, second, thread="worker-2", session="session-2")
+    service = CoordinatorService(object(), broker, events, constitution=constitution)
+    server = HttpControlServer(service)
+
+    resolved = {}
+    for thread, session, project in (
+        ("worker-1", "session-1", first), ("worker-2", "session-2", second),
+    ):
+        waiting = asyncio.create_task(broker(command_request(thread=thread)))
+        await asyncio.sleep(0)
+        approval_id = next(
+            key for key, pending in broker.pending.items()
+            if pending.registration.session_id == session
+        )
+        status, _response = await http_json(
+            server, "POST", f"/approvals/{approval_id}",
+            {"sessionId": session, "verdict": "approve_once", "reason": "project-local"},
+        )
+        assert status == 200
+        await waiting
+        resolved[project] = approval_id
+
+    recorded = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    policies = {
+        (event["type"], event["approvalId"]): event["policy"]
+        for event in recorded if event["type"].startswith("approval.")
+    }
+    assert len(policies) == 4
+    overall = {policy["overall"]["digest"] for policy in policies.values()}
+    assert len(overall) == 1
+    assert all(policy["projectPolicyRequired"] for policy in policies.values())
+
+    first_sources = {
+        policy["project"]["source"] for key, policy in policies.items()
+        if key[1] == resolved[first]
+    }
+    second_sources = {
+        policy["project"]["source"] for key, policy in policies.items()
+        if key[1] == resolved[second]
+    }
+    assert first_sources == {"/operator/first.md"}
+    assert second_sources == {"/operator/second.md"}
+
+
+@pytest.mark.asyncio
+async def test_approval_events_omit_policy_provenance_in_external_mode(tmp_path: Path, capsys):
+    events = EventLog(verbose_output=True)
+    broker = ApprovalBroker(events)
+    register(broker, tmp_path)
+    service = CoordinatorService(object(), broker, events)
+    server = HttpControlServer(service)
+    waiting = asyncio.create_task(broker(command_request()))
+    await asyncio.sleep(0)
+    approval_id = next(iter(broker.pending))
+    await http_json(server, "POST", f"/approvals/{approval_id}", {
+        "sessionId": "session-1", "verdict": "approve_once", "reason": "external verdict",
+    })
+    await waiting
+    recorded = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert all(event.get("policy") is None for event in recorded)
+
+
+@pytest.mark.asyncio
+async def test_internal_error_event_names_the_request(tmp_path: Path, capsys):
+    events = EventLog(verbose_output=True)
+
+    class ExplodingService:
+        def __init__(self):
+            self.events = events
+            self.sessions = {}
+
+        async def start_session(self, _project, _prompt):
+            raise RuntimeError("thread/start rejected by app-server")
+
+    service = ExplodingService()
+    server = HttpControlServer(service)
+    reader = asyncio.StreamReader()
+    body = json.dumps({"project": "p", "prompt": "x"}).encode()
+    reader.feed_data(
+        b"POST /sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+        + f"Content-Length: {len(body)}\r\n\r\n".encode() + body
+    )
+    reader.feed_eof()
+
+    written = bytearray()
+
+    class Writer:
+        def write(self, data): written.extend(data)
+        async def drain(self): return None
+        def close(self): return None
+        async def wait_closed(self): return None
+        def get_extra_info(self, _name, default=None): return default
+
+    await server.handle(reader, Writer())
+    response = bytes(written).decode()
+    assert "500 Internal Server Error" in response
+    # The wire response must not carry the internal detail.
+    assert "app-server" not in response
+    assert '{"error": "internal server error"}' in response
+
+    recorded = [event for event in events.events if event["type"] == "http.internal_error"]
+    assert len(recorded) == 1
+    assert recorded[0]["method"] == "POST"
+    assert recorded[0]["path"] == "/sessions"
+    assert "RuntimeError: thread/start rejected by app-server" == recorded[0]["error"]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_operator_approval_policy_overrides_the_worker_owned_file(tmp_path: Path, capsys):
+    """How much reaches a judge is operator-owned, not worker-owned.
+
+    The worker project's config.toml lives inside the worker's writable root and
+    the pinned CLI rejects "untrusted" there, so the effective policy is sent on
+    the wire from operator configuration instead.
+    """
+    project = _worker_project(tmp_path, "worker")
+    client = _StartClient()
+    events = EventLog()
+    service = CoordinatorService(
+        client, ApprovalBroker(events), events,
+        allowed_roots=(tmp_path,), worker_approval_policy="untrusted",
+    )
+    await service.start_session(str(project), "Build")
+    assert client.calls[0][0] == "thread/start"
+    assert client.calls[0][1]["approvalPolicy"] == "untrusted"
+    # The worker's own declared value is what the file says, and it is not what
+    # was sent.
+    assert WorkerPermissions.from_project(project).approval_policy == "on-request"
+
+    # With no operator override the worker's declared value is used.
+    plain = CoordinatorService(
+        _StartClient(), ApprovalBroker(events), events, allowed_roots=(tmp_path,),
+    )
+    await plain.start_session(str(project), "Build")
+    assert plain.client.calls[0][1]["approvalPolicy"] == "on-request"
+
+    with pytest.raises(ValueError, match="unsupported worker approval policy"):
+        CoordinatorService(
+            _StartClient(), ApprovalBroker(events), events,
+            allowed_roots=(tmp_path,), worker_approval_policy="never",
+        )
+    capsys.readouterr()

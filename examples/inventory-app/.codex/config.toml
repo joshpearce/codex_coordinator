@@ -1,4 +1,8 @@
-# The child owns this project and may implement directly inside it.
+# Codex settings for this project.
+#
+# Execution is confined to a sandbox in which only this project directory is
+# writable and the network is unavailable, so anything beyond that boundary
+# has to be approved by a reviewer before it runs.
 approval_policy = "on-request"
 approvals_reviewer = "user"
 sandbox_mode = "workspace-write"

@@ -13,16 +13,23 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .coordinator import ApprovalPolicy
+from .coordinator import (
+    ApprovalPolicy,
+    Constitution,
+    PolicyDocument,
+    WorkerPermissions,
+)
 from .daemon import default_daemon_socket
 
 
 _FIELDS = frozenset({
     "allowed_roots", "permission_ceilings", "codex_command", "socket_path",
-    "worker_model", "worker_reasoning_effort", "allow_session_approval",
+    "worker_model", "worker_reasoning_effort", "worker_approval_policy",
+    "allow_session_approval",
     "approval_timeout_seconds", "judge_policy", "judge_timeout_seconds",
     "event_capacity", "event_max_bytes", "item_capacity", "item_max_bytes",
     "approval_mode", "constitution_path", "coordinator_root",
+    "project_constitutions",
 })
 _ENV_FIELDS = {
     "CODEX_COORDINATOR_ALLOWED_ROOTS": "allowed_roots",
@@ -31,6 +38,7 @@ _ENV_FIELDS = {
     "CODEX_COORDINATOR_SOCKET_PATH": "socket_path",
     "CODEX_COORDINATOR_WORKER_MODEL": "worker_model",
     "CODEX_COORDINATOR_WORKER_REASONING_EFFORT": "worker_reasoning_effort",
+    "CODEX_COORDINATOR_WORKER_APPROVAL_POLICY": "worker_approval_policy",
     "CODEX_COORDINATOR_ALLOW_SESSION_APPROVAL": "allow_session_approval",
     "CODEX_COORDINATOR_APPROVAL_TIMEOUT_SECONDS": "approval_timeout_seconds",
     "CODEX_COORDINATOR_JUDGE_POLICY": "judge_policy",
@@ -42,6 +50,7 @@ _ENV_FIELDS = {
     "CODEX_COORDINATOR_APPROVAL_MODE": "approval_mode",
     "CODEX_COORDINATOR_CONSTITUTION_PATH": "constitution_path",
     "CODEX_COORDINATOR_COORDINATOR_ROOT": "coordinator_root",
+    "CODEX_COORDINATOR_PROJECT_CONSTITUTIONS": "project_constitutions",
 }
 
 
@@ -115,6 +124,7 @@ class OperatorConfig:
     socket_path: Path
     worker_model: str | None
     worker_reasoning_effort: str
+    worker_approval_policy: str | None
     allow_session_approval: bool
     approval_timeout_seconds: float
     judge_policy: str
@@ -126,6 +136,8 @@ class OperatorConfig:
     approval_mode: str | None
     constitution_path: Path | None
     constitution_text: str | None
+    project_constitution_paths: Mapping[Path, Path]
+    constitution: Constitution | None
     coordinator_root: Path | None
 
     @classmethod
@@ -146,6 +158,7 @@ class OperatorConfig:
             "socket_path": str(default_daemon_socket()),
             "worker_model": None,
             "worker_reasoning_effort": "low",
+            "worker_approval_policy": None,
             "allow_session_approval": False,
             "approval_timeout_seconds": 300,
             "judge_policy": "Approve only when the request is clearly safe and necessary.",
@@ -156,6 +169,7 @@ class OperatorConfig:
             "item_max_bytes": 64 * 1024,
             "approval_mode": None,
             "constitution_path": None,
+            "project_constitutions": {},
             "coordinator_root": None,
         }
         if config_path is not None:
@@ -170,7 +184,7 @@ class OperatorConfig:
             if env_name not in env:
                 continue
             raw: Any = env[env_name]
-            if field_name in {"allowed_roots", "permission_ceilings"}:
+            if field_name in {"allowed_roots", "permission_ceilings", "project_constitutions"}:
                 try:
                     raw = json.loads(raw)
                 except json.JSONDecodeError as exc:
@@ -195,22 +209,26 @@ class OperatorConfig:
             if not root.is_dir():
                 raise ValueError(f"allowed root is not a directory: {root}")
             canonical_roots.append(root)
-        if config_path is not None:
-            canonical_config = config_path.resolve(strict=True)
-            if any(
-                canonical_config == root or root in canonical_config.parents
-                for root in canonical_roots
-            ):
-                raise ValueError("operator config must be outside worker-writable allowed roots")
+        if config_path is not None and any(
+            config_path.resolve(strict=True) == root
+            or root in config_path.resolve(strict=True).parents
+            for root in canonical_roots
+        ):
+            raise ValueError("operator config must be outside worker-writable allowed roots")
 
         mode = values["approval_mode"]
         if mode is not None and mode not in {"service", "external"}:
             raise ValueError("approval_mode must be 'service' or 'external'")
         raw_constitution = values["constitution_path"]
+        raw_project_constitutions = values["project_constitutions"]
         raw_coordinator = values["coordinator_root"]
         constitution_path = None
         constitution_text = None
+        project_constitution_paths: dict[Path, Path] = {}
+        constitution = None
         coordinator_root = None
+        if not isinstance(raw_project_constitutions, Mapping):
+            raise ValueError("project_constitutions must be a project-to-policy-file mapping")
         if raw_coordinator is not None:
             coordinator_root = _absolute_path(raw_coordinator, "coordinator_root")
             if not coordinator_root.is_dir():
@@ -218,25 +236,76 @@ class OperatorConfig:
         if mode == "service":
             if raw_constitution is None or coordinator_root is None or config_path is None:
                 raise ValueError("service judging requires operator.toml, constitution_path, and coordinator_root")
-            if not isinstance(raw_constitution, (str, Path)):
-                raise ValueError("constitution_path must be an absolute path")
-            constitution_path = Path(raw_constitution).expanduser()
-            if not constitution_path.is_absolute():
-                raise ValueError("constitution_path must be an absolute path")
-            constitution_text = _trusted_policy_file(constitution_path, "constitution")
-            canonical_constitution = constitution_path.resolve(strict=True)
+            canonical_config = config_path.resolve(strict=True)
+            policy_directory = canonical_config.parent
+
+            def _load_policy(raw: Any, label: str) -> tuple[Path, str]:
+                """Validate and snapshot one operator-owned policy document."""
+                if not isinstance(raw, (str, Path)):
+                    raise ValueError(f"{label} must be an absolute path")
+                candidate = Path(raw).expanduser()
+                if not candidate.is_absolute():
+                    raise ValueError(f"{label} must be an absolute path")
+                text = _trusted_policy_file(candidate, label)
+                canonical = candidate.resolve(strict=True)
+                if any(
+                    canonical == root or root in canonical.parents
+                    for root in (*canonical_roots, coordinator_root)
+                ):
+                    raise ValueError("trusted policy files must be outside coordinator- and worker-writable roots")
+                if canonical.parent != policy_directory:
+                    raise ValueError(f"{label} must be alongside operator.toml")
+                if not text.strip():
+                    raise ValueError(f"{label} must not be empty")
+                return candidate, text
+
             if any(
-                path == root or root in path.parents
-                for path in (canonical_constitution, config_path.resolve(strict=True))
+                canonical_config == root or root in canonical_config.parents
                 for root in (*canonical_roots, coordinator_root)
             ):
                 raise ValueError("trusted policy files must be outside coordinator- and worker-writable roots")
-            if canonical_constitution.parent != config_path.parent.resolve(strict=True):
-                raise ValueError("constitution must be alongside operator.toml")
-            if not constitution_text.strip():
-                raise ValueError("constitution must not be empty")
-        elif raw_constitution is not None:
-            raise ValueError("constitution_path requires approval_mode = 'service'")
+            constitution_path, constitution_text = _load_policy(raw_constitution, "constitution")
+            documents: dict[Path, PolicyDocument] = {}
+            for raw_project, raw_policy in raw_project_constitutions.items():
+                project = _absolute_path(raw_project, "project constitution project")
+                if not project.is_dir() or not any(
+                    project == root or root in project.parents for root in canonical_roots
+                ):
+                    raise ValueError(f"project constitution project is outside allowed roots: {project}")
+                if project in documents:
+                    raise ValueError(f"duplicate project constitution for {project}")
+                policy_path, policy_text = _load_policy(
+                    raw_policy, f"project constitution for {project}"
+                )
+                if policy_path.resolve(strict=True) == constitution_path.resolve(strict=True):
+                    raise ValueError(
+                        f"project constitution for {project} must not reuse the overall constitution"
+                    )
+                project_constitution_paths[project] = policy_path
+                documents[project] = PolicyDocument(policy_text, str(policy_path))
+            # Every worker must be governed by policy written for it. A shared
+            # ceiling alone is the authoring failure this tier exists to remove.
+            uncovered = [
+                root for root in canonical_roots
+                if not any(
+                    project == root or project in root.parents for project in documents
+                )
+            ]
+            if uncovered:
+                raise ValueError(
+                    "service judging requires a project constitution for every allowed "
+                    f"root; these have none: {sorted(str(root) for root in uncovered)}"
+                )
+            constitution = Constitution(
+                PolicyDocument(constitution_text, str(constitution_path)),
+                projects=documents,
+                require_project_policy=True,
+            )
+        else:
+            if raw_constitution is not None:
+                raise ValueError("constitution_path requires approval_mode = 'service'")
+            if raw_project_constitutions:
+                raise ValueError("project_constitutions requires approval_mode = 'service'")
 
         raw_ceilings = values["permission_ceilings"]
         if not isinstance(raw_ceilings, Mapping):
@@ -261,6 +330,14 @@ class OperatorConfig:
             raise ValueError("worker_model must be a nonempty string or omitted")
         if not isinstance(values["allow_session_approval"], bool):
             raise ValueError("allow_session_approval must be a boolean")
+        worker_approval_policy = values["worker_approval_policy"]
+        if worker_approval_policy is not None and (
+            worker_approval_policy not in WorkerPermissions.WIRE_APPROVAL_POLICIES
+        ):
+            raise ValueError(
+                "worker_approval_policy must be one of "
+                f"{sorted(WorkerPermissions.WIRE_APPROVAL_POLICIES)}"
+            )
         return cls(
             allowed_roots=tuple(canonical_roots),
             permission_ceilings=MappingProxyType(ceilings),
@@ -268,6 +345,7 @@ class OperatorConfig:
             socket_path=_socket_path(values["socket_path"]),
             worker_model=model,
             worker_reasoning_effort=values["worker_reasoning_effort"],
+            worker_approval_policy=worker_approval_policy,
             allow_session_approval=values["allow_session_approval"],
             approval_timeout_seconds=_positive_seconds(
                 values["approval_timeout_seconds"], "approval_timeout_seconds"
@@ -283,5 +361,7 @@ class OperatorConfig:
             approval_mode=mode,
             constitution_path=constitution_path,
             constitution_text=constitution_text,
+            project_constitution_paths=MappingProxyType(project_constitution_paths),
+            constitution=constitution,
             coordinator_root=coordinator_root,
         )

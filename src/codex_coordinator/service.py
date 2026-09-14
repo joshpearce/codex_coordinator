@@ -23,6 +23,7 @@ import websockets
 from .coordinator import (
     ApprovalCase,
     ApprovalPolicy,
+    Constitution,
     JudgeDecision,
     Judge,
     JudgedApprovalHandler,
@@ -185,6 +186,7 @@ class ApprovalBroker:
     def __init__(
         self, events: EventLog, *, approval_timeout_seconds: float = 300,
         judge: Judge | None = None,
+        constitution: Constitution | None = None,
         item_capacity: int = 256,
         item_max_bytes: int = 64 * 1024,
     ) -> None:
@@ -193,6 +195,7 @@ class ApprovalBroker:
         self.events = events
         self.approval_timeout_seconds = approval_timeout_seconds
         self.judge = judge
+        self.constitution = constitution
         if item_capacity < 1 or item_max_bytes < 256:
             raise ValueError("item retention limits must be positive")
         self.item_capacity = item_capacity
@@ -202,6 +205,12 @@ class ApprovalBroker:
         self.pending: dict[str, PendingApproval] = {}
         self.unmanaged_request_count = 0
         self.closed = False
+
+    def _policy_provenance(self, project: str) -> dict[str, Any] | None:
+        """Record which policy tiers a judge for ``project`` was given, if any."""
+        if self.constitution is None:
+            return None
+        return self.constitution.provenance(project)
 
     def register(self, registration: SessionRegistration) -> None:
         if self.closed:
@@ -263,6 +272,7 @@ class ApprovalBroker:
             request=mutable_evidence(case.request),
             declaredIntent=mutable_evidence(case.declared_intent),
             enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
+            policy=self._policy_provenance(registration.project),
         )
         if recorded.get("truncated"):
             self.pending.pop(approval_id, None)
@@ -380,6 +390,7 @@ class ApprovalBroker:
             response=response,
             declaredIntent=mutable_evidence(pending.case.declared_intent),
             enforcedCapabilities=mutable_evidence(pending.case.enforced_capabilities),
+            policy=self._policy_provenance(pending.registration.project),
         )
         return response
 
@@ -415,9 +426,11 @@ class CoordinatorService:
         *,
         worker_model: str | None = None,
         worker_reasoning_effort: str = "low",
+        worker_approval_policy: str | None = None,
         allow_session_approval: bool = False,
         allowed_roots: Sequence[Path] = (),
         permission_ceilings: Mapping[Path, Mapping[str, Any]] | None = None,
+        constitution: Constitution | None = None,
     ) -> None:
         self.client = client
         self.approvals = approvals
@@ -428,7 +441,13 @@ class CoordinatorService:
         self._connection_lost = False
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
+        if worker_approval_policy is not None and (
+            worker_approval_policy not in WorkerPermissions.WIRE_APPROVAL_POLICIES
+        ):
+            raise ValueError("unsupported worker approval policy")
+        self.worker_approval_policy = worker_approval_policy
         self.allow_session_approval = allow_session_approval
+        self.constitution = constitution
         roots: list[Path] = []
         for root in allowed_roots:
             canonical = Path(root).expanduser().resolve(strict=True)
@@ -466,6 +485,11 @@ class CoordinatorService:
             raise ValueError(f"project path is unavailable: {project_value}") from exc
         if not project.is_dir() or not self._within_allowed_roots(project):
             raise ValueError("project is outside the configured allowed roots")
+        if self.constitution is not None and not self.constitution.covers(project):
+            raise ValueError(
+                "no project constitution governs this project; add one under "
+                "[project_constitutions] in the operator configuration"
+            )
         permissions = WorkerPermissions.from_project(project)
         policy = ApprovalPolicy(
             project,
@@ -476,7 +500,11 @@ class CoordinatorService:
         start_params = {
             "cwd": str(project),
             "runtimeWorkspaceRoots": [str(project)],
-            "approvalPolicy": permissions.approval_policy,
+            # Operator configuration, when set, decides how much reaches a
+            # judge. It is sent on the wire because the worker project's own
+            # config.toml is inside the worker's writable root and because the
+            # pinned CLI rejects "untrusted" as a config value.
+            "approvalPolicy": self.worker_approval_policy or permissions.approval_policy,
             "approvalsReviewer": permissions.approvals_reviewer,
             "sandbox": permissions.sandbox_mode,
         }
@@ -732,6 +760,9 @@ class HttpControlServer:
             return
         self._inflight += 1
         try:
+            # Bound before the read so the error handler can name the request
+            # even when parsing it is what failed.
+            method, target = "", ""
             try:
                 method, target, body = await asyncio.wait_for(
                     self._read_request(reader), timeout=self.READ_TIMEOUT,
@@ -751,8 +782,15 @@ class HttpControlServer:
                 }
             except (KeyError, ValueError, json.JSONDecodeError) as exc:
                 status, result = 400, {"error": str(exc)}
-            except Exception:
+            except Exception as exc:
+                # The client gets nothing specific, but an unexpected failure
+                # must leave a trace: a 500 with no record is undiagnosable.
                 status, result = 500, {"error": "internal server error"}
+                self.service.events.emit(
+                    "http.internal_error",
+                    method=method, path=urlsplit(target).path,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             payload = json.dumps(result, sort_keys=True).encode()
             reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 410: "Gone", 413: "Payload Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(status, "OK")
             writer.write(
@@ -909,18 +947,18 @@ async def run(args: argparse.Namespace) -> None:
     )
     judge = None
     if config.approval_mode == "service":
-        assert config.constitution_text is not None
+        assert config.constitution is not None
         judge = OneShotCodexJudge(
             partial(
                 codex_exec_json_runner,
                 codex_command=config.codex_command,
                 timeout_seconds=config.judge_timeout_seconds,
             ),
-            policy_instructions=config.constitution_text,
+            constitution=config.constitution,
         )
     approvals = ApprovalBroker(
         events, approval_timeout_seconds=config.approval_timeout_seconds,
-        judge=judge,
+        judge=judge, constitution=config.constitution,
         item_capacity=config.item_capacity, item_max_bytes=config.item_max_bytes,
     )
     try:
@@ -948,9 +986,11 @@ async def run(args: argparse.Namespace) -> None:
             events,
             worker_model=config.worker_model,
             worker_reasoning_effort=config.worker_reasoning_effort,
+            worker_approval_policy=config.worker_approval_policy,
             allow_session_approval=config.allow_session_approval,
             allowed_roots=config.allowed_roots,
             permission_ceilings=config.permission_ceilings,
+            constitution=config.constitution,
         )
         client.disconnect_handler = service_ref.connection_lost
         try:

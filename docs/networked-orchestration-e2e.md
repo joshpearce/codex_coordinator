@@ -21,27 +21,68 @@ test-driven scaffold with packaging, CLI wiring, documentation, contract tests, 
 one implementation module containing the TODOs. Their checked-in
 `.codex/config.toml` files use `workspace-write`, so each child authors its own project
 while the service remains the middle-man for creating the session and sending turns.
-The inventory child is instructed to make an explicit approval-path request for a
-project-local test command and to attempt a network operation. The
-[constitution](../examples/operator/constitution.md) allows the former and denies
-the latter. The service judges approvals using the operator-owned constitution.
+Neither child is told that judging exists. Their prompts are plain implementation
+tasks, and their project trees contain no mention of approvals, constitutions, or
+a judge. What reaches a judge is decided by each project's
+the operator's configuration: `worker_approval_policy = "untrusted"` makes each
+child's runtime raise an approval request before anything it does not already
+trust, and the sandbox derived from `sandbox_mode` keeps writes inside the
+project and disables the network. Approval traffic is therefore a product of the
+permission configuration and the children's own behavior, not of prompt
+instructions.
+
+Two earlier configurations are worth knowing about, because both were tried and
+neither works. With `on-request` and a task that is completable inside the
+project, nothing escalates at all: a run finishes with zero approvals and the
+governance layer is never exercised. With `sandbox_mode = "read-only"`, the
+children escalate every write, but the judge is shown a deterministic ceiling of
+`filesystemWriteRoots: []` and correctly refuses to approve writes the ceiling
+does not permit, so the children deadlock.
+
+The judge applies two tiers to whatever arrives: the overall
+[constitution](../examples/operator/constitution.md), which governs both children
+and treats a new dependency, network reach, or run-time-fetched code as a
+widening of the trust surface rather than a task step, and the child's own
+document — [inventory-app](../examples/operator/inventory-app.constitution.md)
+for the producer, [inventory-report](../examples/operator/inventory-report.constitution.md)
+for the consumer — neither of which the other child ever sees. No document names
+a command, so the run exercises whether a judge applies policy rather than
+matching a string.
+
+Because nothing is scripted, the harness asserts the invariants that must hold on
+any honest run rather than one expected shape: every request resolved, at least
+one approval per governed project, no session-scoped grant, at least one
+approval granted, and correct two-tier provenance on every event. A run with no
+denials is legitimate — honest work inside the constitution produces none — so
+the harness reports what was denied instead of requiring it. Service judging requires a project
+constitution for every allowed root, so the service refuses to start at all if
+one is missing and refuses a session in a project no document governs.
 The coordinator must observe at least one `approve_once` and one `deny`,
-reconcile the applications, run their tests, write `result.json`, and shut down the
-service.
+record the overall and per-project constitution digests from the `policy` field
+on those events, reconcile the applications, run their tests, write
+`result.json`, and shut down the service. The harness fails the run if an
+approval carries no policy provenance, if the two children cite the same project
+constitution, or if they cite different overall ones.
 
 The top-level session runs from the checked-in
 [`examples/coordinator`](../examples/coordinator) template. A live workspace has three
 sibling projects plus `workspace/operator/`. The latter contains a path-resolved
-[`operator.toml`](../examples/operator/operator.toml) and the
-[`constitution.md`](../examples/operator/constitution.md), outside the coordinator's
+[`operator.toml`](../examples/operator/operator.toml), the overall
+[`constitution.md`](../examples/operator/constitution.md), and one project
+constitution per child, all outside the coordinator's
 writable project and both worker roots. Coordinator artifacts—including the
 path-resolved `goal.md`, child goal prompts, event stream, decisions, and result—live
 under `workspace/coordinator/`. Its `AGENTS.md` documents that application writes
 must be delegated over HTTP. The coordinator's workspace permission profile keeps the
 sibling projects outside its writable roots.
 
-Run it only when real Codex usage, outbound access for service-owned judges, and access to the
-local app-server socket are acceptable:
+For a much cheaper live check of the same policy, `make judge-gate` runs a
+catalogue of realistic requests through real judges without starting any session
+or executing anything; see the scenario table in
+[`scripts/judge_live_gate.py`](../scripts/judge_live_gate.py).
+
+Run the full experiment only when real Codex usage, outbound access for
+service-owned judges, and access to the local app-server socket are acceptable:
 
 ```sh
 uv run python -m codex_coordinator.live_e2e \
