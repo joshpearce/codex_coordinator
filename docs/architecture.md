@@ -85,9 +85,42 @@ broker also invokes an independent restricted judge and rejects HTTP verdicts;
 explicit external mode instead accepts verdicts over HTTP. Both modes emit a
 normalized `approval.requested` event.
 
+## Deciding a case by code
+
+Between normalization and the judge sits `ApprovalPolicy.decide_by_code`. Both
+adapters call it, so the live broker and the one-shot handler decide
+identically. It returns `None` only when nothing in the trusted boundary can
+settle the case, which is the only path that spends a judge call. Otherwise it
+returns a `CodeDecision`: `approve_once` or `deny`, the rule that decided it in
+the words recorded as the reason, and the event that records it —
+`approval.allowed_by_policy` or `approval.declined_by_policy`. A third verdict,
+`judge`, means an operator rule escalated a case containment would have decided;
+that case proceeds normally and its `approval.requested` event carries the
+escalation under `containment`.
+
+### In-project file changes
+
+A worker edits its own project by right. The authority is already enforced twice
+before this step: the turn sandbox makes the project the only writable root with
+no network, and `normalize_path` resolves every change path against the
+registered project and raises if it lands outside, which the adapters answer
+with `decline` and an `approval.rejected` event. `_decide_file_change`
+therefore sees only in-project paths, and under `workspace-write` it accepts
+them as a single-turn `accept` recorded exactly as a rule-allowed command is:
+the same normalized evidence, no `approvalId`, no pending approval, no model
+call, plus a `containment` record naming the rule and every normalized path.
+
+What it will not decide, it declines rather than judges: a `grantRoot`, which
+asks for standing authority over a directory the sandbox never grants. Under
+`read-only` a file change is declined with a distinct event and a reason naming
+the sandbox mode; `read-only` is the inspection-only mode, so there is no write
+authority to approve, and the misleading `filesystemWriteRoots: []` ceiling is
+never shown to a judge for a file change. The one exception that reaches a judge
+is an operator escalation rule (below).
+
 ## Deterministic allow for mundane project-local commands
 
-Between normalization and the judge sits one more deterministic step,
+For commands, `decide_by_code` delegates to
 `ApprovalPolicy.deterministic_allow`. It applies only to a normalized command
 approval that asks for nothing beyond running the command — no network
 approval context, no additional permissions, `accept` among the offered
@@ -112,6 +145,19 @@ is validated by normalization and otherwise ignored, so the runtime's policy is
 never amended by this path. Both adapters share the step; the one-shot handler
 reports it through `on_decision` with the reason prefixed `allowed by exec
 policy`.
+
+The same file carries the one opt-in that sends an in-project file change to a
+judge. A `prefix_rule` whose program is the reserved `codex-coordinator-file-change`
+and whose decision is `prompt` names project-relative paths — a file, or a
+directory and everything beneath it — whose changes escalate. The reserved name
+is not a program: no rule may allow it, `evaluate` never matches it, and a
+command spelled that way is judged like any other unmatched command. Codex's own
+parser reads such a rule as a command that prompts the user, so the file still
+lints with `codex execpolicy check --rules`. Everything the coordinator cannot
+fully account for fails startup the same way a malformed allow rule does: a
+`forbidden` decision, a `prompt` decision on anything but the reserved program,
+an absolute or `..`-bearing path, a pattern that is not exactly
+`[<reserved>, [paths]]`, and `match`/`not_match` examples that do not hold.
 
 The decision to evaluate rules here rather than hand them to the runtime is
 recorded with its evidence in `docs/security.md`: the runtime unwraps the

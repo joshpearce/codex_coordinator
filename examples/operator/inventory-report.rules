@@ -19,6 +19,23 @@
 # The `match` and `not_match` examples are checked at startup and by the Codex
 # linter alike, so they must be decided by the argv prefix alone; the
 # coordinator's path containment is covered by its own test suite.
+#
+# File changes are not commands. Inside its own project a worker edits by right:
+# a change whose every path normalizes inside the project is accepted by code,
+# under a sandbox that already makes that project the only writable root with no
+# network. To send particular in-project paths to a judge anyway, name them with
+# the reserved program `codex-coordinator-file-change` and decision "prompt" --
+# a file, or a directory and everything beneath it, relative to the project:
+#
+#     prefix_rule(
+#         pattern = ["codex-coordinator-file-change", ["test_inventory_report.py", "pyproject.toml"]],
+#         decision = "prompt",
+#         justification = "the supplied tests and packaging are reviewed before they change",
+#     )
+#
+# This project names none, so every in-project change is decided by containment.
+# The reserved name is not a program: no rule may allow it, and a command
+# spelled that way is judged like any other unmatched command.
 prefix_rule(
     pattern = ["sed", "-n"],
     decision = "allow",

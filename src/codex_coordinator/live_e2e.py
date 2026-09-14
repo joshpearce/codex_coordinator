@@ -30,16 +30,29 @@ async def _command(cwd: Path, *args: str) -> tuple[int, str, str]:
     )
 
 
+FILE_CHANGE_METHOD = "item/fileChange/requestApproval"
+
+
+def _events(service_log: Path) -> list[dict[str, Any]]:
+    if not service_log.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    for line in service_log.read_text(errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
 def _approval_errors(service_log: Path) -> list[str]:
     if not service_log.exists():
         return ["service.jsonl was not created"]
     requests: dict[str, dict[str, Any]] = {}
     resolutions: dict[str, dict[str, Any]] = {}
-    for line in service_log.read_text().splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for event in _events(service_log):
         approval_id = event.get("approvalId")
         if event.get("type") == "approval.requested" and approval_id:
             requests[approval_id] = event
@@ -73,36 +86,55 @@ def _approval_errors(service_log: Path) -> list[str]:
         if not any(Path(judged).name == project for judged in judged_projects if judged):
             errors.append(f"no approval from {project} was judged")
 
+    # Inside its project a worker acts by right: a file change whose every
+    # path stays in the project is decided by code. A judged one means either
+    # the containment rule failed or an operator rule escalated it, and the
+    # example configuration declares no escalation.
+    for request, _resolution in matched:
+        if request.get("method") != FILE_CHANGE_METHOD:
+            continue
+        project = Path(str(request.get("project") or "unknown")).name
+        escalated = (request.get("containment") or {}).get("escalatedBy")
+        if not escalated:
+            errors.append(
+                f"an in-project file change from {project} reached a judge; "
+                "containment decides those and no escalation rule is configured"
+            )
+
     errors.extend(_policy_provenance_errors(matched))
     return errors
 
 
 def _approval_summary(service_log: Path) -> dict[str, Any]:
-    """Describe what the children actually asked for, for the run report."""
+    """Describe what the children actually asked for, for the run report.
+
+    Three outcomes are counted separately, because they cost different things
+    and mean different things: approvals a judge decided, commands an operator
+    rule allowed, and file changes the containment rule decided inside the
+    project without any judge.
+    """
     requests: dict[str, dict[str, Any]] = {}
     resolutions: dict[str, dict[str, Any]] = {}
-    if service_log.exists():
-        for line in service_log.read_text(errors="replace").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            approval_id = event.get("approvalId")
-            if event.get("type") == "approval.requested" and approval_id:
-                requests[approval_id] = event
-            elif event.get("type") == "approval.resolved" and approval_id:
-                resolutions[approval_id] = event
-
     policy_allowed: dict[str, int] = {}
-    if service_log.exists():
-        for line in service_log.read_text(errors="replace").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get("type") == "approval.allowed_by_policy":
-                project = Path(str(event.get("project") or "unknown")).name
-                policy_allowed[project] = policy_allowed.get(project, 0) + 1
+    file_changes_accepted: dict[str, int] = {}
+    file_changes_declined: dict[str, int] = {}
+    for event in _events(service_log):
+        project = Path(str(event.get("project") or "unknown")).name
+        approval_id = event.get("approvalId")
+        event_type = event.get("type")
+        if event_type == "approval.requested" and approval_id:
+            requests[approval_id] = event
+        elif event_type == "approval.resolved" and approval_id:
+            resolutions[approval_id] = event
+        elif event_type == "approval.allowed_by_policy":
+            counter = (
+                file_changes_accepted
+                if event.get("method") == FILE_CHANGE_METHOD
+                else policy_allowed
+            )
+            counter[project] = counter.get(project, 0) + 1
+        elif event_type == "approval.declined_by_policy":
+            file_changes_declined[project] = file_changes_declined.get(project, 0) + 1
 
     by_project: dict[str, dict[str, int]] = {}
     denied: list[dict[str, str]] = []
@@ -123,6 +155,8 @@ def _approval_summary(service_log: Path) -> dict[str, Any]:
     return {
         "total": len(requests), "byProject": by_project, "denied": denied,
         "policyAllowed": policy_allowed,
+        "fileChangesAccepted": file_changes_accepted,
+        "fileChangesDeclined": file_changes_declined,
     }
 
 
@@ -380,9 +414,25 @@ class OutputRenderer:
                 self._line(f"  DENIED {entry['project']}: {entry['command']}")
                 self._block("    because:", entry["reason"])
             policy_allowed = approvals.get("policyAllowed") or {}
-            self._line(f"Allowed by exec policy without a judge: {sum(policy_allowed.values())}")
+            self._line(
+                f"Commands allowed by exec policy without a judge: {sum(policy_allowed.values())}"
+            )
             for project, count in sorted(policy_allowed.items()):
                 self._line(f"  {project}: {count}")
+            accepted = approvals.get("fileChangesAccepted") or {}
+            self._line(
+                "In-project file changes accepted by code without a judge: "
+                f"{sum(accepted.values())}"
+            )
+            for project, count in sorted(accepted.items()):
+                self._line(f"  {project}: {count}")
+            declined = approvals.get("fileChangesDeclined") or {}
+            if declined:
+                self._line(
+                    f"File changes declined by code without a judge: {sum(declined.values())}"
+                )
+                for project, count in sorted(declined.items()):
+                    self._line(f"  {project}: {count}")
             self._line(f"Result: {outcome} (exit {data.get('returnCode')})")
             for error in data.get("validationErrors") or []:
                 self._line(f"VALIDATION ERROR: {error}")
@@ -409,15 +459,30 @@ class OutputRenderer:
             command = request.get("command") or event.get("method")
             self._line(f"APPROVAL REQUEST {name}: {self._compact(command)}")
             return
-        if event_type == "approval.allowed_by_policy":
+        if event_type in {"approval.allowed_by_policy", "approval.declined_by_policy"}:
             name = Path(str(event.get("project") or "child")).name
             request = event.get("request") or {}
-            rule = (event.get("execPolicy") or {}).get("justifications") or []
-            self._line(
-                f"ALLOWED BY POLICY {name}: {self._compact(request.get('command'))}"
+            label = (
+                "ALLOWED BY POLICY"
+                if event_type == "approval.allowed_by_policy"
+                else "DECLINED BY POLICY"
             )
+            containment = event.get("containment") or {}
+            if event.get("method") == FILE_CHANGE_METHOD:
+                paths = containment.get("paths") or []
+                subject = f"{len(paths)} file{'s' if len(paths) != 1 else ''}"
+                if paths:
+                    subject += ": " + self._compact(
+                        ", ".join(Path(str(path)).name for path in paths), 100
+                    )
+            else:
+                subject = self._compact(request.get("command"))
+            self._line(f"{label} {name}: {subject}")
+            rule = (event.get("execPolicy") or {}).get("justifications") or []
             if rule:
                 self._line(f"         rule: {self._compact('; '.join(rule))}")
+            elif containment.get("rule"):
+                self._line(f"         rule: {self._compact(containment['rule'])}")
             return
         if event_type == "approval.resolved":
             verdict = str(event.get("verdict", "unknown")).replace("_", " ").upper()

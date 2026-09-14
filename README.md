@@ -156,10 +156,10 @@ alternatives; only `decision = "allow"` is accepted, because everything no rule
 allows already reaches a judge. The coordinator unwraps the shell wrapper the
 runtime adds, requires every command in a `&&`, `;`, `|`, newline, or
 `if … then exit 1; fi` chain to match a rule, requires every argument to stay
-inside the project, and sends anything it cannot fully parse to a judge. File
-changes always reach a judge. A rule admits every mode of the program it names
-within the project, so name only programs whose whole behavior there may go
-unjudged; do not add `find`, whose `-exec` runs an arbitrary program per match.
+inside the project, and sends anything it cannot fully parse to a judge. A rule
+admits every mode of the program it names within the project, so name only
+programs whose whole behavior there may go unjudged; do not add `find`, whose
+`-exec` runs an arbitrary program per match.
 A rules file that is missing, malformed, misplaced, or whose `match`/`not_match`
 examples do not hold fails startup, and each command decided this way is
 recorded as an `approval.allowed_by_policy` event naming the rule.
@@ -169,6 +169,48 @@ for a commented example.
 With `workspace-write`, each worker can edit only its own project; the
 coordinator disables worker network access. Choose `read-only` explicitly for
 inspection-only workers.
+
+## Inside its project a worker acts by right
+
+A worker edits its own project the way a developer edits a checkout. That
+authority is enforced twice before any judge is involved: the turn sandbox makes
+the project the only writable root with no network, and every change path is
+resolved against the registered project and refused if it lands outside. So a
+`workspace-write` worker's file change whose every path stays inside its project
+is accepted by code as a single-turn `accept`, with no judge call, no pending
+approval, and an `approval.allowed_by_policy` event carrying every normalized
+path and the containment rule that decided it.
+
+Judging is for what leaves the project: reads of other projects or operator
+files, network reach, new dependencies, environment changes, and commands whose
+effect cannot be seen. What a containment rule cannot decide is declined rather
+than judged — a path outside the project, a change list that cannot be
+correlated to its item, or a `grantRoot`, which asks for standing authority the
+sandbox never grants. Under `read-only` a file change is declined with a reason
+naming the sandbox mode and an `approval.declined_by_policy` event:
+`read-only` is the inspection-only mode, so there is no write authority to
+approve, and the misleading empty write-root ceiling never reaches a judge.
+
+An operator who does want particular in-project paths reviewed — supplied tests,
+packaging — names them in the same rules file, with the reserved program
+`codex-coordinator-file-change` and `decision = "prompt"`:
+
+```sh
+printf '%s\n' \
+  'prefix_rule(' \
+  '    pattern = ["codex-coordinator-file-change", ["test_project_a.py", "pyproject.toml"]],' \
+  '    decision = "prompt",' \
+  '    justification = "the supplied tests and packaging are reviewed before they change",' \
+  ')' >> "$COORD_DIR/project-a.rules"
+```
+
+Paths are relative to the project; naming a directory escalates everything
+beneath it. The reserved name is not a program: no rule may allow it, and a
+command spelled that way is judged like any other unmatched command. Codex's own
+parser reads the rule as "a command `codex-coordinator-file-change <path>`
+prompts the user", so `codex execpolicy check --rules "$COORD_DIR/project-a.rules"
+codex-coordinator-file-change test_project_a.py` still lints the file. This is
+the only case in which an in-project file change is judged, and it is opt-in.
 
 The constitution has two tiers. The **overall** constitution at
 `constitution_path` applies to every project and is a ceiling. Each project also

@@ -37,6 +37,19 @@ recorded as `approval.allowed_by_policy`, with the normalized request, the
 rules file's source and digest, and the rule behind each simple command. It
 has no `approvalId`, is never pending, and does not count as an approval; a
 later `approval.wire_sent` still records the send.
+A `workspace-write` file change whose every path normalizes inside the
+registered project is answered `accept` the same way and recorded as
+`approval.allowed_by_policy` with a `containment` record naming the rule and
+every normalized path. A file change the containment rule cannot decide is
+answered `decline` without a judge and recorded as
+`approval.declined_by_policy`: a `grantRoot`, or any file change under
+`read-only`, whose reason names the sandbox mode. Both events carry the same
+fields an approval carries, have no `approvalId`, and are never pending. A
+path outside the project is refused earlier still, by normalization, and
+recorded as `approval.rejected`. An operator rules file may name in-project
+paths that escalate anyway; such a request becomes an ordinary pending
+approval whose `approval.requested` event carries the escalation under
+`containment`.
 `approval.server_resolved` records the app-server's receipt or clearance of a
 request, while `approval.command_completed` records the correlated command
 item's terminal status. The strict live gate checks all three signals.

@@ -1008,3 +1008,148 @@ async def test_supervisor_refuses_a_declared_but_unloaded_exec_policy(tmp_path: 
             FakeClient(), handler, tmp_path,
             permissions=WorkerPermissions(source="operator", exec_policy_path="worker.rules"),
         )
+
+
+# --- #0015: in-project file changes are decided by code ---------------------
+
+
+def _escalation_policy(*paths: str):
+    """An operator rules file naming in-project paths that still reach a judge."""
+    from codex_coordinator.execpolicy import FILE_CHANGE_PROGRAM, ExecPolicy
+
+    listed = ", ".join(repr(path) for path in paths)
+    return ExecPolicy.from_text(
+        f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", [{listed}]], '
+        'decision="prompt", justification="supplied tests are reviewed before they change")\n',
+        source="/operator/worker.rules",
+    )
+
+
+@pytest.mark.asyncio
+async def test_in_project_multi_file_patch_is_accepted_without_a_judge(tmp_path: Path):
+    """A worker edits its own project by right; the sandbox already confined it."""
+    judge = StaticJudge()
+    decisions = []
+    handler = JudgedApprovalHandler(
+        tmp_path, ApprovalPolicy(tmp_path), judge,
+        on_decision=lambda case, decision, response: decisions.append((case, decision, response)),
+    )
+    handler.register_worker("worker-1")
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "fileChange",
+        "changes": [
+            {"path": "inventory_app/domain.py", "kind": {"type": "update"}},
+            {"path": "README.md", "kind": {"type": "update"}},
+            {"path": str(tmp_path / "inventory_app/__main__.py"), "kind": {"type": "add"}},
+        ],
+    }
+    assert await handler(file_request()) == {"decision": "accept"}
+    assert judge.cases == []
+    case, decision, _response = decisions[0]
+    assert decision.verdict == "approve_once"
+    assert decision.reason == ApprovalPolicy.CONTAINMENT_RULE
+    assert [change["path"] for change in case.request["changes"]] == [
+        str(tmp_path / "inventory_app/domain.py"),
+        str(tmp_path / "README.md"),
+        str(tmp_path / "inventory_app/__main__.py"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_read_only_file_change_is_declined_without_a_judge(tmp_path: Path):
+    """read-only is inspection-only: there is no write authority to grant."""
+    judge = StaticJudge()
+    decisions = []
+    policy = ApprovalPolicy(tmp_path, sandbox_mode="read-only")
+    handler = JudgedApprovalHandler(
+        tmp_path, policy, judge,
+        on_decision=lambda case, decision, response: decisions.append((case, decision, response)),
+    )
+    handler.register_worker("worker-1")
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "fileChange", "changes": [{"path": "domain.py"}],
+    }
+    assert await handler(file_request()) == {"decision": "decline"}
+    assert judge.cases == []
+    _case, decision, _response = decisions[0]
+    assert decision.verdict == "deny"
+    assert "read-only" in decision.reason
+    # The misleading empty write-root ceiling is never shown to a judge.
+    assert list(policy.enforced_capabilities["filesystemWriteRoots"]) == []
+
+
+@pytest.mark.asyncio
+async def test_file_change_carrying_a_grant_root_is_declined_without_a_judge(tmp_path: Path):
+    judge = StaticJudge()
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
+    handler.register_worker("worker-1")
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "fileChange", "changes": [{"path": "domain.py"}],
+    }
+    assert await handler(file_request(grantRoot=str(tmp_path))) == {"decision": "decline"}
+    assert judge.cases == []
+
+
+@pytest.mark.asyncio
+async def test_operator_named_path_still_reaches_the_judge(tmp_path: Path):
+    """The one opt-in: named in-project paths are judged, everything else is not."""
+    judge = StaticJudge()
+    policy = ApprovalPolicy(tmp_path, exec_policy=_escalation_policy("test_inventory_app.py"))
+    handler = JudgedApprovalHandler(tmp_path, policy, judge)
+    handler.register_worker("worker-1")
+    handler.items[("worker-1", "turn-1", "item-1")] = {
+        "id": "item-1", "type": "fileChange",
+        "changes": [{"path": "inventory_app/domain.py"}, {"path": "test_inventory_app.py"}],
+    }
+    assert await handler(file_request()) == {"decision": "accept"}
+    assert [case.method for case in judge.cases] == [ApprovalPolicy.FILE]
+
+    handler.items[("worker-1", "turn-2", "item-2")] = {
+        "id": "item-2", "type": "fileChange",
+        "changes": [{"path": "inventory_app/domain.py"}],
+    }
+    assert await handler(file_request(turnId="turn-2", itemId="item-2")) == {"decision": "accept"}
+    assert len(judge.cases) == 1
+
+
+@pytest.mark.asyncio
+async def test_escalation_rule_never_allows_a_command(tmp_path: Path):
+    """The reserved escalation program is not a program: it decides no command."""
+    judge = StaticJudge(verdict="deny")
+    policy = ApprovalPolicy(tmp_path, exec_policy=_escalation_policy("test_inventory_app.py"))
+    handler = JudgedApprovalHandler(tmp_path, policy, judge)
+    handler.register_worker("worker-1")
+    assert await handler(
+        command_request(command="codex-coordinator-file-change test_inventory_app.py")
+    ) == {"decision": "decline"}
+    assert len(judge.cases) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_file_change_never_falls_through_to_a_judge(tmp_path: Path):
+    """If normalization's invariants were ever broken, the answer is decline."""
+    judge = StaticJudge()
+    policy = ApprovalPolicy(tmp_path)
+    case = ApprovalCase(
+        method=ApprovalPolicy.FILE, thread_id="worker-1", project=str(tmp_path.resolve()),
+        request={"changes": [{"path": ""}, {"kind": "add"}]},
+    )
+    decision = policy.decide_by_code(case)
+    assert decision.verdict == "deny"
+    assert decision.rule == ApprovalPolicy.UNREADABLE_CHANGES_RULE
+
+    for broken in ({"changes": []}, {"changes": None}, {}):
+        broken_case = ApprovalCase(
+            method=ApprovalPolicy.FILE, thread_id="worker-1",
+            project=str(tmp_path.resolve()), request=broken,
+        )
+        assert policy.decide_by_code(broken_case).verdict == "deny"
+
+    # A case whose project does not match the policy's is refused too, rather
+    # than being handed to a judge that could only guess what it governed.
+    mismatched = ApprovalCase(
+        method=ApprovalPolicy.FILE, thread_id="worker-1", project=str(tmp_path / "other"),
+        request={"changes": [{"path": str(tmp_path / "a.py")}]},
+    )
+    assert policy.decide_by_code(mismatched).verdict == "deny"
+    assert judge.cases == []

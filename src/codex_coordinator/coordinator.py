@@ -18,7 +18,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
-from .execpolicy import ExecPolicy, ExecPolicyMatch
+from .execpolicy import ExecPolicy, ExecPolicyMatch, FileChangeEscalation
 from .protocol import ProtocolClient
 
 Verdict = Literal["approve_once", "approve_session", "deny"]
@@ -52,6 +52,43 @@ class ApprovalCase:
 
 
 DEFAULT_POLICY_TEXT = "Approve only when the request is clearly safe and necessary."
+
+#: Events recording a case the deterministic layer decided with no judge call.
+ALLOWED_BY_POLICY_EVENT = "approval.allowed_by_policy"
+DECLINED_BY_POLICY_EVENT = "approval.declined_by_policy"
+
+
+@dataclass(frozen=True)
+class CodeDecision:
+    """A case the deterministic layer decides itself, with no judge involved.
+
+    ``verdict`` is ``approve_once`` or ``deny`` for a decided case and
+    ``judge`` when an operator rule sends an otherwise-decidable case to a
+    judge anyway. ``rule`` is the rule that decided it, in the words recorded
+    as the decision's reason. Nothing here widens anything: an acceptance is
+    single-turn, and the turn's write roots and disabled network are unchanged.
+    """
+
+    verdict: Literal["approve_once", "deny", "judge"]
+    rule: str
+    event: str = ""
+    exec_policy: ExecPolicyMatch | None = None
+    paths: tuple[str, ...] = ()
+    escalations: tuple[FileChangeEscalation, ...] = ()
+
+    @property
+    def decision(self) -> JudgeDecision:
+        if self.verdict == "judge":
+            raise ValueError("an escalated case has no deterministic decision")
+        return JudgeDecision(self.verdict, self.rule)
+
+    def json(self) -> dict[str, Any]:
+        record: dict[str, Any] = {"rule": self.rule}
+        if self.paths:
+            record["paths"] = list(self.paths)
+        if self.escalations:
+            record["escalatedBy"] = [item.json() for item in self.escalations]
+        return record
 
 
 class PolicyUnavailable(Exception):
@@ -627,6 +664,109 @@ class ApprovalPolicy:
                 return False
         return True
 
+    #: Why an in-project file change needs no judge. The authority is granted
+    #: twice over before this rule applies: the turn sandbox makes the project
+    #: the only writable root with no network, and ``normalize_path`` has
+    #: already refused every path outside it.
+    CONTAINMENT_RULE = (
+        "accepted by containment: every change path normalizes inside the "
+        "registered project, which the turn sandbox makes the only writable root"
+    )
+    #: ``read-only`` is the inspection-only mode. A worker there has no write
+    #: authority at all, so there is no judgement to make and the misleading
+    #: empty write-root ceiling is never shown to a judge for a file change.
+    READ_ONLY_RULE = (
+        "declined by containment: this project's operator-owned sandbox mode is "
+        "read-only, an inspection-only session with no write authority to grant"
+    )
+    #: A ``grantRoot`` asks for standing write authority over a directory, not
+    #: for this change. Containment cannot decide it and the sandbox never
+    #: widens, so it is refused rather than judged.
+    GRANT_ROOT_RULE = (
+        "declined by containment: a file change carrying a grantRoot asks for "
+        "authority beyond the change itself, which the turn sandbox never grants"
+    )
+    #: Reached only if an invariant ``normalize`` enforces were broken. A file
+    #: change whose change list cannot be read against the registered project
+    #: is refused rather than handed to a judge, because there is nothing
+    #: trustworthy for a judge to decide about.
+    UNREADABLE_CHANGES_RULE = (
+        "declined by containment: this file change's normalized change list "
+        "cannot be read against the registered project"
+    )
+
+    def decide_by_code(self, case: ApprovalCase) -> CodeDecision | None:
+        """Decide a case from the trusted boundary alone, or defer to a judge.
+
+        ``None`` means nothing here can decide it, which is the only path that
+        spends a judge call. The same method backs the live broker and the
+        one-shot handler so both decide identically.
+        """
+        if case.method == self.FILE:
+            return self._decide_file_change(case)
+        if str(self.project) != case.project:
+            return None
+        if case.method == self.COMMAND:
+            match = self.deterministic_allow(case)
+            if match is None:
+                return None
+            return CodeDecision(
+                "approve_once",
+                "allowed by exec policy: " + "; ".join(match.justifications),
+                ALLOWED_BY_POLICY_EVENT,
+                exec_policy=match,
+            )
+        return None
+
+    def _decide_file_change(self, case: ApprovalCase) -> CodeDecision:
+        """Decide a file change by containment, or escalate by operator rule.
+
+        Every path here was normalized against the registered project before
+        the case was built, so a change touching anything outside it never
+        reaches this method: ``normalize`` rejected it and the caller declined.
+        This method always decides. The one way a file change reaches a judge
+        is an operator rule naming one of its paths, which it reports as the
+        ``judge`` verdict rather than as a decision of its own.
+        """
+        request = case.request
+        changes = request.get("changes")
+        declared = changes if isinstance(changes, (list, tuple)) else ()
+        paths: list[str] = []
+        for change in declared:
+            path = change.get("path") if isinstance(change, Mapping) else None
+            if isinstance(path, str) and path:
+                paths.append(path)
+        normalized = tuple(paths)
+        if not normalized or len(normalized) != len(declared) or str(self.project) != case.project:
+            return CodeDecision(
+                "deny", self.UNREADABLE_CHANGES_RULE, DECLINED_BY_POLICY_EVENT,
+                paths=normalized,
+            )
+        if self.sandbox_mode != "workspace-write":
+            return CodeDecision(
+                "deny", self.READ_ONLY_RULE, DECLINED_BY_POLICY_EVENT, paths=normalized,
+            )
+        if request.get("grantRoot") is not None:
+            return CodeDecision(
+                "deny", self.GRANT_ROOT_RULE, DECLINED_BY_POLICY_EVENT, paths=normalized,
+            )
+        escalations = (
+            ()
+            if self.exec_policy is None
+            else self.exec_policy.file_change_escalations(normalized, self.project)
+        )
+        if escalations:
+            return CodeDecision(
+                "judge",
+                "escalated by operator rule: "
+                + "; ".join(sorted({item.justification for item in escalations})),
+                paths=normalized,
+                escalations=escalations,
+            )
+        return CodeDecision(
+            "approve_once", self.CONTAINMENT_RULE, ALLOWED_BY_POLICY_EVENT, paths=normalized,
+        )
+
     def deterministic_allow(self, case: ApprovalCase) -> ExecPolicyMatch | None:
         """Decide a mundane project-local command by operator rule, or defer.
 
@@ -832,11 +972,11 @@ class JudgedApprovalHandler:
             case = registration.policy.normalize(message, session_id=registration.session_id, thread_id=thread_id, item=item)
         except ValueError:
             return self._deny(method)
-        match = registration.policy.deterministic_allow(case)
-        if match is not None:
-            decision = JudgeDecision(
-                "approve_once", "allowed by exec policy: " + "; ".join(match.justifications),
-            )
+        code = registration.policy.decide_by_code(case)
+        if code is not None and code.verdict != "judge":
+            # Decided by the trusted boundary: no judge is called, no approval
+            # is pending, and an acceptance is single-turn.
+            decision = code.decision
             response = self._encode(case, decision)
             if self.on_decision:
                 self.on_decision(case, decision, response)

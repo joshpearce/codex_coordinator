@@ -250,31 +250,37 @@ class ApprovalBroker:
                 reason=str(exc),
             )
             return JudgedApprovalHandler._deny(method)
-        match = registration.policy.deterministic_allow(case)
-        if match is not None:
-            # Decided by operator rule, not by a judge: no pending approval is
-            # created, no model is called, and the response is a single-turn
-            # accept. The event carries the same evidence an approval would,
-            # plus which rule decided it, so the audit trail stays complete.
-            response = JudgedApprovalHandler._encode(
-                case, JudgeDecision("approve_once", "allowed by exec policy"),
-            )
+        code = registration.policy.decide_by_code(case)
+        if code is not None and code.verdict != "judge":
+            # Decided by the trusted boundary, not by a judge: no pending
+            # approval is created, no model is called, and an acceptance is a
+            # single-turn accept. The event carries the same evidence an
+            # approval would, plus the rule that decided it, so the audit
+            # trail stays complete whether the answer was yes or no.
+            decision = code.decision
+            response = JudgedApprovalHandler._encode(case, decision)
             exec_policy = registration.policy.exec_policy
+            extra: dict[str, Any] = {}
+            if code.exec_policy is not None:
+                extra["execPolicy"] = {
+                    **(exec_policy.provenance() if exec_policy is not None else {}),
+                    **code.exec_policy.json(),
+                }
+            if code.paths:
+                extra["containment"] = code.json()
             self.events.emit(
-                "approval.allowed_by_policy",
+                code.event,
                 rpcRequestId=self._rpc_request_id(message),
                 sessionId=registration.session_id,
                 threadId=registration.thread_id,
                 method=case.method,
                 project=registration.project,
+                reason=decision.reason,
                 request=mutable_evidence(case.request),
                 declaredIntent=mutable_evidence(case.declared_intent),
                 enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
-                execPolicy={
-                    **(exec_policy.provenance() if exec_policy is not None else {}),
-                    **match.json(),
-                },
                 response=response,
+                **extra,
             )
             return response
         approval_id = uuid.uuid4().hex
@@ -301,6 +307,10 @@ class ApprovalBroker:
             declaredIntent=mutable_evidence(case.declared_intent),
             enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
             policy=self._policy_provenance(registration.project),
+            # Present only when an operator rule sent a case a containment rule
+            # would otherwise have decided, so an audit can tell an escalated
+            # in-project change from one judging was always going to see.
+            **({"containment": code.json()} if code is not None else {}),
         )
         if recorded.get("truncated"):
             self.pending.pop(approval_id, None)

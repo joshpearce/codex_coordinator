@@ -565,7 +565,9 @@ async def test_managed_unknown_method_is_rejected_without_pending_request(tmp_pa
 async def test_file_event_uses_validated_correlated_changes(tmp_path: Path, capsys):
     events = EventLog(verbose_output=True)
     broker = ApprovalBroker(events)
-    register(broker, tmp_path)
+    # An in-project change the operator asked to have judged anyway; without
+    # that rule containment would accept it and no approval would exist.
+    register(broker, tmp_path, exec_policy=_escalation_policy("app.py"))
     broker.items[("worker-1", "turn-1", "change-1")] = {
         "id": "change-1", "type": "fileChange",
         "changes": [{
@@ -1771,6 +1773,17 @@ def _rules_policy(text: str = 'prefix_rule(pattern=["sed", "-n"], decision="allo
     return ExecPolicy.from_text(text, source="/operator/worker.rules")
 
 
+def _escalation_policy(*paths: str):
+    """An operator rules file naming in-project paths that still reach a judge."""
+    from codex_coordinator.execpolicy import FILE_CHANGE_PROGRAM
+
+    listed = ", ".join(repr(path) for path in paths)
+    return _rules_policy(
+        f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", [{listed}]], '
+        'decision="prompt", justification="reviewed before it changes")\n'
+    )
+
+
 @pytest.mark.asyncio
 async def test_rule_allowed_command_is_decided_without_a_judge_and_recorded(tmp_path: Path, capsys):
     """A mundane project-local command costs no judge call and leaves a full audit record."""
@@ -1814,10 +1827,12 @@ async def test_rule_allowed_command_is_decided_without_a_judge_and_recorded(tmp_
     assert allowed["declaredIntent"]["command"] == command
     assert allowed["enforcedCapabilities"]["sandboxRequired"] is True
     assert allowed["response"] == {"decision": "accept"}
+    assert allowed["reason"] == "allowed by exec policy: range reads; range reads"
     assert allowed["execPolicy"] == {
         "source": "/operator/worker.rules",
         "digest": _rules_policy().digest,
         "rules": 1,
+        "escalations": 0,
         "commands": [["sed", "-n", "1,240p", "README.md"], ["sed", "-n", "1,120p", "README.md"]],
         "justifications": ["range reads", "range reads"],
     }
@@ -1866,7 +1881,8 @@ async def test_commands_outside_the_rules_still_reach_the_judge(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
-async def test_file_changes_are_never_decided_by_rule(tmp_path: Path, capsys):
+async def test_a_command_rule_never_decides_a_file_change(tmp_path: Path, capsys):
+    """A file change is decided by containment, never by a command allow rule."""
     seen = []
 
     class Judge:
@@ -1884,8 +1900,12 @@ async def test_file_changes_are_never_decided_by_rule(tmp_path: Path, capsys):
         "changes": [{"path": "README.md", "kind": "update"}],
     }
     assert await asyncio.wait_for(broker(file_request()), 1) == {"decision": "accept"}
-    assert seen == [ApprovalPolicy.FILE]
-    assert [event["type"] for event in events.events] == ["approval.requested", "approval.resolved"]
+    assert seen == []
+    assert [event["type"] for event in events.events] == ["approval.allowed_by_policy"]
+    allowed = events.events[0]
+    assert "execPolicy" not in allowed
+    assert allowed["containment"]["rule"] == ApprovalPolicy.CONTAINMENT_RULE
+    assert allowed["containment"]["paths"] == [str((project / "README.md").resolve())]
     capsys.readouterr()
 
 
@@ -1926,3 +1946,168 @@ async def test_session_registration_carries_the_project_exec_policy(tmp_path: Pa
     event = next(event for event in events.events if event["type"] == "session.started")
     assert event["workerPermissions"]["execPolicy"] == policy.provenance()
     capsys.readouterr()
+
+
+# --- #0015: in-project file changes are decided by code ---------------------
+
+
+@pytest.mark.asyncio
+async def test_in_project_patch_is_accepted_by_code_with_every_normalized_path(
+    tmp_path: Path, capsys,
+):
+    """A multi-file in-project patch costs no judge call and leaves a full record."""
+    class Judge:
+        calls = 0
+
+        async def decide(self, case):
+            Judge.calls += 1
+            return JudgeDecision("deny", "the judge should not have been asked")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project)
+    broker.items[("worker-1", "turn-1", "change-1")] = {
+        "id": "change-1", "type": "fileChange",
+        "changes": [
+            {"path": "inventory_app/domain.py", "kind": {"type": "update"}},
+            {"path": "README.md", "kind": {"type": "update"}},
+        ],
+    }
+    assert await asyncio.wait_for(broker(file_request()), 1) == {"decision": "accept"}
+    assert Judge.calls == 0
+    assert broker.pending == {}
+    assert [event["type"] for event in events.events] == ["approval.allowed_by_policy"]
+    allowed = events.events[0]
+    assert "approvalId" not in allowed
+    assert allowed["rpcRequestId"] == 8
+    assert allowed["method"] == ApprovalPolicy.FILE
+    assert allowed["project"] == str(project.resolve())
+    assert allowed["response"] == {"decision": "accept"}
+    assert allowed["reason"] == ApprovalPolicy.CONTAINMENT_RULE
+    assert allowed["containment"]["paths"] == [
+        str((project / "inventory_app/domain.py").resolve()),
+        str((project / "README.md").resolve()),
+    ]
+    assert [change["path"] for change in allowed["request"]["changes"]] == (
+        allowed["containment"]["paths"]
+    )
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outside", ["../escape.py", "/etc/hosts"])
+async def test_patch_touching_a_path_outside_the_project_is_declined_without_a_judge(
+    tmp_path: Path, capsys, outside,
+):
+    class Judge:
+        calls = 0
+
+        async def decide(self, case):
+            Judge.calls += 1
+            return JudgeDecision("approve_once", "should not be reached")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project)
+    broker.items[("worker-1", "turn-1", "change-1")] = {
+        "id": "change-1", "type": "fileChange",
+        "changes": [{"path": "domain.py"}, {"path": outside}],
+    }
+    assert await asyncio.wait_for(broker(file_request()), 1) == {"decision": "decline"}
+    assert Judge.calls == 0
+    assert broker.pending == {}
+    rejected = events.events[0]
+    assert rejected["type"] == "approval.rejected"
+    assert rejected["reason"] == "path is outside the registered project"
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_read_only_project_patch_is_declined_without_a_judge(tmp_path: Path, capsys):
+    """The sandbox mode is named, and the empty write-root ceiling reaches no judge."""
+    class Judge:
+        calls = 0
+
+        async def decide(self, case):
+            Judge.calls += 1
+            return JudgeDecision("approve_once", "should not be reached")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project, sandbox_mode="read-only")
+    broker.items[("worker-1", "turn-1", "change-1")] = {
+        "id": "change-1", "type": "fileChange", "changes": [{"path": "domain.py"}],
+    }
+    assert await asyncio.wait_for(broker(file_request()), 1) == {"decision": "decline"}
+    assert Judge.calls == 0
+    assert broker.pending == {}
+    assert [event["type"] for event in events.events] == ["approval.declined_by_policy"]
+    declined = events.events[0]
+    assert "approvalId" not in declined
+    assert "read-only" in declined["reason"]
+    assert declined["reason"] == ApprovalPolicy.READ_ONLY_RULE
+    assert declined["response"] == {"decision": "decline"}
+    assert declined["containment"]["paths"] == [str((project / "domain.py").resolve())]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_operator_named_path_still_reaches_the_judge(tmp_path: Path, capsys):
+    seen = []
+
+    class Judge:
+        async def decide(self, case):
+            seen.append(case.method)
+            return JudgeDecision("deny", "the supplied tests may not change")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project, exec_policy=_escalation_policy("test_worker.py", "pyproject.toml"))
+    broker.items[("worker-1", "turn-1", "change-1")] = {
+        "id": "change-1", "type": "fileChange",
+        "changes": [{"path": "domain.py"}, {"path": "test_worker.py"}],
+    }
+    assert await asyncio.wait_for(broker(file_request()), 1) == {"decision": "decline"}
+    assert seen == [ApprovalPolicy.FILE]
+    requested = next(event for event in events.events if event["type"] == "approval.requested")
+    assert requested["containment"]["escalatedBy"] == [{
+        "path": str((project / "test_worker.py").resolve()),
+        "declared": "test_worker.py",
+        "justification": "reviewed before it changes",
+    }]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_a_file_change_never_carries_the_judge_a_grant_root(tmp_path: Path, capsys):
+    class Judge:
+        calls = 0
+
+        async def decide(self, case):
+            Judge.calls += 1
+            return JudgeDecision("approve_once", "should not be reached")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project)
+    broker.items[("worker-1", "turn-1", "change-1")] = {
+        "id": "change-1", "type": "fileChange", "changes": [{"path": "domain.py"}],
+    }
+    request = file_request()
+    request["params"]["grantRoot"] = str(project)
+    assert await asyncio.wait_for(broker(request), 1) == {"decision": "decline"}
+    assert Judge.calls == 0
+    assert events.events[0]["type"] == "approval.declined_by_policy"
+    assert events.events[0]["reason"] == ApprovalPolicy.GRANT_ROOT_RULE
+    capsys.readouterr()
+

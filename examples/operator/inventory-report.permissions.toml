@@ -18,6 +18,11 @@ sandbox_mode = "workspace-write"
 # Mundane project-local commands the coordinator decides itself, by rule,
 # before a request would reach a judge: range reads, searches, and this
 # project's own test and CLI entry points. The file sits beside this one under
-# the same ownership rules and is never handed to the Codex runtime. Everything
-# it does not name, including every file change, still reaches a judge.
+# the same ownership rules and is never handed to the Codex runtime. Every
+# command it does not name still reaches a judge.
+#
+# The same file is where an operator would name in-project paths whose file
+# changes should reach a judge anyway. This project names none: inside its own
+# project a worker edits by right, under a sandbox that makes that project the
+# only writable root with no network.
 exec_policy = "inventory-report.rules"

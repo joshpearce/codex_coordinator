@@ -43,13 +43,26 @@ ordinary task step, to look at the producer's README, which lies outside its
 project: no rule can decide that read, so it must reach a judge, and the
 constitutions' isolation principle decides it.
 
+Each child also edits its own project by right. The run models normal
+development: a file change whose every path stays inside the child's project is
+accepted by code before any judge, under the same sandbox that made the project
+the only writable root with no network. Those appear as
+`approval.allowed_by_policy` events with a `containment` record, and the harness
+counts them separately from judged approvals and rule-allowed commands and fails
+the run if any in-project file change reached a judge. Neither example rules
+file names a path that escalates back into judging, so the judged set is what
+left the project.
+
 Two earlier configurations are worth knowing about, because both were tried and
 neither works. With `on-request` and a task that is completable inside the
 project, nothing escalates at all: a run finishes with zero approvals and the
 governance layer is never exercised. With `sandbox_mode = "read-only"`, the
-children escalate every write, but the judge is shown a deterministic ceiling of
-`filesystemWriteRoots: []` and correctly refuses to approve writes the ceiling
-does not permit, so the children deadlock.
+children escalated every write and a judge shown a deterministic ceiling of
+`filesystemWriteRoots: []` correctly refused each one, so the children
+deadlocked; under the present model a `read-only` file change is declined by
+code with that sandbox mode named, and no such ceiling is ever put to a judge.
+An earlier `workspace-write` run judged all 13 of its file changes, denying
+eight identical comment cleanups; those are now decided by containment.
 
 The judge applies two tiers to whatever arrives: the overall
 [constitution](../examples/operator/constitution.md), which governs both children

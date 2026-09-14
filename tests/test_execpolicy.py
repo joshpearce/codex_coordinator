@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from codex_coordinator.execpolicy import ExecPolicy, ExecPolicyError
+from codex_coordinator.execpolicy import (
+    FILE_CHANGE_PROGRAM,
+    ExecPolicy,
+    ExecPolicyError,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 ZSH = "/run/current-system/sw/bin/zsh"
@@ -182,6 +186,7 @@ def test_match_records_which_rule_decided_each_command(app_policy, project):
     }
     assert app_policy.provenance() == {
         "source": app_policy.source, "digest": app_policy.digest, "rules": 4,
+        "escalations": 0,
     }
 
 
@@ -193,7 +198,14 @@ def test_match_records_which_rule_decided_each_command(app_policy, project):
         ('x = 1\nprefix_rule(pattern=["sed"], decision="allow", justification="x")', "only prefix_rule"),
         ('prefix_rule(["sed"], decision="allow", justification="x")', "only prefix_rule"),
         ('network_rule(protocol="https")', "only prefix_rule"),
-        ('prefix_rule(pattern=["sed"], decision="prompt", justification="x")', 'decision must be "allow"'),
+        (
+            'prefix_rule(pattern=["sed"], decision="prompt", justification="x")',
+            'decision "prompt" is accepted only as pattern',
+        ),
+        (
+            'prefix_rule(pattern=["sed"], decision="forbidden", justification="x")',
+            'decision must be "allow" for a command rule',
+        ),
         ('prefix_rule(pattern=["sed"], decision="forbidden", justification="x")', 'decision must be "allow"'),
         ('prefix_rule(pattern=["sed"], decision="allow")', "requires justification"),
         ('prefix_rule(pattern=["sed"], decision="allow", justification=" ")', "justification must be nonempty"),
@@ -241,3 +253,148 @@ def test_example_rules_lint_with_the_pinned_codex_cli(app_policy):
     )
     assert result.returncode == 0, result.stderr
     assert '"decision":"allow"' in result.stdout
+
+
+# --- #0015: in-project file-change escalation, in the same lintable file ----
+
+ESCALATION_RULES = (
+    'prefix_rule(\n'
+    f'    pattern = ["{FILE_CHANGE_PROGRAM}", ["test_inventory_app.py", "packaging"]],\n'
+    '    decision = "prompt",\n'
+    '    justification = "the supplied tests and packaging are reviewed before they change",\n'
+    f'    match = [["{FILE_CHANGE_PROGRAM}", "test_inventory_app.py"]],\n'
+    f'    not_match = [["{FILE_CHANGE_PROGRAM}", "inventory_app/domain.py"]],\n'
+    ')\n'
+    'prefix_rule(pattern = ["sed", "-n"], decision = "allow", justification = "range reads")\n'
+)
+
+
+@pytest.fixture
+def escalation_policy() -> ExecPolicy:
+    return ExecPolicy.from_text(ESCALATION_RULES, source="/operator/worker.rules")
+
+
+def test_escalation_rule_names_in_project_paths(escalation_policy, project):
+    """A named file escalates; a named directory escalates everything beneath it."""
+    assert escalation_policy.provenance()["escalations"] == 1
+    escalated = escalation_policy.file_change_escalations(
+        [str(project / "test_inventory_app.py")], project,
+    )
+    assert [item.json() for item in escalated] == [{
+        "path": str(project / "test_inventory_app.py"),
+        "declared": "test_inventory_app.py",
+        "justification": "the supplied tests and packaging are reviewed before they change",
+    }]
+    assert escalation_policy.file_change_escalations(
+        [str(project / "packaging/wheel.cfg")], project,
+    )
+    assert escalation_policy.file_change_escalations(
+        [str(project / "inventory_app/domain.py")], project,
+    ) == ()
+    # Only the project the rules govern: the same relative name elsewhere is
+    # not the declared path, and an out-of-project path is already refused
+    # before a change list reaches here.
+    assert escalation_policy.file_change_escalations(
+        [str(project.parent / "other/test_inventory_app.py")], project,
+    ) == ()
+
+
+def test_escalation_rules_never_allow_a_command(escalation_policy, project):
+    """The reserved program decides no command: it is not a program at all."""
+    assert escalation_policy.evaluate(
+        f"{FILE_CHANGE_PROGRAM} test_inventory_app.py",
+        cwd=str(project), project=project,
+    ) is None
+    assert escalation_policy.evaluate(
+        wrap("sed -n 1,5p README.md"), cwd=str(project), project=project,
+    ) is not None
+
+
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["a"]], decision="allow", justification="x")',
+            "reserved for file-change escalation",
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["../a"]], decision="prompt", justification="x")',
+            "must be relative to the project",
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["/etc/hosts"]], decision="prompt", justification="x")',
+            "must be relative to the project",
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["~/a"]], decision="prompt", justification="x")',
+            "must be relative to the project",
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}"], decision="prompt", justification="x")',
+            'decision "prompt" is accepted only as pattern',
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["a"], ["b"]], decision="prompt", justification="x")',
+            'decision "prompt" is accepted only as pattern',
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["a", "a"]], decision="prompt", justification="x")',
+            "escalation paths must be distinct",
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["a"]], decision="prompt", '
+            f'justification="x", match=[["{FILE_CHANGE_PROGRAM}", "b"]])',
+            "match example is not escalated",
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["a"]], decision="prompt", '
+            f'justification="x", not_match=[["{FILE_CHANGE_PROGRAM}", "a/b"]])',
+            "not_match example is escalated",
+        ),
+        (
+            f'prefix_rule(pattern=["{FILE_CHANGE_PROGRAM}", ["a"]], decision="prompt", '
+            'justification="x", match=[["sed", "-n"]])',
+            "escalation example must be spelled",
+        ),
+    ],
+)
+def test_escalation_rules_the_coordinator_cannot_account_for_fail_to_load(text, error):
+    with pytest.raises(ExecPolicyError, match=error):
+        ExecPolicy.from_text(text, source="rules")
+
+
+def test_escalation_rules_lint_with_the_pinned_codex_cli(tmp_path: Path):
+    """The escalation form parses in Codex's own syntax and reads as `prompt`."""
+    import shutil
+    import subprocess
+
+    if shutil.which("codex") is None:
+        pytest.skip("Codex CLI is not installed")
+    rules = tmp_path / "worker.rules"
+    rules.write_text(ESCALATION_RULES)
+
+    escalated = subprocess.run(
+        ["codex", "execpolicy", "check", "--rules", str(rules),
+         FILE_CHANGE_PROGRAM, "test_inventory_app.py"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert escalated.returncode == 0, escalated.stderr
+    assert '"decision":"prompt"' in escalated.stdout
+
+    # An in-project path the operator did not name matches no rule at all,
+    # which is the same "nothing here decides it" the coordinator reads.
+    unnamed = subprocess.run(
+        ["codex", "execpolicy", "check", "--rules", str(rules),
+         FILE_CHANGE_PROGRAM, "inventory_app/domain.py"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert unnamed.returncode == 0, unnamed.stderr
+    assert '"decision":"prompt"' not in unnamed.stdout
+
+    # The command rules in the same file still lint.
+    command = subprocess.run(
+        ["codex", "execpolicy", "check", "--rules", str(rules), "sed", "-n", "1,5p", "README.md"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert command.returncode == 0, command.stderr
+    assert '"decision":"allow"' in command.stdout

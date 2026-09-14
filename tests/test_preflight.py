@@ -157,5 +157,6 @@ def test_preflight_reports_the_rules_decided_without_a_judge(monkeypatch, tmp_pa
     exec_policy = config.permissions_for(worker).exec_policy
     assert exec_policy is not None
     assert report["projects"][0]["execPolicy"] == {
-        "source": str(tmp_path / "worker.rules"), "digest": exec_policy.digest, "rules": 1,
+        "source": str(tmp_path / "worker.rules"), "digest": exec_policy.digest,
+        "rules": 1, "escalations": 0,
     }

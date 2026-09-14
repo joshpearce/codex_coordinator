@@ -66,23 +66,33 @@ case where the damaging action is **inside** the ceiling.
 
 ### 5. Worker-written files are re-ingested with no integrity mark
 
-A file change inside the project is the normal, correct thing for the judge to
-approve. When the written file is `AGENTS.md`, a test fixture, a prompt
-template, or a script the worker later runs, the approval is also a durable
-edit to the worker's own future instructions. The judge sees one in-scope diff
-and cannot see that the target feeds back into context.
+A file change inside the project is the normal, correct thing for a worker to
+make, and since #0015 it is decided by containment with no judge at all. When
+the written file is `AGENTS.md`, a test fixture, a prompt template, or a script
+the worker later runs, that in-scope write is also a durable edit to the
+worker's own future instructions. Nothing in the path notices that the target
+feeds back into context; the `approval.allowed_by_policy` event records every
+normalized path, but no policy is applied to what those paths mean.
 
 This is the persistence step that turns a single injected email into a standing
 behavior change. It is listed below the first four because the existing
-per-turn boundary still holds — each later action is judged on its own — but the
-judge is by then reading a case shaped by an earlier attacker-authored file.
+per-turn boundary still holds — each later *action* is still judged on its own —
+but the coordinator is by then reading a case shaped by an earlier
+attacker-authored file. Deciding in-project changes by code did not create this
+finding and does not worsen its ceiling: judging them was already the wrong
+control for it, since a judge shown one in-scope diff could not see the
+feedback either, and the eight denials of a harmless comment cleanup in the
+recorded run are what that misapplied control actually produced.
 
 **Acceptance criteria**
 
-- Approval evidence flags when a file change targets a path known to influence
-  later turns (agent instruction files, `.codex/`), and the constitution
-  addresses that class explicitly.
-- A regression covers a worker writing its own `AGENTS.md` and shows the flag in
+- An operator can name the paths that influence later turns (agent instruction
+  files, `.codex/`) in the project's execpolicy rules file so their changes
+  escalate to a judge, the example configuration does so, and the constitution
+  addresses that class explicitly. The mechanism exists as of #0015; what is
+  unmet is naming the class and covering it in the shipped example.
+- A regression covers a worker writing its own `AGENTS.md` and shows it reaching
+  a judge under such a rule, with the escalation recorded in
   `approval.requested`.
 
 ### 6. Whatever else Codex honors from a worker-writable project config

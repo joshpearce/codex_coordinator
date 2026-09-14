@@ -382,7 +382,70 @@ def test_human_output_shows_rule_allowed_commands(capsys):
     assert "ALLOWED BY POLICY inventory-app: /bin/zsh -lc 'sed -n 1,5p README.md'" in output
     assert "rule: range reads of the project's own files" in output
     assert "Approvals judged: 8" in output
-    assert "Allowed by exec policy without a judge: 5" in output
+    assert "Commands allowed by exec policy without a judge: 5" in output
+
+
+def test_human_output_distinguishes_code_accepted_file_changes(capsys):
+    """Judged approvals, rule-allowed commands, and code-decided file changes."""
+    renderer = OutputRenderer()
+    renderer.service({
+        "type": "approval.allowed_by_policy",
+        "method": "item/fileChange/requestApproval",
+        "project": "/tmp/inventory-app",
+        "request": {"changes": [{"path": "/tmp/inventory-app/inventory_app/domain.py"}]},
+        "containment": {
+            "rule": "accepted by containment: every change path normalizes inside it",
+            "paths": ["/tmp/inventory-app/inventory_app/domain.py"],
+        },
+    })
+    renderer.service({
+        "type": "approval.declined_by_policy",
+        "method": "item/fileChange/requestApproval",
+        "project": "/tmp/inventory-report",
+        "request": {"changes": [{"path": "/tmp/inventory-report/report.py"}]},
+        "containment": {
+            "rule": "declined by containment: sandbox mode is read-only",
+            "paths": ["/tmp/inventory-report/report.py"],
+        },
+    })
+    renderer.harness(
+        "live_e2e.completed", returnCode=0, result={},
+        approvals={
+            "total": 8, "byProject": {}, "denied": [],
+            "policyAllowed": {"inventory-app": 5},
+            "fileChangesAccepted": {"inventory-app": 11, "inventory-report": 6},
+            "fileChangesDeclined": {"inventory-report": 1},
+        },
+        validationErrors=[],
+    )
+    output = capsys.readouterr().out
+    assert "ALLOWED BY POLICY inventory-app: 1 file: domain.py" in output
+    assert "DECLINED BY POLICY inventory-report: 1 file: report.py" in output
+    assert "rule: declined by containment: sandbox mode is read-only" in output
+    assert "In-project file changes accepted by code without a judge: 17" in output
+    assert "File changes declined by code without a judge: 1" in output
+
+
+def test_a_judged_in_project_file_change_is_a_validation_error(tmp_path: Path):
+    """Zero judged in-project file changes, unless an operator rule asked for one."""
+    log = tmp_path / "service.jsonl"
+    events = _two_project_approval_events()
+    events[0]["method"] = "item/fileChange/requestApproval"
+    log.write_text("".join(json.dumps(event) + "\n" for event in events))
+    assert "an in-project file change from inventory-app reached a judge; " in (
+        _approval_errors(log)[0]
+    )
+
+    events[0]["containment"] = {
+        "rule": "escalated by operator rule: supplied tests",
+        "escalatedBy": [{
+            "path": "/work/inventory-app/test_inventory_app.py",
+            "declared": "test_inventory_app.py",
+            "justification": "supplied tests",
+        }],
+    }
+    log.write_text("".join(json.dumps(event) + "\n" for event in events))
+    assert _approval_errors(log) == []
 
 
 def test_approval_validation_requires_per_project_constitution_provenance(tmp_path: Path):

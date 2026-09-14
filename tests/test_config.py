@@ -562,6 +562,7 @@ def test_exec_policy_is_loaded_from_a_trusted_sibling_of_the_permissions_file(tm
             "source": str(tmp_path / "worker.rules"),
             "digest": permissions.exec_policy.digest,
             "rules": 1,
+            "escalations": 0,
         }
         # The rules are a per-project statement: the operator-wide default
         # never inherits one.
@@ -577,9 +578,9 @@ def test_exec_policy_that_does_not_load_fails_startup(tmp_path: Path):
 
     _worker, config_path = _exec_policy_config(
         tmp_path, rules_reference="worker.rules",
-        rules_text='prefix_rule(pattern=["sed"], decision="prompt", justification="x")\n',
+        rules_text='prefix_rule(pattern=["sed"], decision="forbidden", justification="x")\n',
     )
-    with pytest.raises(ValueError, match='decision must be "allow"'):
+    with pytest.raises(ValueError, match='decision must be "allow" for a command rule'):
         OperatorConfig.load(path=config_path, environ={})
 
     _worker, config_path = _exec_policy_config(
