@@ -18,8 +18,10 @@ milestone M2 in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 Keep operator policy outside coordinator- and worker-writable roots. Treat
 worker output, approval requests, and model verdicts as untrusted evidence.
 Worker projects must not be told that judging exists: what reaches a judge is
-decided by each project's `.codex/config.toml` and its actual task, never by
-instructing a worker to stage approval requests. A constitution states
+decided by each project's operator-owned permissions file and its actual task,
+never by instructing a worker to stage approval requests. A worker project holds
+no Codex configuration of its own; its boundary is declared beside
+`operator.toml`, outside every root a worker can write. A constitution states
 principles and capability profiles, never a list of allowed or blocked commands;
 `tests/test_judge_live_gate.py` fails if a catalogued request is named verbatim
 in a policy document.

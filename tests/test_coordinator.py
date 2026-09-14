@@ -21,6 +21,7 @@ from codex_coordinator.coordinator import (
     WorkerPermissions,
     codex_exec_json_runner,
     mutable_evidence,
+    select_worker_permissions,
 )
 
 
@@ -95,15 +96,6 @@ class FakeClient:
         if method == "thread/start":
             return {"thread": {"id": "worker-1"}}
         return {}
-
-
-def write_worker_config(project: Path, mode="workspace-write"):
-    (project / ".codex").mkdir()
-    (project / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        f'sandbox_mode = "{mode}"\n'
-    )
 
 
 @pytest.fixture
@@ -318,7 +310,6 @@ async def test_judge_read_probe_failure_prevents_exec(monkeypatch, tmp_path, fak
 
 @pytest.mark.asyncio
 async def test_starts_worker_with_runtime_enforced_project_only_sandbox(tmp_path: Path):
-    write_worker_config(tmp_path)
     client = FakeClient()
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), StaticJudge())
 
@@ -341,7 +332,6 @@ async def test_starts_worker_with_runtime_enforced_project_only_sandbox(tmp_path
 
 @pytest.mark.asyncio
 async def test_worker_effort_uses_turn_start_schema_field(tmp_path: Path):
-    write_worker_config(tmp_path)
     client = FakeClient()
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), StaticJudge())
     await JudgedSessionSupervisor(
@@ -351,32 +341,80 @@ async def test_worker_effort_uses_turn_start_schema_field(tmp_path: Path):
     assert client.calls[1][1]["effort"] == "medium"
 
 
-def test_rejects_dangerous_local_worker_permissions(tmp_path: Path):
-    write_worker_config(tmp_path, "danger-full-access")
-    with pytest.raises(ValueError, match="unsafe or unsupported"):
-        WorkerPermissions.from_project(tmp_path)
+def test_rejects_unsupported_worker_permission_values():
+    for text, message in (
+        ('sandbox_mode = "danger-full-access"', "sandbox_mode must be one of"),
+        ('approvals_reviewer = "auto_review"', "approvals_reviewer must be"),
+        ('sandbox_mode = 7', "sandbox_mode must be a string"),
+        ('writable_roots = ["/"]', "unsupported worker permission fields"),
+        ('sandbox_mode = ', "invalid TOML"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            WorkerPermissions.from_toml(text, "operator/worker.permissions.toml")
 
 
-def test_worker_config_symlink_cannot_escape_project(tmp_path: Path):
-    project = tmp_path / "worker"
-    project.mkdir()
-    (project / ".codex").mkdir()
-    external = tmp_path / "external.toml"
-    external.write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "read-only"\n'
+def test_worker_permission_keys_fall_back_to_the_operator_wide_default():
+    """An operator writes only what differs from the setting for every worker."""
+    default = WorkerPermissions(approval_policy="untrusted", source="operator-wide default")
+    permissions = WorkerPermissions.from_toml(
+        'sandbox_mode = "read-only"\n', "operator/worker.permissions.toml", default=default,
     )
-    link = project / ".codex/config.toml"
-    link.symlink_to(external)
-    with pytest.raises(ValueError, match="escapes the registered project"):
-        WorkerPermissions.from_project(project)
+    assert permissions.approval_policy == "untrusted"
+    assert permissions.approvals_reviewer == "user"
+    assert permissions.sandbox_mode == "read-only"
+    assert permissions.source == "operator/worker.permissions.toml"
+    # The digest covers the boundary, not where it was declared, so an audit
+    # can compare one session's registration against the next.
+    assert permissions.digest != default.digest
+    assert permissions.digest == WorkerPermissions(
+        approval_policy="untrusted", sandbox_mode="read-only", source="elsewhere",
+    ).digest
+    assert permissions.provenance() == {
+        "source": "operator/worker.permissions.toml",
+        "digest": permissions.digest,
+        "approvalPolicy": "untrusted",
+        "approvalsReviewer": "user",
+        "sandboxMode": "read-only",
+    }
 
-    link.unlink()
-    internal = project / "worker-config.toml"
-    internal.write_bytes(external.read_bytes())
-    link.symlink_to(internal)
-    assert WorkerPermissions.from_project(project).sandbox_mode == "read-only"
+
+def test_most_specific_operator_declaration_governs_a_nested_project(tmp_path: Path):
+    root = tmp_path / "root"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    wide = WorkerPermissions(sandbox_mode="workspace-write", source="root")
+    narrow = WorkerPermissions(sandbox_mode="read-only", source="nested")
+    default = WorkerPermissions(source="operator-wide default")
+    assert select_worker_permissions(nested, {root: wide}, default).source == "root"
+    assert select_worker_permissions(
+        nested, {root: wide, nested: narrow}, default,
+    ).source == "nested"
+    assert select_worker_permissions(tmp_path / "other", {root: wide}, default) is default
+
+
+@pytest.mark.asyncio
+async def test_worker_owned_config_does_not_decide_the_boundary(tmp_path: Path):
+    """A file inside the worker's writable root is not read at all."""
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex/config.toml").write_text(
+        'approval_policy = "never"\n'
+        'approvals_reviewer = "auto_review"\n'
+        'sandbox_mode = "danger-full-access"\n'
+    )
+    client = FakeClient()
+    handler = JudgedApprovalHandler(
+        tmp_path, ApprovalPolicy(tmp_path, sandbox_mode="read-only"), StaticJudge(),
+    )
+    await JudgedSessionSupervisor(
+        client, handler, tmp_path,
+        permissions=WorkerPermissions(
+            approval_policy="untrusted", sandbox_mode="read-only",
+            source="operator/worker.permissions.toml",
+        ),
+    ).start("Do the work")
+    assert client.calls[0][1]["approvalPolicy"] == "untrusted"
+    assert client.calls[0][1]["approvalsReviewer"] == "user"
+    assert client.calls[1][1]["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
 
 
 @pytest.mark.asyncio
@@ -879,41 +917,27 @@ def test_constitution_provenance_records_both_tiers_for_audit(tmp_path: Path):
     assert changed.provenance(project)["overall"]["digest"] != provenance["overall"]["digest"]
 
 
-def test_worker_approval_policy_rejects_everything_but_on_request(tmp_path: Path):
-    """`never` executes unjudged; `untrusted` is not a valid value on the pinned CLI."""
+def test_worker_approval_policy_accepts_only_judged_wire_values():
+    """Both wire values keep a judge in the loop; `never` would execute unjudged."""
+    for policy in sorted(WorkerPermissions.WIRE_APPROVAL_POLICIES):
+        assert WorkerPermissions.from_toml(
+            f'approval_policy = "{policy}"\n', "operator/worker.permissions.toml",
+        ).approval_policy == policy
+
+    for policy in ("never", "on-failure", "auto", ""):
+        with pytest.raises(ValueError, match="approval_policy must be one of"):
+            WorkerPermissions.from_toml(
+                f'approval_policy = "{policy}"\n', "operator/worker.permissions.toml",
+            )
+
+
+def test_worker_sandbox_is_derived_from_operator_config_not_from_the_worker(tmp_path: Path):
+    """The enforced boundary comes from operator configuration, never the prompt."""
     project = tmp_path / "worker"
-    (project / ".codex").mkdir(parents=True)
-    config = project / ".codex/config.toml"
-
-    def write(policy: str) -> None:
-        config.write_text(
-            f'approval_policy = "{policy}"\n'
-            'approvals_reviewer = "user"\n'
-            'sandbox_mode = "workspace-write"\n'
-        )
-
-    write("on-request")
-    assert WorkerPermissions.from_project(project).approval_policy == "on-request"
-
-    # "untrusted" is in the protocol's AskForApproval enum but Codex CLI
-    # 0.154.0 rejects it in a project config, so accepting it here would defer
-    # a clear startup error into an opaque runtime failure.
-    for policy in ("untrusted", "never", "on-failure", "auto", ""):
-        write(policy)
-        with pytest.raises(ValueError, match="require approval_policy"):
-            WorkerPermissions.from_project(project)
-
-
-def test_worker_sandbox_is_derived_from_config_not_from_the_worker(tmp_path: Path):
-    """The enforced boundary comes from the validated config, never the prompt."""
-    project = tmp_path / "worker"
-    (project / ".codex").mkdir(parents=True)
-    (project / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "workspace-write"\n'
-    )
-    sandbox = WorkerPermissions.from_project(project).enforced_sandbox(project)
+    project.mkdir()
+    sandbox = WorkerPermissions.from_toml(
+        'sandbox_mode = "workspace-write"\n', "operator/worker.permissions.toml",
+    ).enforced_sandbox(project)
     assert sandbox["networkAccess"] is False
     assert sandbox["writableRoots"] == [str(project.resolve())]
     assert sandbox["excludeTmpdirEnvVar"] is True

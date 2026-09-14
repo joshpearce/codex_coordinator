@@ -15,10 +15,12 @@ browser clients, and multiple users are unsupported. No flag enables remote
 binding. Authentication, transport protection, and per-user authorization
 would be required before supporting those modes.
 
-Projects must be under startup-configured canonical allowed roots before
-their `.codex/config.toml` is read. Existing symlinks that escape those roots
-are rejected. A worker config symlink is accepted only when its resolved file
-remains inside that worker project. The configured app-server endpoint must be a Unix socket owned
+Projects must be under startup-configured canonical allowed roots before any
+session is started for them. Existing symlinks that escape those roots are
+rejected. A worker project's own files are never read as configuration; its
+boundary comes from an operator-owned permissions file validated at startup
+under the same ownership and location rules as a constitution. The configured
+app-server endpoint must be a Unix socket owned
 by the current user with no group/other permissions, inside an owner-controlled
 directory. Workers receive explicit Codex sandbox policies with no network or
 ambient temporary-directory write access. The coordinator process itself is
@@ -49,14 +51,18 @@ under. Precedence between the tiers is prose evaluated by a model: it guides a
 judge and does not replace the deterministic path, sandbox, permission, and
 session limits.
 
-What escalates into a judged approval is decided by the worker project's
-`.codex/config.toml` and the sandbox derived from it, never by instructing a
-worker to stage approval requests: worker prompts in the examples contain no
-mention of judging, and the example child project trees contain none either.
-That file currently sits inside the worker's own writable root, so a worker can
-widen its `sandbox_mode` for a later session; the current session is unaffected
-because registration snapshots the boundary and every turn replays it. See
-[#0014](../issues/0014-high-new-worker-controls-its-own-permission-configuration.md).
+What escalates into a judged approval is decided by each project's
+operator-owned permissions file and the sandbox derived from it, never by
+instructing a worker to stage approval requests: worker prompts in the examples
+contain no mention of judging, and the example child project trees contain
+neither prompts nor Codex configuration. Worker-owned permission configuration
+is not supported. Those files live beside `operator.toml`, outside every worker-
+and coordinator-writable root, so a worker cannot widen its `sandbox_mode` for a
+later session by writing inside the root it is allowed to write. The current
+session is likewise unaffected by anything: registration snapshots the boundary
+and every turn replays it, and `session.started` records the source and digest
+of the permissions used, so an audit can show whether the boundary changed
+between two sessions of the same project.
 
 Both tiers are written as principles rather than command lists. That is a
 security property, not a style preference: a judge meets requests nobody

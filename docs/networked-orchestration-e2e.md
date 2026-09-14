@@ -18,13 +18,15 @@ separate temporary projects copied from
 [`examples/inventory-app`](../examples/inventory-app) and
 [`examples/inventory-report`](../examples/inventory-report). Each project is a compact
 test-driven scaffold with packaging, CLI wiring, documentation, contract tests, and
-one implementation module containing the TODOs. Their checked-in
-`.codex/config.toml` files use `workspace-write`, so each child authors its own project
-while the service remains the middle-man for creating the session and sending turns.
+one implementation module containing the TODOs. Neither carries any Codex
+configuration; the operator's `inventory-app.permissions.toml` and
+`inventory-report.permissions.toml` declare `workspace-write`, so each child
+authors its own project while the service remains the middle-man for creating
+the session and sending turns.
 Neither child is told that judging exists. Their prompts are plain implementation
 tasks, and their project trees contain no mention of approvals, constitutions, or
-a judge. What reaches a judge is decided by each project's
-the operator's configuration: `worker_approval_policy = "untrusted"` makes each
+a judge. What reaches a judge is decided by
+the operator's configuration: `approval_policy = "untrusted"` makes each
 child's runtime raise an approval request before anything it does not already
 trust, and the sandbox derived from `sandbox_mode` keeps writes inside the
 project and disables the network. Approval traffic is therefore a product of the
@@ -90,7 +92,8 @@ uv run python -m codex_coordinator.live_e2e \
 ```
 
 The top-level coordinator uses the `coordinator` permission profile from its copied
-`.codex/config.toml`. The profile extends the workspace baseline, enables networking
+`.codex/config.toml`, the one Codex config file in the fixture: it is read by
+`codex exec` for the coordinating session, and the children have none. The profile extends the workspace baseline, enables networking
 for localhost service calls, and allowlists only the resolved app-server Unix
 socket. It is instructed to make all child application edits through HTTP-managed
 sessions. The children and judges retain their narrower configurations. This

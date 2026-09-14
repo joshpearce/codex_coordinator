@@ -169,51 +169,93 @@ class Judge(Protocol):
 
 @dataclass(frozen=True)
 class WorkerPermissions:
-    # What a worker project's own config.toml may declare. Codex CLI 0.154.0
-    # removed "untrusted" as a config value -- thread/start fails with
-    # `approval_policy = "untrusted" is no longer supported` when the project
-    # file carries it -- and "never" would execute unjudged. The same CLI does
-    # accept "untrusted" as the thread/start `approvalPolicy` parameter, so an
-    # operator raises approval frequency through WIRE_APPROVAL_POLICIES below
-    # rather than through a file inside the worker's own writable root.
-    JUDGED_APPROVAL_POLICIES = frozenset({"on-request"})
+    """The operator-owned execution boundary for one worker project.
+
+    These values come from a file the operator keeps beside ``operator.toml``,
+    outside every worker- and coordinator-writable root, and are sent explicitly
+    on ``thread/start`` and ``turn/start``. Nothing inside a worker project is
+    read: a worker that writes ``.codex/config.toml`` under its own writable
+    root cannot widen the boundary of any later session.
+    """
 
     # What the coordinator may send on thread/start. "untrusted" makes the
     # runtime raise an approval request before anything it does not already
     # trust, so what reaches a judge follows operator configuration instead of
-    # the worker's own discretion about when to ask.
+    # the worker's own discretion about when to ask. "never" is absent because
+    # it would execute unjudged. Codex CLI 0.154.0 rejects "untrusted" as a
+    # config value but accepts it as the thread/start parameter, which is the
+    # only way these values are applied.
     WIRE_APPROVAL_POLICIES = frozenset({"on-request", "untrusted"})
+    SANDBOX_MODES = frozenset({"read-only", "workspace-write"})
+    FIELDS = ("approval_policy", "approvals_reviewer", "sandbox_mode")
 
-    approval_policy: str
-    approvals_reviewer: str
-    sandbox_mode: str
+    approval_policy: str = "on-request"
+    approvals_reviewer: str = "user"
+    sandbox_mode: str = "workspace-write"
+    source: str = "built-in default"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source:
+            raise ValueError("worker permission source must be nonempty")
+        if self.approval_policy not in self.WIRE_APPROVAL_POLICIES:
+            raise ValueError(
+                f"{self.source}: approval_policy must be one of "
+                f"{sorted(self.WIRE_APPROVAL_POLICIES)}"
+            )
+        if self.approvals_reviewer != "user":
+            raise ValueError(
+                f"{self.source}: approvals_reviewer must be 'user'; no other "
+                "reviewer routes an approval to a judge"
+            )
+        if self.sandbox_mode not in self.SANDBOX_MODES:
+            raise ValueError(
+                f"{self.source}: sandbox_mode must be one of {sorted(self.SANDBOX_MODES)}"
+            )
 
     @classmethod
-    def from_project(cls, project: Path) -> "WorkerPermissions":
-        root = project.resolve(strict=True)
-        path = root / ".codex" / "config.toml"
-        target = path.resolve(strict=True)
-        if root not in target.parents:
-            raise ValueError(f"worker config escapes the registered project: {path}")
-        if not target.is_file():
-            raise ValueError(f"worker config must be a regular file: {path}")
-        with target.open("rb") as stream:
-            config = tomllib.load(stream)
-        result = cls(
-            approval_policy=str(config.get("approval_policy", "")),
-            approvals_reviewer=str(config.get("approvals_reviewer", "")),
-            sandbox_mode=str(config.get("sandbox_mode", "")),
+    def from_toml(
+        cls, text: str, source: str, *, default: "WorkerPermissions | None" = None,
+    ) -> "WorkerPermissions":
+        """Parse one operator-owned permissions file.
+
+        Every key is optional and falls back to ``default``, so an operator
+        writes only what differs from the operator-wide setting. The file is
+        trusted for ownership and location by the caller before it gets here;
+        what is checked here is that each declared value is one the coordinator
+        can actually send and still judge.
+        """
+        try:
+            values = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"{source}: invalid TOML: {exc}") from exc
+        unknown = sorted(set(values) - set(cls.FIELDS))
+        if unknown:
+            raise ValueError(f"{source}: unsupported worker permission fields: {unknown}")
+        base = default if default is not None else cls()
+        declared: dict[str, str] = {}
+        for name in cls.FIELDS:
+            value = values.get(name, getattr(base, name))
+            if not isinstance(value, str):
+                raise ValueError(f"{source}: {name} must be a string")
+            declared[name] = value
+        return cls(source=source, **declared)
+
+    @property
+    def digest(self) -> str:
+        """Digest of the boundary itself, so an audit can spot a changed one."""
+        payload = json.dumps(
+            {name: getattr(self, name) for name in self.FIELDS}, sort_keys=True,
         )
-        if result.approval_policy not in cls.JUDGED_APPROVAL_POLICIES:
-            raise ValueError(
-                f"{path}: judged workers require approval_policy in "
-                f"{sorted(cls.JUDGED_APPROVAL_POLICIES)}"
-            )
-        if result.approvals_reviewer != "user":
-            raise ValueError(f"{path}: judged workers require approvals_reviewer = 'user'")
-        if result.sandbox_mode not in {"read-only", "workspace-write"}:
-            raise ValueError(f"{path}: unsafe or unsupported sandbox_mode")
-        return result
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+    def provenance(self) -> dict[str, str]:
+        return {
+            "source": self.source,
+            "digest": self.digest,
+            "approvalPolicy": self.approval_policy,
+            "approvalsReviewer": self.approvals_reviewer,
+            "sandboxMode": self.sandbox_mode,
+        }
 
     def enforced_sandbox(self, project: Path) -> dict[str, Any]:
         """Return the app-server execution boundary, not a prompt-time hint."""
@@ -226,6 +268,26 @@ class WorkerPermissions:
             "excludeTmpdirEnvVar": True,
             "excludeSlashTmp": True,
         }
+
+
+def select_worker_permissions(
+    project: Path,
+    declarations: Mapping[Path, WorkerPermissions],
+    default: WorkerPermissions,
+) -> WorkerPermissions:
+    """Return the most specific operator declaration covering ``project``.
+
+    A declaration for a parent directory governs the projects beneath it, so a
+    nested project cannot fall back to a wider default than the root it sits in.
+    """
+    canonical = Path(project).expanduser().resolve(strict=False)
+    selected: tuple[Path, WorkerPermissions] | None = None
+    for declared, permissions in declarations.items():
+        if canonical != declared and declared not in canonical.parents:
+            continue
+        if selected is None or len(declared.parts) > len(selected[0].parts):
+            selected = (declared, permissions)
+    return default if selected is None else selected[1]
 
 
 class ApprovalPolicy:
@@ -742,12 +804,15 @@ class JudgedApprovalHandler:
 class JudgedSessionSupervisor:
     def __init__(
         self, client: ProtocolClient, approvals: JudgedApprovalHandler, project: Path,
-        *, worker_model: str | None = None, worker_reasoning_effort: str | None = None,
+        *, permissions: WorkerPermissions | None = None,
+        worker_model: str | None = None, worker_reasoning_effort: str | None = None,
     ) -> None:
         self.client = client
         self.approvals = approvals
         self.project = project.resolve()
-        self.permissions = WorkerPermissions.from_project(self.project)
+        # Operator-owned, supplied by the caller from configuration outside the
+        # worker's writable root; the project directory is never consulted.
+        self.permissions = permissions if permissions is not None else WorkerPermissions()
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
         if approvals.policy.project != self.project:

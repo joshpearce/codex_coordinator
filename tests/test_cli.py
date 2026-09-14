@@ -21,10 +21,10 @@ async def test_one_shot_cli_requires_trusted_root_before_project_config(monkeypa
     config = OperatorConfig.load(environ={})
     monkeypatch.setattr("codex_coordinator.cli.OperatorConfig.load", lambda **_kwargs: config)
 
-    def unexpected(_project):
-        raise AssertionError("worker project config was read")
+    def unexpected(_self, _project):
+        raise AssertionError("a worker boundary was resolved before the root check")
 
-    monkeypatch.setattr("codex_coordinator.cli.WorkerPermissions.from_project", unexpected)
+    monkeypatch.setattr(OperatorConfig, "permissions_for", unexpected)
     with pytest.raises(ValueError, match="at least one allowed root"):
         await run(_args(tmp_path))
 
@@ -40,10 +40,10 @@ async def test_one_shot_cli_rejects_symlink_escape_before_project_config(monkeyp
     config = OperatorConfig.load(environ={}, overrides={"allowed_roots": [str(allowed)]})
     monkeypatch.setattr("codex_coordinator.cli.OperatorConfig.load", lambda **_kwargs: config)
 
-    def unexpected(_project):
-        raise AssertionError("worker project config was read")
+    def unexpected(_self, _project):
+        raise AssertionError("a worker boundary was resolved before the root check")
 
-    monkeypatch.setattr("codex_coordinator.cli.WorkerPermissions.from_project", unexpected)
+    monkeypatch.setattr(OperatorConfig, "permissions_for", unexpected)
     with pytest.raises(ValueError, match="outside the configured allowed roots"):
         await run(_args(escaped))
 
@@ -51,12 +51,7 @@ async def test_one_shot_cli_rejects_symlink_escape_before_project_config(monkeyp
 @pytest.mark.asyncio
 async def test_one_shot_cli_reports_unreachable_socket(monkeypatch, tmp_path: Path):
     project = tmp_path / "worker"
-    (project / ".codex").mkdir(parents=True)
-    (project / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "read-only"\n'
-    )
+    project.mkdir()
     config = OperatorConfig.load(environ={}, overrides={"allowed_roots": [str(tmp_path)]})
     monkeypatch.setattr("codex_coordinator.cli.OperatorConfig.load", lambda **_kwargs: config)
     monkeypatch.setattr("codex_coordinator.cli.check_codex_compatibility", lambda _command: "0.154.0")
@@ -76,12 +71,7 @@ async def test_one_shot_cli_reports_unreachable_socket(monkeypatch, tmp_path: Pa
 @pytest.mark.asyncio
 async def test_one_shot_cli_uses_operator_judge_settings(monkeypatch, tmp_path: Path):
     project = tmp_path / "worker"
-    (project / ".codex").mkdir(parents=True)
-    (project / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "read-only"\n'
-    )
+    project.mkdir()
     config = OperatorConfig.load(environ={}, overrides={
         "allowed_roots": [str(tmp_path)],
         "judge_policy": "Only approve reviewed commands.",

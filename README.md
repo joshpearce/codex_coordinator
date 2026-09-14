@@ -81,49 +81,47 @@ PROJECT_B="/absolute/path/to/existing-project-b"
 ```
 
 The projects must exist and must not be nested inside one another. Choose a
-fresh `WORKSPACE_DIR` for this example; its two operator files must remain
+fresh `WORKSPACE_DIR` for this example; its operator files must remain
 outside the coordinator and both worker projects. The live E2E fixture uses
 the same four-directory layout.
 
 ### 4. Configure the workers and the operator
 
-Each worker needs `.codex/config.toml`. This creates a workspace-write
-configuration only when the file is absent, so it does not overwrite an
-existing project's Codex settings:
+A worker project needs no Codex configuration of its own. Each worker's
+execution boundary is declared in an operator-owned file beside `operator.toml`,
+outside every worker-writable root, and the coordinator sends those values on
+`thread/start`. A file inside a worker's own project would be one that worker
+can rewrite, so nothing there is read:
 
 ```sh
-for PROJECT_DIR in "$PROJECT_A" "$PROJECT_B"; do
-  mkdir -p "$PROJECT_DIR/.codex"
-  if [ ! -e "$PROJECT_DIR/.codex/config.toml" ] &&
-     [ ! -L "$PROJECT_DIR/.codex/config.toml" ]; then
-    printf '%s\n' \
-      'approval_policy = "on-request"' \
-      'approvals_reviewer = "user"' \
-      'sandbox_mode = "workspace-write"' > "$PROJECT_DIR/.codex/config.toml"
-  fi
+for NAME in project-a project-b; do
+  printf '%s\n' \
+    'approval_policy = "untrusted"' \
+    'approvals_reviewer = "user"' \
+    'sandbox_mode = "workspace-write"' > "$COORD_DIR/$NAME.permissions.toml"
 done
 ```
 
-A worker project's `approval_policy` must be `on-request`; `never` would execute
-unjudged, and Codex CLI 0.154.0 rejects `untrusted` as a project config value.
+`approval_policy` decides how much reaches a judge. `untrusted` makes the
+runtime raise an approval request before anything it does not already trust;
+`on-request` leaves that decision to the worker, which means a worker that never
+asks is never judged. `never` is rejected, since it would execute unjudged.
+`sandbox_mode` is `workspace-write` or `read-only`, and `approvals_reviewer`
+must be `user`, the only reviewer that routes an approval to a judge.
 
-How much reaches a judge is set by the operator instead, with
-`worker_approval_policy` in `operator.toml`. `untrusted` makes the runtime raise
-an approval request before anything it does not already trust; `on-request`
-leaves that decision to the worker, which means a worker that never asks is
-never judged. It is sent as the `thread/start` `approvalPolicy` parameter rather
-than written into the project, both because the pinned CLI rejects it there and
-because that file sits inside the worker's own writable root
-([#0014](issues/0014-high-new-worker-controls-its-own-permission-configuration.md)).
+Each file is referenced from `operator.toml` under `[worker_permissions]`, shown
+with the rest of that file below. Any key may be omitted to take the
+operator-wide default: `worker_approval_policy` in `operator.toml`, else
+`on-request` and `workspace-write`. A declaration at a root governs every
+project beneath it, and a more specific one deeper in the tree overrides it.
 
 Do not tell a worker to stage approval requests. Configure the boundary and let
 the worker's ordinary work meet it: with a self-contained task under
 `on-request`, nothing escalates and nothing is judged.
 
-For existing projects, inspect their files and ensure the approval settings
-match exactly. With `workspace-write`, each worker can edit only its own
-project; the coordinator disables worker network access. Choose `read-only`
-explicitly for inspection-only workers.
+With `workspace-write`, each worker can edit only its own project; the
+coordinator disables worker network access. Choose `read-only` explicitly for
+inspection-only workers.
 
 The constitution has two tiers. The **overall** constitution at
 `constitution_path` applies to every project and is a ceiling. Each project also
@@ -142,9 +140,11 @@ trusted policy:
 cp examples/operator/constitution.md "$COORD_DIR/constitution.md"
 cp examples/operator/inventory-app.constitution.md "$COORD_DIR/project-a.md"
 cp examples/operator/inventory-report.constitution.md "$COORD_DIR/project-b.md"
-printf 'approval_mode = "service"\nconstitution_path = "%s"\ncoordinator_root = "%s"\nallowed_roots = ["%s", "%s"]\n[project_constitutions]\n"%s" = "%s"\n"%s" = "%s"\n' \
+printf 'approval_mode = "service"\nconstitution_path = "%s"\ncoordinator_root = "%s"\nallowed_roots = ["%s", "%s"]\n[worker_permissions]\n"%s" = "%s"\n"%s" = "%s"\n[project_constitutions]\n"%s" = "%s"\n"%s" = "%s"\n' \
   "$COORD_DIR/constitution.md" "$COORDINATOR_PROJECT" \
   "$PROJECT_A" "$PROJECT_B" \
+  "$PROJECT_A" "$COORD_DIR/project-a.permissions.toml" \
+  "$PROJECT_B" "$COORD_DIR/project-b.permissions.toml" \
   "$PROJECT_A" "$COORD_DIR/project-a.md" \
   "$PROJECT_B" "$COORD_DIR/project-b.md" > "$COORD_DIR/operator.toml"
 ```
@@ -163,10 +163,10 @@ workers; a more specific entry deeper in the tree overrides it.
 
 Review every file before use. `operator.toml` must be an owner-controlled
 regular file in an owner-controlled directory, outside the coordinator and
-every worker-writable allowed root, and each constitution must sit beside it
-under the same ownership rules. Keep them operator-controlled: they supply the
-judge's rules, not the worker's instructions. Do not put any of them in a
-worker project's `.codex` directory. For paths containing a literal quote or
+every worker-writable allowed root, and each constitution and permissions file
+must sit beside it under the same ownership rules. Keep them
+operator-controlled: they supply the judge's rules and the worker's boundary,
+not the worker's instructions. Do not put any of them in a worker project. For paths containing a literal quote or
 backslash, write valid TOML strings by hand instead of using the simple
 `printf` template.
 
@@ -339,14 +339,16 @@ entry in `[project_constitutions]` maps a project directory inside
 judge-policy text as its third positional argument, which becomes a one-tier
 constitution. Optional settings include `codex_command`, `socket_path`,
 `worker_model`, `worker_reasoning_effort`, `permission_ceilings`,
-`worker_approval_policy`, `allow_session_approval`, approval/judge timeouts, and
+`worker_approval_policy`, `worker_permissions`, `allow_session_approval`,
+approval/judge timeouts, and
 event/item retention
 limits. Paths in the config must be absolute. A custom app-server socket must
 already have a private listener; the default socket is
 `~/.codex/app-server-control/app-server-control.sock`.
 
-Worker `approval_policy` and `approvals_reviewer` are validated rather than
-trusted to expand authority. Every turn receives an explicit sandbox policy;
+Each declared `approval_policy` and `approvals_reviewer` is validated rather
+than trusted to expand authority, and every one of them is operator-owned.
+Every turn receives an explicit sandbox policy;
 for workspace-write, the canonical project is the only writable root, with
 network and ambient temporary-directory writes disabled. Approval evidence is
 bound to its thread, turn, and item; unknown or conflicting requests fail

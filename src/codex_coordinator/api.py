@@ -165,9 +165,11 @@ class Coordinator:
             client, approvals, events,
             worker_model=config.worker_model,
             worker_reasoning_effort=config.worker_reasoning_effort,
+            worker_approval_policy=config.worker_approval_policy,
             allow_session_approval=config.allow_session_approval,
             allowed_roots=config.allowed_roots,
             permission_ceilings=config.permission_ceilings,
+            worker_permissions=config.worker_permissions,
         )
         client.notification_handler = service.notification
         try:

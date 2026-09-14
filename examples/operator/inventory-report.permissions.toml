@@ -1,0 +1,17 @@
+# Execution boundary for the inventory-report worker.
+#
+# Operator-owned and outside every worker- and coordinator-writable root. The
+# coordinator parses this file and sends these values on the wire when it
+# starts the project's Codex session; the project directory itself carries no
+# Codex configuration, so nothing the worker can write decides what its next
+# session may do.
+#
+# Execution is confined to a sandbox in which only this project directory is
+# writable and the network is unavailable, so anything beyond that boundary has
+# to be approved by a reviewer before it runs. Under "untrusted" the runtime
+# raises an approval request before anything it does not already trust, so what
+# reaches a reviewer follows this file rather than the worker's own discretion.
+# Any key may be omitted to take the operator-wide default from operator.toml.
+approval_policy = "untrusted"
+approvals_reviewer = "user"
+sandbox_mode = "workspace-write"

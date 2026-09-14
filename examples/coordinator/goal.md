@@ -92,8 +92,8 @@ object naming the two constitutions the judge was given, by source path and
 digest. Both children must show the same overall digest and different project
 digests.
 
-Neither child is told that any of this exists. Each project's `.codex/config.toml`
-and the sandbox derived from it — network disabled, only that project writable —
+Neither child is told that any of this exists. Each project's operator-owned
+permissions file and the sandbox derived from it — network disabled, only that project writable —
 decide what escalates into an approval request, and the children simply do their
 work. What they ask for, and how often, is their own behavior.
 

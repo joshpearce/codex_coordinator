@@ -667,10 +667,6 @@ async def test_managed_summary_injection_is_event_data_not_policy(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_http_starts_session_with_immutable_registration_and_enforced_sandbox(tmp_path: Path, capsys):
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\napprovals_reviewer = "user"\nsandbox_mode = "workspace-write"\n'
-    )
 
     class FakeClient:
         def __init__(self): self.calls = []
@@ -695,11 +691,7 @@ async def test_http_starts_session_with_immutable_registration_and_enforced_sand
     assert list(sandbox["writableRoots"]) == [str(tmp_path.resolve())]
     assert sandbox["excludeTmpdirEnvVar"] is True
     assert sandbox["excludeSlashTmp"] is True
-    # Project-controlled config changes cannot alter the registered session's
-    # execution capability on a later turn.
-    (tmp_path / ".codex/config.toml").write_text(
-        'approval_policy = "never"\napprovals_reviewer = "auto_review"\nsandbox_mode = "danger-full-access"\n'
-    )
+    # Every later turn replays the boundary captured at registration.
     service.sessions[session["id"]].state = "completed"
     await service.send_message(session["id"], "Continue")
     assert client.calls[-1][1]["sandboxPolicy"] == sandbox
@@ -709,12 +701,6 @@ async def test_http_starts_session_with_immutable_registration_and_enforced_sand
 
 @pytest.mark.asyncio
 async def test_duplicate_app_server_thread_id_does_not_rebind_existing_session(tmp_path: Path):
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "workspace-write"\n'
-    )
 
     class DuplicateThreadClient:
         def __init__(self):
@@ -742,12 +728,6 @@ async def test_duplicate_app_server_thread_id_does_not_rebind_existing_session(t
 @pytest.mark.asyncio
 @pytest.mark.parametrize("thread_id", [None, "", "  ", 7, True])
 async def test_invalid_app_server_thread_id_is_not_registered(tmp_path: Path, thread_id):
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "workspace-write"\n'
-    )
 
     class InvalidThreadClient:
         async def call(self, method, _params):
@@ -790,39 +770,72 @@ async def test_session_project_must_be_under_a_trusted_root_before_config_read(t
 
 
 @pytest.mark.asyncio
-async def test_worker_config_symlink_escape_is_rejected_before_thread_start(tmp_path: Path):
+async def test_worker_owned_config_is_never_read_for_a_session(tmp_path: Path, capsys):
+    """The boundary survives anything a worker writes into its own root.
+
+    A worker that stages a wider `.codex/config.toml` — an in-scope, in-sandbox
+    write a judge has every reason to approve — changes nothing: the file is not
+    an input, so the next session starts under the same operator declaration.
+    """
     project = tmp_path / "worker"
-    (project / ".codex").mkdir(parents=True)
-    external = tmp_path / "external.toml"
-    external.write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
+    project.mkdir()
+    declared = WorkerPermissions(
+        approval_policy="untrusted", sandbox_mode="read-only",
+        source="operator/worker.permissions.toml",
+    )
+    events = EventLog()
+    client = _StartClient()
+    service = CoordinatorService(
+        client, ApprovalBroker(events), events,
+        allowed_roots=(project,), worker_permissions={project: declared},
+    )
+    first = await service.start_session(str(project), "Build")
+
+    (project / ".codex").mkdir()
+    (project / ".codex/config.toml").write_text(
+        'approval_policy = "never"\n'
+        'approvals_reviewer = "auto_review"\n'
         'sandbox_mode = "workspace-write"\n'
     )
-    (project / ".codex/config.toml").symlink_to(external)
+    (project / ".codex/config.toml").chmod(0o666)
+    second = await service.start_session(str(project), "Build again")
 
-    class NoCallsClient:
-        async def call(self, _method, _params):
-            raise AssertionError("untrusted config reached app-server")
-
-    events = EventLog()
-    service = CoordinatorService(
-        NoCallsClient(), ApprovalBroker(events), events, allowed_roots=(project,),
+    starts = [params for method, params in client.calls if method == "thread/start"]
+    turns = [params for method, params in client.calls if method == "turn/start"]
+    assert [start["approvalPolicy"] for start in starts] == ["untrusted", "untrusted"]
+    assert [start["sandbox"] for start in starts] == ["read-only", "read-only"]
+    assert all(
+        turn["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
+        for turn in turns
     )
-    with pytest.raises(ValueError, match="worker config escapes"):
-        await service.start_session(str(project), "Build")
+    # Both registrations record the boundary they were derived from, so an
+    # audit can show that nothing changed between the two sessions.
+    started = [event for event in events.events if event["type"] == "session.started"]
+    assert [event["session"]["id"] for event in started] == [first["id"], second["id"]]
+    provenance = [event["workerPermissions"] for event in started]
+    assert provenance == [declared.provenance(), declared.provenance()]
+    assert provenance[0]["source"] == "operator/worker.permissions.toml"
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_service_rejects_worker_permissions_outside_allowed_roots(tmp_path: Path):
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    for directory in (allowed, outside):
+        directory.mkdir()
+    events = EventLog()
+    with pytest.raises(ValueError, match="worker permissions project is outside allowed roots"):
+        CoordinatorService(
+            object(), ApprovalBroker(events), events, allowed_roots=(allowed,),
+            worker_permissions={outside: WorkerPermissions(source="operator")},
+        )
 
 
 @pytest.mark.asyncio
 async def test_service_uses_trusted_project_permission_ceiling(tmp_path: Path):
     project = tmp_path / "worker"
     project.mkdir()
-    (project / ".codex").mkdir()
-    (project / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "workspace-write"\n'
-    )
     first = project / "first"
     second = project / "second"
     ceiling = {"fileSystem": {"read": [str(first), str(second)]}}
@@ -889,12 +902,6 @@ async def test_only_managed_notifications_are_emitted_and_update_state(tmp_path:
 
 @pytest.mark.asyncio
 async def test_early_completion_does_not_get_overwritten_by_turn_response(tmp_path: Path):
-    (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "workspace-write"\n'
-    )
     service_ref = None
 
     class EarlyClient:
@@ -1535,11 +1542,9 @@ async def test_http_request_limits_and_expired_cursor(tmp_path: Path):
 
 
 def _worker_project(root: Path, name: str) -> Path:
+    """A worker project directory; its boundary is declared by the operator."""
     project = root / name
-    (project / ".codex").mkdir(parents=True)
-    (project / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\napprovals_reviewer = "user"\nsandbox_mode = "workspace-write"\n'
-    )
+    project.mkdir(parents=True)
     return project
 
 
@@ -1715,13 +1720,8 @@ async def test_internal_error_event_names_the_request(tmp_path: Path, capsys):
 
 
 @pytest.mark.asyncio
-async def test_operator_approval_policy_overrides_the_worker_owned_file(tmp_path: Path, capsys):
-    """How much reaches a judge is operator-owned, not worker-owned.
-
-    The worker project's config.toml lives inside the worker's writable root and
-    the pinned CLI rejects "untrusted" there, so the effective policy is sent on
-    the wire from operator configuration instead.
-    """
+async def test_worker_boundary_comes_from_operator_declarations(tmp_path: Path, capsys):
+    """Per-project declarations narrow the operator-wide setting; neither is worker-owned."""
     project = _worker_project(tmp_path, "worker")
     client = _StartClient()
     events = EventLog()
@@ -1732,11 +1732,25 @@ async def test_operator_approval_policy_overrides_the_worker_owned_file(tmp_path
     await service.start_session(str(project), "Build")
     assert client.calls[0][0] == "thread/start"
     assert client.calls[0][1]["approvalPolicy"] == "untrusted"
-    # The worker's own declared value is what the file says, and it is not what
-    # was sent.
-    assert WorkerPermissions.from_project(project).approval_policy == "on-request"
+    assert client.calls[0][1]["sandbox"] == "workspace-write"
 
-    # With no operator override the worker's declared value is used.
+    # A project declaration is the more specific statement and is what is sent.
+    declared = CoordinatorService(
+        _StartClient(), ApprovalBroker(events), events,
+        allowed_roots=(tmp_path,), worker_approval_policy="untrusted",
+        worker_permissions={
+            project: WorkerPermissions(
+                approval_policy="on-request", sandbox_mode="read-only",
+                source="operator/worker.permissions.toml",
+            ),
+        },
+    )
+    await declared.start_session(str(project), "Build")
+    assert declared.client.calls[0][1]["approvalPolicy"] == "on-request"
+    assert declared.client.calls[0][1]["sandbox"] == "read-only"
+
+    # With nothing declared at all, the built-in default still keeps a judge in
+    # the loop.
     plain = CoordinatorService(
         _StartClient(), ApprovalBroker(events), events, allowed_roots=(tmp_path,),
     )

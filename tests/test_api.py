@@ -28,13 +28,9 @@ class FakeClient:
 
 
 def project(root: Path, name: str) -> Path:
+    """A worker project directory; its boundary is declared by the operator."""
     path = root / name
-    (path / ".codex").mkdir(parents=True)
-    (path / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "workspace-write"\n'
-    )
+    path.mkdir(parents=True)
     return path
 
 

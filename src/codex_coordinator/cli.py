@@ -17,7 +17,6 @@ from .coordinator import (
     JudgedApprovalHandler,
     JudgedSessionSupervisor,
     OneShotCodexJudge,
-    WorkerPermissions,
     codex_exec_json_runner,
     mutable_evidence,
 )
@@ -94,7 +93,7 @@ async def run(args: argparse.Namespace) -> dict:
             config.judge_policy, source="judge_policy"
         ),
     )
-    worker_permissions = WorkerPermissions.from_project(project)
+    worker_permissions = config.permissions_for(project)
     policy = ApprovalPolicy(
         project,
         sandbox_mode=worker_permissions.sandbox_mode,
@@ -118,6 +117,7 @@ async def run(args: argparse.Namespace) -> dict:
             await client.initialize()
             supervisor = JudgedSessionSupervisor(
                 client, approvals, project,
+                permissions=worker_permissions,
                 worker_model=config.worker_model,
                 worker_reasoning_effort=config.worker_reasoning_effort,
             )

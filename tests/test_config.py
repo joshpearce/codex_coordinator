@@ -401,3 +401,126 @@ def test_worker_approval_policy_is_operator_owned_and_validated(tmp_path: Path):
     assert OperatorConfig.load(
         path=config_path, environ={}
     ).worker_approval_policy == "untrusted"
+
+
+def _operator_with_permissions(tmp_path: Path, permissions: str, *, extra: str = "") -> Path:
+    """An operator configuration that declares one worker's boundary."""
+    worker = tmp_path / "worker"
+    worker.mkdir(exist_ok=True)
+    (tmp_path / "worker.permissions.toml").write_text(permissions)
+    config_path = tmp_path / "operator.toml"
+    config_path.write_text(
+        f'allowed_roots = ["{worker}"]\n'
+        f"{extra}"
+        "[worker_permissions]\n"
+        f'"{worker}" = "{tmp_path / "worker.permissions.toml"}"\n'
+    )
+    return config_path
+
+
+def test_worker_permissions_come_from_an_operator_owned_file(tmp_path: Path):
+    """The boundary is declared outside the root it governs, so the worker cannot edit it."""
+    config_path = _operator_with_permissions(
+        tmp_path,
+        "# The boundary for this worker.\n"
+        'approval_policy = "untrusted"\n'
+        'approvals_reviewer = "user"\n'
+        'sandbox_mode = "read-only"\n',
+    )
+    config = OperatorConfig.load(path=config_path, environ={})
+    worker = tmp_path / "worker"
+    permissions = config.permissions_for(worker)
+    assert permissions.approval_policy == "untrusted"
+    assert permissions.sandbox_mode == "read-only"
+    assert permissions.source == str(tmp_path / "worker.permissions.toml")
+    assert config.worker_permission_paths == {worker: tmp_path / "worker.permissions.toml"}
+    # A worker file inside the project is not an input, whatever it says.
+    (worker / ".codex").mkdir()
+    (worker / ".codex/config.toml").write_text('sandbox_mode = "danger-full-access"\n')
+    assert OperatorConfig.load(
+        path=config_path, environ={},
+    ).permissions_for(worker).sandbox_mode == "read-only"
+    # An undeclared project falls back to the operator-wide default.
+    assert config.permissions_for(tmp_path / "elsewhere").source == "operator-wide default"
+
+
+def test_worker_permissions_default_to_the_operator_wide_approval_policy(tmp_path: Path):
+    config_path = _operator_with_permissions(
+        tmp_path, 'sandbox_mode = "read-only"\n',
+        extra='worker_approval_policy = "untrusted"\n',
+    )
+    permissions = OperatorConfig.load(
+        path=config_path, environ={},
+    ).permissions_for(tmp_path / "worker")
+    assert permissions.approval_policy == "untrusted"
+    assert permissions.approvals_reviewer == "user"
+    assert permissions.sandbox_mode == "read-only"
+
+
+def test_worker_permissions_file_must_be_a_trusted_operator_file(tmp_path: Path):
+    worker = tmp_path / "worker"
+    worker.mkdir()
+    inside = worker / "permissions.toml"
+    inside.write_text('sandbox_mode = "workspace-write"\n')
+    config_path = tmp_path / "operator.toml"
+
+    def load(declared: Path) -> None:
+        config_path.write_text(
+            f'allowed_roots = ["{worker}"]\n'
+            "[worker_permissions]\n"
+            f'"{worker}" = "{declared}"\n'
+        )
+        OperatorConfig.load(path=config_path, environ={})
+
+    # Inside the root it governs: the worker could rewrite its own boundary.
+    with pytest.raises(ValueError, match="outside coordinator- and worker-writable roots"):
+        load(inside)
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    sibling = elsewhere / "permissions.toml"
+    sibling.write_text('sandbox_mode = "workspace-write"\n')
+    with pytest.raises(ValueError, match="must be alongside operator.toml"):
+        load(sibling)
+
+    writable = tmp_path / "writable.permissions.toml"
+    writable.write_text('sandbox_mode = "workspace-write"\n')
+    writable.chmod(0o666)
+    with pytest.raises(ValueError, match="owner-controlled regular file"):
+        load(writable)
+    writable.chmod(0o600)
+
+    link = tmp_path / "linked.permissions.toml"
+    link.symlink_to(sibling)
+    with pytest.raises(ValueError, match="owner-controlled regular file"):
+        load(link)
+
+    with pytest.raises(ValueError, match="must be an absolute path"):
+        load(Path("relative.permissions.toml"))
+
+
+def test_worker_permissions_project_must_be_inside_allowed_roots(tmp_path: Path):
+    worker = tmp_path / "worker"
+    outside = tmp_path / "outside"
+    for directory in (worker, outside):
+        directory.mkdir()
+    (tmp_path / "worker.permissions.toml").write_text('sandbox_mode = "read-only"\n')
+    config_path = tmp_path / "operator.toml"
+    config_path.write_text(
+        f'allowed_roots = ["{worker}"]\n'
+        "[worker_permissions]\n"
+        f'"{outside}" = "{tmp_path / "worker.permissions.toml"}"\n'
+    )
+    with pytest.raises(ValueError, match="worker permissions project is outside allowed roots"):
+        OperatorConfig.load(path=config_path, environ={})
+
+
+def test_worker_permissions_require_an_operator_configuration_file(tmp_path: Path):
+    worker = tmp_path / "worker"
+    worker.mkdir()
+    (tmp_path / "worker.permissions.toml").write_text('sandbox_mode = "read-only"\n')
+    with pytest.raises(ValueError, match="requires an operator configuration file"):
+        OperatorConfig.load(environ={}, overrides={
+            "allowed_roots": [str(worker)],
+            "worker_permissions": {str(worker): str(tmp_path / "worker.permissions.toml")},
+        })

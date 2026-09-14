@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 from codex_coordinator import ApprovalRequest, CoordinationEvent, Coordinator, JudgeDecision
-from codex_coordinator.coordinator import ApprovalPolicy
+from codex_coordinator.coordinator import ApprovalPolicy, WorkerPermissions
 from codex_coordinator.service import ApprovalBroker, CoordinatorService, EventLog
 
 
@@ -43,13 +43,9 @@ class FixtureJudge:
 
 
 def project(root: Path, name: str) -> Path:
+    """A worker project holds no Codex configuration; the operator owns it."""
     path = root / name
-    (path / ".codex").mkdir(parents=True)
-    (path / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "workspace-write"\n'
-    )
+    path.mkdir(parents=True)
     return path
 
 
@@ -69,13 +65,16 @@ async def run(first: Path, second: Path) -> None:
     second = second.expanduser().resolve(strict=True)
     if not first.is_dir() or not second.is_dir() or first == second or first in second.parents or second in first.parents:
         raise ValueError("installed fixture needs two unrelated project directories")
-    for worker in (first, second):
-        if not (worker / ".codex/config.toml").is_file():
-            raise ValueError(f"worker is missing .codex/config.toml: {worker}")
     events = EventLog()
     broker = ApprovalBroker(events, judge=FixtureJudge())
     client = FixtureClient()
-    service = CoordinatorService(client, broker, events, allowed_roots=(first, second))
+    service = CoordinatorService(
+        client, broker, events, allowed_roots=(first, second),
+        worker_permissions={
+            first: WorkerPermissions(sandbox_mode="workspace-write", source="installed fixture"),
+            second: WorkerPermissions(sandbox_mode="workspace-write", source="installed fixture"),
+        },
+    )
     coordinator = Coordinator(service, broker, events, client)
     try:
         alpha, beta = await asyncio.gather(

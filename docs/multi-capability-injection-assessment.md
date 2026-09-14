@@ -85,26 +85,29 @@ judge is by then reading a case shaped by an earlier attacker-authored file.
 - A regression covers a worker writing its own `AGENTS.md` and shows the flag in
   `approval.requested`.
 
-### 6. Worker config is trusted input read from a worker-writable location
+### 6. Whatever else Codex honors from a worker-writable project config
 
-`WorkerPermissions.from_project` re-reads `<project>/.codex/config.toml` on
-every `start_session` (`service.py:469`, `coordinator.py:63-84`). Under
-`workspace-write` that file is inside the worker's own writable root.
+The coordinator no longer reads anything from inside a worker project. A
+project's approval policy, reviewer, and sandbox mode come from an
+operator-owned permissions file beside `operator.toml`, validated at startup
+and sent on `thread/start`, and unknown keys in that file are rejected rather
+than ignored.
 
-The validation pins three keys and rejects unsafe values, so the reachable
-change is `read-only` → `workspace-write` — and a `read-only` worker cannot
-write the file to make it. That closes the obvious path. What is not closed is
-that the loader ignores unknown keys: whatever else Codex CLI 0.154.0 honors
-from a project config is not enumerated or rejected here, and the coordinator
-asserts only over the three keys it reads.
+What that does not settle is what Codex CLI 0.154.0 itself honors from a
+`<cwd>/.codex/config.toml` when a thread runs with a worker project as its
+`cwd`. The three keys that decide the governance boundary are sent explicitly on
+the wire and the turn sandbox is sent on every `turn/start`, so those are not
+reachable from such a file; anything else the runtime reads from it is
+unenumerated.
 
 **Acceptance criteria**
 
-- `from_project` rejects keys outside the known-safe set, or the set of keys
-  Codex honors from a project config is enumerated in `docs/security.md` with a
-  stated reason each is harmless under the explicit `sandboxPolicy` sent on
-  `turn/start`.
-- A test covers a worker config carrying an unexpected key.
+- The set of keys Codex honors from a project config under an app-server thread
+  is enumerated in `docs/security.md` with a stated reason each is harmless
+  under the explicit `approvalPolicy` and `sandboxPolicy` the coordinator sends,
+  or a worker project carrying such a file is rejected at session start.
+- A live test starts a session for a project holding a `.codex/config.toml` that
+  contradicts the operator declaration and shows which side the runtime used.
 
 ### 7. The judge's `reason` is a channel into the coordinator
 

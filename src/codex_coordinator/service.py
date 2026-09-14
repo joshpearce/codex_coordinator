@@ -31,6 +31,7 @@ from .coordinator import (
     SessionRegistration,
     WorkerPermissions,
     codex_exec_json_runner,
+    select_worker_permissions,
     mutable_evidence,
 )
 from .config import OperatorConfig
@@ -427,6 +428,7 @@ class CoordinatorService:
         worker_model: str | None = None,
         worker_reasoning_effort: str = "low",
         worker_approval_policy: str | None = None,
+        worker_permissions: Mapping[Path, WorkerPermissions] | None = None,
         allow_session_approval: bool = False,
         allowed_roots: Sequence[Path] = (),
         permission_ceilings: Mapping[Path, Mapping[str, Any]] | None = None,
@@ -446,6 +448,13 @@ class CoordinatorService:
         ):
             raise ValueError("unsupported worker approval policy")
         self.worker_approval_policy = worker_approval_policy
+        # The boundary a project runs under is operator-owned: it is declared
+        # outside every worker-writable root and sent explicitly on the wire.
+        # Nothing inside a worker project is consulted.
+        self.default_worker_permissions = WorkerPermissions(
+            approval_policy=worker_approval_policy or WorkerPermissions().approval_policy,
+            source="operator-wide default",
+        )
         self.allow_session_approval = allow_session_approval
         self.constitution = constitution
         roots: list[Path] = []
@@ -466,6 +475,20 @@ class CoordinatorService:
             ApprovalPolicy(canonical, allowed_permissions=copied)
             ceilings[canonical] = copied
         self.permission_ceilings = MappingProxyType(ceilings)
+        declarations: dict[Path, WorkerPermissions] = {}
+        for project, permissions in (worker_permissions or {}).items():
+            canonical = Path(project).expanduser().resolve(strict=True)
+            if not self._within_allowed_roots(canonical):
+                raise ValueError(f"worker permissions project is outside allowed roots: {canonical}")
+            if not isinstance(permissions, WorkerPermissions):
+                raise ValueError("worker permissions must be a WorkerPermissions value")
+            declarations[canonical] = permissions
+        self.worker_permissions = MappingProxyType(declarations)
+
+    def permissions_for(self, project: Path) -> WorkerPermissions:
+        return select_worker_permissions(
+            project, self.worker_permissions, self.default_worker_permissions,
+        )
 
     def _within_allowed_roots(self, project: Path) -> bool:
         return any(project == root or root in project.parents for root in self.allowed_roots)
@@ -490,7 +513,7 @@ class CoordinatorService:
                 "no project constitution governs this project; add one under "
                 "[project_constitutions] in the operator configuration"
             )
-        permissions = WorkerPermissions.from_project(project)
+        permissions = self.permissions_for(project)
         policy = ApprovalPolicy(
             project,
             sandbox_mode=permissions.sandbox_mode,
@@ -500,11 +523,11 @@ class CoordinatorService:
         start_params = {
             "cwd": str(project),
             "runtimeWorkspaceRoots": [str(project)],
-            # Operator configuration, when set, decides how much reaches a
-            # judge. It is sent on the wire because the worker project's own
-            # config.toml is inside the worker's writable root and because the
-            # pinned CLI rejects "untrusted" as a config value.
-            "approvalPolicy": self.worker_approval_policy or permissions.approval_policy,
+            # Operator configuration decides how much reaches a judge. It is
+            # sent on the wire rather than left in the project, both because
+            # anything inside the project is writable by the worker it governs
+            # and because the pinned CLI rejects "untrusted" as a config value.
+            "approvalPolicy": permissions.approval_policy,
             "approvalsReviewer": permissions.approvals_reviewer,
             "sandbox": permissions.sandbox_mode,
         }
@@ -543,7 +566,10 @@ class CoordinatorService:
         turn = (turn_result or {}).get("turn", turn_result or {})
         if session.state == "active":
             session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
-        self.events.emit("session.started", session=session.json(), prompt=prompt)
+        self.events.emit(
+            "session.started", session=session.json(), prompt=prompt,
+            workerPermissions=permissions.provenance(),
+        )
         return session.json()
 
     async def send_message(self, session_id: str, prompt: str) -> dict[str, Any]:
@@ -987,6 +1013,7 @@ async def run(args: argparse.Namespace) -> None:
             worker_model=config.worker_model,
             worker_reasoning_effort=config.worker_reasoning_effort,
             worker_approval_policy=config.worker_approval_policy,
+            worker_permissions=config.worker_permissions,
             allow_session_approval=config.allow_session_approval,
             allowed_roots=config.allowed_roots,
             permission_ceilings=config.permission_ceilings,

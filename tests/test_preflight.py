@@ -8,13 +8,9 @@ from codex_coordinator.preflight import check
 
 
 def _project(root: Path, name: str) -> Path:
+    """A worker project directory; its boundary is declared by the operator."""
     project = root / name
-    (project / ".codex").mkdir(parents=True)
-    (project / ".codex/config.toml").write_text(
-        'approval_policy = "on-request"\n'
-        'approvals_reviewer = "user"\n'
-        'sandbox_mode = "read-only"\n'
-    )
+    project.mkdir(parents=True)
     return project
 
 
@@ -36,7 +32,15 @@ def test_preflight_checks_operator_project_and_codex(monkeypatch, tmp_path: Path
     monkeypatch.setattr("codex_coordinator.preflight.subprocess.run", lambda *_args, **_kwargs: Result())
     report = check(config, [worker])
     assert report["ok"] and report["codexVersion"] == "0.154.0"
-    assert report["projects"] == [{"project": str(worker), "sandboxMode": "read-only"}]
+    # With nothing declared for this project, the operator-wide default applies
+    # and preflight names it, so the boundary is visible before any session runs.
+    assert report["projects"] == [{
+        "project": str(worker),
+        "sandboxMode": "workspace-write",
+        "approvalPolicy": "on-request",
+        "permissionsSource": "operator-wide default",
+        "permissionsDigest": config.default_worker_permissions.digest,
+    }]
     assert report["socketReady"] is False
     with pytest.raises(ValueError, match="outside configured"):
         check(config, [outside])

@@ -13,17 +13,11 @@ async def test_installed_fixture_rejects_unsupported_thread_creation_field():
 
 @pytest.mark.asyncio
 async def test_installed_fixture_uses_existing_operator_projects_without_writing(tmp_path: Path):
+    """A worker project needs no Codex configuration and gets none written into it."""
     first = project(tmp_path, "first")
     second = project(tmp_path, "second")
-    before = {
-        path: (path / ".codex/config.toml").read_bytes()
-        for path in (first, second)
-    }
     await run(first, second)
-    assert {
-        path: (path / ".codex/config.toml").read_bytes()
-        for path in (first, second)
-    } == before
+    assert [sorted(path.iterdir()) for path in (first, second)] == [[], []]
 
 
 @pytest.mark.asyncio

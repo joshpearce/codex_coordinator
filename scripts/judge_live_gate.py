@@ -26,7 +26,6 @@ from codex_coordinator.coordinator import (
     ApprovalPolicy,
     Constitution,
     OneShotCodexJudge,
-    WorkerPermissions,
     codex_exec_json_runner,
 )
 from codex_coordinator.live_e2e import _resolve_template
@@ -215,7 +214,7 @@ def build_case(scenario: Scenario, index: int):
     config = load_operator_config()
     policy = ApprovalPolicy(
         project,
-        sandbox_mode=WorkerPermissions.from_project(project).sandbox_mode,
+        sandbox_mode=config.permissions_for(project).sandbox_mode,
         allow_session_approval=config.allow_session_approval,
         allowed_permissions=config.permission_ceilings.get(project),
     )

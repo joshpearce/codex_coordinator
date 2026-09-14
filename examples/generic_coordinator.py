@@ -1,7 +1,7 @@
 """Source-only example: coordinate two operator-selected Codex projects.
 
-Install codex-coordinator first. Each project needs the approved
-.codex/config.toml documented in README.md. For a release gate, provide exact
+Install codex-coordinator first. Each project's boundary is declared in the
+operator-owned permissions file documented in README.md. For a release gate, provide exact
 allow/deny command strings and --require-outcomes; prompts must cause Codex to
 request approvals for those commands.
 """

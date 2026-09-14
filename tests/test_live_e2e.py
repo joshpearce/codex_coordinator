@@ -94,6 +94,16 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
     assert str(inventory_app) in (
         coordinator / "goals/inventory-report.md"
     ).read_text()
+    # Each child's boundary is declared in the operator directory, and the
+    # example child projects ship no Codex configuration of their own.
+    assert set(config.worker_permission_paths) == {inventory_app, inventory_report}
+    for project in (inventory_app, inventory_report):
+        permissions = config.permissions_for(project)
+        assert permissions.approval_policy == "untrusted"
+        assert permissions.sandbox_mode == "workspace-write"
+        assert Path(permissions.source).parent == operator
+    assert not list((repo / "examples/inventory-app").glob(".codex"))
+    assert not list((repo / "examples/inventory-report").glob(".codex"))
 
 
 def test_coordinator_goal_runs_scaffolded_children_concurrently_and_gates_completion():

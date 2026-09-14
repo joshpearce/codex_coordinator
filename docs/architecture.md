@@ -9,24 +9,33 @@ app-server transport.
 and server approval requests. `JudgedSessionSupervisor` is the one-shot adapter;
 `CoordinatorService` is the long-running HTTP adapter.
 
-Both read the worker project's `.codex/config.toml` once at registration, accept
-only `on-request`, the `user` reviewer, and `read-only` or `workspace-write`, and
-send those values explicitly on `thread/start`. `never` is rejected because it
-would execute unjudged. The protocol's `AskForApproval` enum also lists
-`untrusted`, but Codex CLI 0.154.0 removed it as a config value and fails
-`thread/start` with "no longer supported", so it is rejected at startup rather
-than deferred into an opaque runtime error.
+Both take a worker's boundary from operator-owned configuration and send it
+explicitly on `thread/start`. `WorkerPermissions` accepts `on-request` or
+`untrusted` as the approval policy, the `user` reviewer, and `read-only` or
+`workspace-write` as the sandbox mode. `never` is rejected because it would
+execute unjudged. The protocol's `AskForApproval` enum lists `untrusted` and
+Codex CLI 0.154.0 accepts it as a `thread/start` parameter, though the same CLI
+removed it as a config value — one more reason these values travel on the wire
+rather than sitting in a file.
 
-How much reaches a judge is operator-owned. `worker_approval_policy` in
-`operator.toml` accepts `on-request` or `untrusted` and is sent as the
-`thread/start` `approvalPolicy` parameter, overriding the project's declared
-value. The same CLI that rejects `untrusted` in a project config accepts it on
-the wire, and sending it keeps the setting outside the worker's own writable
-root. Under `untrusted` the runtime raises an approval request before anything
-it does not already trust; under `on-request` a worker that never asks is never
-judged. The turn sandbox derived from `sandbox_mode` is unchanged either way and
-still disables network access. Worker prompts are never the mechanism. A managed thread is then registered
-with an immutable session ID, canonical project root, and `ApprovalPolicy`.
+Nothing inside a worker project is read. `[worker_permissions]` in
+`operator.toml` maps a project to a permissions file beside `operator.toml`,
+under the same ownership rules as a constitution and outside every worker- and
+coordinator-writable root; a declaration at a root governs the projects beneath
+it, and the most specific one wins. Any key may be omitted, falling back to
+`worker_approval_policy` and then to `on-request` with `workspace-write`. A
+worker therefore cannot widen its own boundary for a later session by writing a
+config file into the root it is allowed to write, which is the escalation the
+earlier project-owned arrangement left open.
+
+Under `untrusted` the runtime raises an approval request before anything it does
+not already trust; under `on-request` a worker that never asks is never judged.
+The turn sandbox derived from `sandbox_mode` is unchanged either way and still
+disables network access. Worker prompts are never the mechanism. A managed
+thread is then registered with an immutable session ID, canonical project root,
+and `ApprovalPolicy`, and `session.started` records the source and digest of the
+permissions the session was derived from, so an audit can compare one session's
+boundary against the next.
 
 Every `turn/start`, including follow-up turns, carries the sandbox policy captured
 at registration. Read-only workers get a network-disabled read-only policy.
@@ -39,7 +48,8 @@ Workspace-write workers get:
 
 The app-server's OS sandbox is the execution-time boundary, so the restriction also
 applies to subprocesses, standard temporary-file APIs, symlinks, and other indirect
-effects. Project-controlled config changes cannot expand a registered session later.
+effects. No worker-authored file feeds this boundary, and a registered
+session replays the boundary it started with.
 
 ## Unified approval boundary
 

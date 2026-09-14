@@ -18,6 +18,7 @@ from .coordinator import (
     Constitution,
     PolicyDocument,
     WorkerPermissions,
+    select_worker_permissions,
 )
 from .daemon import default_daemon_socket
 
@@ -29,7 +30,7 @@ _FIELDS = frozenset({
     "approval_timeout_seconds", "judge_policy", "judge_timeout_seconds",
     "event_capacity", "event_max_bytes", "item_capacity", "item_max_bytes",
     "approval_mode", "constitution_path", "coordinator_root",
-    "project_constitutions",
+    "project_constitutions", "worker_permissions",
 })
 _ENV_FIELDS = {
     "CODEX_COORDINATOR_ALLOWED_ROOTS": "allowed_roots",
@@ -51,6 +52,7 @@ _ENV_FIELDS = {
     "CODEX_COORDINATOR_CONSTITUTION_PATH": "constitution_path",
     "CODEX_COORDINATOR_COORDINATOR_ROOT": "coordinator_root",
     "CODEX_COORDINATOR_PROJECT_CONSTITUTIONS": "project_constitutions",
+    "CODEX_COORDINATOR_WORKER_PERMISSIONS": "worker_permissions",
 }
 
 
@@ -70,6 +72,37 @@ def _trusted_policy_file(path: Path, label: str) -> str:
         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
             raise ValueError(f"{label} changed during validation")
         return stream.read()
+
+
+def _trusted_sibling_file(
+    raw: Any,
+    label: str,
+    *,
+    policy_directory: Path | None,
+    forbidden_roots: tuple[Path, ...],
+) -> tuple[Path, str]:
+    """Validate and snapshot one operator-owned file that sits beside operator.toml.
+
+    Trusted operator input is defined by where it lives and who owns it: beside
+    the operator configuration, outside every root a coordinator or worker can
+    write, owned by this user, and not reachable through a symlink.
+    """
+    if policy_directory is None:
+        raise ValueError(f"{label} requires an operator configuration file")
+    if not isinstance(raw, (str, Path)):
+        raise ValueError(f"{label} must be an absolute path")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError(f"{label} must be an absolute path")
+    text = _trusted_policy_file(candidate, label)
+    canonical = candidate.resolve(strict=True)
+    if any(canonical == root or root in canonical.parents for root in forbidden_roots):
+        raise ValueError(
+            "trusted policy files must be outside coordinator- and worker-writable roots"
+        )
+    if canonical.parent != policy_directory:
+        raise ValueError(f"{label} must be alongside operator.toml")
+    return candidate, text
 
 
 def _absolute_path(value: Any, field: str) -> Path:
@@ -139,6 +172,15 @@ class OperatorConfig:
     project_constitution_paths: Mapping[Path, Path]
     constitution: Constitution | None
     coordinator_root: Path | None
+    worker_permissions: Mapping[Path, WorkerPermissions]
+    worker_permission_paths: Mapping[Path, Path]
+    default_worker_permissions: WorkerPermissions
+
+    def permissions_for(self, project: Path | str) -> WorkerPermissions:
+        """The operator-declared boundary for one project, else the wide default."""
+        return select_worker_permissions(
+            Path(project), self.worker_permissions, self.default_worker_permissions,
+        )
 
     @classmethod
     def load(
@@ -170,6 +212,7 @@ class OperatorConfig:
             "approval_mode": None,
             "constitution_path": None,
             "project_constitutions": {},
+            "worker_permissions": {},
             "coordinator_root": None,
         }
         if config_path is not None:
@@ -184,7 +227,10 @@ class OperatorConfig:
             if env_name not in env:
                 continue
             raw: Any = env[env_name]
-            if field_name in {"allowed_roots", "permission_ceilings", "project_constitutions"}:
+            if field_name in {
+                "allowed_roots", "permission_ceilings", "project_constitutions",
+                "worker_permissions",
+            }:
                 try:
                     raw = json.loads(raw)
                 except json.JSONDecodeError as exc:
@@ -241,20 +287,11 @@ class OperatorConfig:
 
             def _load_policy(raw: Any, label: str) -> tuple[Path, str]:
                 """Validate and snapshot one operator-owned policy document."""
-                if not isinstance(raw, (str, Path)):
-                    raise ValueError(f"{label} must be an absolute path")
-                candidate = Path(raw).expanduser()
-                if not candidate.is_absolute():
-                    raise ValueError(f"{label} must be an absolute path")
-                text = _trusted_policy_file(candidate, label)
-                canonical = candidate.resolve(strict=True)
-                if any(
-                    canonical == root or root in canonical.parents
-                    for root in (*canonical_roots, coordinator_root)
-                ):
-                    raise ValueError("trusted policy files must be outside coordinator- and worker-writable roots")
-                if canonical.parent != policy_directory:
-                    raise ValueError(f"{label} must be alongside operator.toml")
+                candidate, text = _trusted_sibling_file(
+                    raw, label,
+                    policy_directory=policy_directory,
+                    forbidden_roots=(*canonical_roots, coordinator_root),
+                )
                 if not text.strip():
                     raise ValueError(f"{label} must not be empty")
                 return candidate, text
@@ -307,6 +344,50 @@ class OperatorConfig:
             if raw_project_constitutions:
                 raise ValueError("project_constitutions requires approval_mode = 'service'")
 
+        # The boundary every worker session runs under. It is read here, from
+        # operator-owned files outside every worker-writable root, and never
+        # from anything inside a worker project, so a worker cannot widen the
+        # boundary of its own next session.
+        worker_approval_policy = values["worker_approval_policy"]
+        if worker_approval_policy is not None and (
+            worker_approval_policy not in WorkerPermissions.WIRE_APPROVAL_POLICIES
+        ):
+            raise ValueError(
+                "worker_approval_policy must be one of "
+                f"{sorted(WorkerPermissions.WIRE_APPROVAL_POLICIES)}"
+            )
+        default_worker_permissions = WorkerPermissions(
+            approval_policy=worker_approval_policy or WorkerPermissions().approval_policy,
+            source="operator-wide default",
+        )
+        raw_worker_permissions = values["worker_permissions"]
+        if not isinstance(raw_worker_permissions, Mapping):
+            raise ValueError("worker_permissions must be a project-to-permissions-file mapping")
+        policy_directory = (
+            None if config_path is None else config_path.resolve(strict=True).parent
+        )
+        forbidden_roots = tuple(
+            root for root in (*canonical_roots, coordinator_root) if root is not None
+        )
+        worker_permissions: dict[Path, WorkerPermissions] = {}
+        worker_permission_paths: dict[Path, Path] = {}
+        for raw_project, raw_permissions in raw_worker_permissions.items():
+            project = _absolute_path(raw_project, "worker permissions project")
+            if not project.is_dir() or not any(
+                project == root or root in project.parents for root in canonical_roots
+            ):
+                raise ValueError(f"worker permissions project is outside allowed roots: {project}")
+            if project in worker_permissions:
+                raise ValueError(f"duplicate worker permissions for {project}")
+            permissions_path, permissions_text = _trusted_sibling_file(
+                raw_permissions, f"worker permissions for {project}",
+                policy_directory=policy_directory, forbidden_roots=forbidden_roots,
+            )
+            worker_permission_paths[project] = permissions_path
+            worker_permissions[project] = WorkerPermissions.from_toml(
+                permissions_text, str(permissions_path), default=default_worker_permissions,
+            )
+
         raw_ceilings = values["permission_ceilings"]
         if not isinstance(raw_ceilings, Mapping):
             raise ValueError("permission_ceilings must be a project-to-permissions mapping")
@@ -330,14 +411,6 @@ class OperatorConfig:
             raise ValueError("worker_model must be a nonempty string or omitted")
         if not isinstance(values["allow_session_approval"], bool):
             raise ValueError("allow_session_approval must be a boolean")
-        worker_approval_policy = values["worker_approval_policy"]
-        if worker_approval_policy is not None and (
-            worker_approval_policy not in WorkerPermissions.WIRE_APPROVAL_POLICIES
-        ):
-            raise ValueError(
-                "worker_approval_policy must be one of "
-                f"{sorted(WorkerPermissions.WIRE_APPROVAL_POLICIES)}"
-            )
         return cls(
             allowed_roots=tuple(canonical_roots),
             permission_ceilings=MappingProxyType(ceilings),
@@ -364,4 +437,7 @@ class OperatorConfig:
             project_constitution_paths=MappingProxyType(project_constitution_paths),
             constitution=constitution,
             coordinator_root=coordinator_root,
+            worker_permissions=MappingProxyType(worker_permissions),
+            worker_permission_paths=MappingProxyType(worker_permission_paths),
+            default_worker_permissions=default_worker_permissions,
         )
