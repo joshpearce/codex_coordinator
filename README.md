@@ -2,8 +2,8 @@
 
 Codex Coordinator is an installable Python prototype for starting Codex workers
 in separate projects and independently judging their approval requests. It
-provides a one-shot command, a reusable Python API, and a local HTTP service for
-multi-worker workflows.
+provides a local HTTP service for multi-worker workflows and a reusable Python
+API.
 
 Worker turns use explicit sandbox policies, and deterministic checks prevent a
 judge's recommendation from exceeding the request or the operator's permission
@@ -29,9 +29,9 @@ python3 -m venv .venv
 python -m pip install .
 ```
 
-The three installed commands are `codex-coordinator`,
-`codex-coordinator-service`, and `codex-coordinator-preflight`. You do not need
-`uv` to run the installed package.
+The two installed commands are `codex-coordinator-service` and
+`codex-coordinator-preflight`. You do not need `uv` to run the installed
+package.
 
 ### 2. Check Codex
 
@@ -447,9 +447,8 @@ HTTP approval endpoint. To use that legacy mode, set
 must resolve every approval. There is no silent fallback between modes. Each
 entry in `[project_constitutions]` maps a project directory inside
 `allowed_roots` to a policy file beside `operator.toml`; it must not reuse
-`constitution_path`, and the most specific entry at or above a project wins. The one-shot command still accepts
-judge-policy text as its third positional argument, which becomes a one-tier
-constitution. Optional settings include `codex_command`, `socket_path`,
+`constitution_path`, and the most specific entry at or above a project wins.
+Optional settings include `codex_command`, `socket_path`,
 `worker_model`, `worker_reasoning_effort`, `permission_ceilings`,
 `worker_approval_policy`, `worker_permissions`, `allow_session_approval`,
 approval/judge timeouts, and
@@ -485,7 +484,7 @@ sh scripts/release_gate.sh --installed-only
 ```
 
 The installed gate builds an sdist and wheel, installs the wheel in a clean
-environment outside this checkout, runs all three console entry points and a
+environment outside this checkout, runs both console entry points and a
 two-project installed fixture, and checks Codex 0.154.0's generated protocol
 schema. The fixture is offline; it does not prove live Codex behavior. The
 [Verify workflow](.github/workflows/verify.yml) runs the full tests and
@@ -512,6 +511,16 @@ verdict that disagrees. No sessions are started and nothing is executed, so it
 finishes in minutes. None of those requests appear in the constitutions; a test
 enforces that, so the gate measures whether the policy is applied rather than
 matched.
+
+`python -m codex_coordinator.cli <project> <prompt> [judge-policy]` is the
+smallest live harness: one worker in one project, judged in-process by
+`JudgedSessionSupervisor` and `JudgedApprovalHandler` rather than through the
+service, printing every decision as JSON. It exists to exercise the approval
+boundary end to end without standing up the HTTP service, and it is the only
+consumer of the `judge_policy` setting, which it turns into a one-tier
+constitution when no `constitution_path` is configured. It is not an installed
+command and not a supported way to run workers; use
+`codex-coordinator-service` or the Python API for that.
 
 `make live-e2e` is a separate, source-checkout recursive orchestration
 experiment using the checked-in inventory scaffolds, not the generic

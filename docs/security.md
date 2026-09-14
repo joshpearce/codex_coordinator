@@ -227,9 +227,9 @@ project, with no signal in this codebase's events. `--strict-config` rejects
 no setting that turns this off.
 
 The coordinator therefore refuses the project. `CoordinatorService.start_session`
-and `JudgedSessionSupervisor.start` scan the project tree before `thread/start`,
-and both scan again before every `turn/start` on an existing thread, so a
-project that acquires such a file mid-session gets no further turn. A finding is
+and the harness's `JudgedSessionSupervisor.start` scan the project tree before
+`thread/start`, and both scan again before every `turn/start` on an existing
+thread, so a project that acquires such a file mid-session gets no further turn. A finding is
 a `.codex/rules` entry, any `*.rules` file under a `.codex` directory, or a
 symlinked `.codex` the scan does not follow and therefore cannot clear; a scan
 that cannot finish within its bound is refused rather than passed. The file's
@@ -312,7 +312,7 @@ Loading fails closed: a rules file that is missing, not owner-controlled, not
 beside `operator.toml`, inside a worker or coordinator root, not in the accepted
 subset of the syntax, or whose own `match`/`not_match` examples do not evaluate
 as declared is a startup error, and a declared rules file that was never loaded
-is refused by the service and the one-shot supervisor rather than silently
+is refused by the service and the harness supervisor rather than silently
 meaning "judge everything". Each decision is recorded as an
 `approval.allowed_by_policy` event carrying the normalized request, the rule
 file's source and digest, and the rule that decided each simple command. A file
@@ -350,11 +350,12 @@ symlink rather than overwriting it.
 
 ## Judge isolation
 
-The one-shot and service-owned `codex exec` judges request a deny-by-default filesystem
-permission profile, grants reads only to Codex's minimal runtime paths, its
-resolved installed runtime (and macOS system OpenSSL configuration if present),
-and its empty temporary evidence directory. It disables auxiliary tools and
-ignores user configuration and project rules. The exact profile has a denied-read regression
+Both adapters use the same judge, `OneShotCodexJudge`, whose name describes one
+`codex exec` invocation per case rather than the harness. It requests a
+deny-by-default filesystem permission profile, grants reads only to Codex's
+minimal runtime paths, its resolved installed runtime (and macOS system OpenSSL
+configuration if present), and its empty temporary evidence directory. It
+disables auxiliary tools and ignores user configuration and project rules. The exact profile has a denied-read regression
 test. Before every judge invocation, the runner probes the same profile with
 one allowed read, one unrelated-file read, and execution of the resolved Codex
 binary; if the probe cannot run or the unrelated read succeeds, the judge fails

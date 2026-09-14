@@ -26,7 +26,6 @@ fi
 
 cd "$gate_dir"
 "$gate_python" -c 'import codex_coordinator, codex_coordinator.api; path = codex_coordinator.__file__; print(path); raise SystemExit(0 if "/site-packages/" in path else "release gate: package import came from outside the installed wheel")'
-"$gate_dir/venv/bin/codex-coordinator" --help >/dev/null
 "$gate_dir/venv/bin/codex-coordinator-service" --help >/dev/null
 "$gate_dir/venv/bin/codex-coordinator-preflight" --help >/dev/null
 if [ -n "${GENERIC_FIRST:-}" ] || [ -n "${GENERIC_SECOND:-}" ]; then

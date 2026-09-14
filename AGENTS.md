@@ -7,8 +7,15 @@ design/security notes are in `docs/`. Supported use is a trusted, single-user,
 loopback-only workflow with Codex CLI 0.154.0. Do not describe it as safe for
 remote, multi-user, or production authorization.
 
-The one-shot CLI runs its own independent approval judge. The long-running HTTP
-service has an explicit service-owned mode that loads a two-tier constitution —
+Only `service.py` and `preflight.py` are installed as commands. `cli.py`,
+`live_e2e.py`, and `installed_smoke.py` are test harnesses, not product
+surfaces; each is run with `python -m`. `cli.py` is the single-worker harness
+built on `JudgedSessionSupervisor` and `JudgedApprovalHandler`: it exercises the
+approval boundary without the HTTP service. Keep it working and keep it honest,
+but do not document or extend it as a way to run workers.
+
+The long-running HTTP service is the supported surface. It has an explicit
+service-owned mode that loads a two-tier constitution —
 one overall document plus one per project, the overall one being a ceiling the
 project one may only narrow — and runs independent judges,
 plus an explicit external-verdict mode. A judge receives the overall document
@@ -59,7 +66,7 @@ runtime's own rules loading is not used, for reasons recorded in
 
 - Check the worktree before editing and preserve unrelated changes.
 - Preserve the deterministic approval boundary when changing either the
-  one-shot or service path. A natural-language constitution guides a judge;
+  service or the harness path. A natural-language constitution guides a judge;
   it is not a substitute for code-enforced path, sandbox, permission, and
   session limits. Invalid or unavailable judging must fail closed.
 - Run focused tests for changed behavior and the full `pytest` suite for

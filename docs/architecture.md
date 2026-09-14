@@ -1,13 +1,17 @@
 # Architecture
 
 The repository contains two adapters over one governance boundary and the
-app-server transport.
+app-server transport. `CoordinatorService` is the supported adapter.
+`JudgedSessionSupervisor` is a single-worker test harness (`cli.py`, run as
+`python -m codex_coordinator.cli`, not an installed command) that drives the
+same boundary in-process without the HTTP service; it is described here because
+it shares that boundary, not because it is a way to run workers.
 
 ## Session creation and execution
 
 `ProtocolClient` owns JSON-RPC framing and multiplexes responses, notifications,
-and server approval requests. `JudgedSessionSupervisor` is the one-shot adapter;
-`CoordinatorService` is the long-running HTTP adapter.
+and server approval requests. `CoordinatorService` is the long-running HTTP
+adapter; `JudgedSessionSupervisor` is the harness adapter.
 
 Both take a worker's boundary from operator-owned configuration and send it
 explicitly on `thread/start`. `WorkerPermissions` accepts `on-request` or
@@ -64,7 +68,7 @@ read-only and nested collections are tuples. This sealed case is the authoritati
 input to every later constraint check. Judge prompts, audit records, and live events
 receive detached JSON-compatible copies, so mutation by any downstream consumer
 cannot change the evidence retained for authorization. A mutation exception in the
-one-shot judge path is treated like any other judge failure and denies the request.
+harness judge path is treated like any other judge failure and denies the request.
 
 Permission objects have a closed schema. Requested values must fit an immutable,
 trusted allowlist, and a judge-proposed permission response must be a subset of both
@@ -80,7 +84,7 @@ service startup or embedding code to enable it. Unavailable verdicts are denied,
 not converted to a different approving response. A judge can always deny or narrow
 a permission request, but cannot expand its permission or lifetime ceiling.
 
-The one-shot adapter calls a `Judge` directly. In service-owned mode, the live
+The harness adapter calls a `Judge` directly. In service-owned mode, the live
 broker also invokes an independent restricted judge and rejects HTTP verdicts;
 explicit external mode instead accepts verdicts over HTTP. Both modes emit a
 normalized `approval.requested` event.
@@ -88,7 +92,7 @@ normalized `approval.requested` event.
 ## Deciding a case by code
 
 Between normalization and the judge sits `ApprovalPolicy.decide_by_code`. Both
-adapters call it, so the live broker and the one-shot handler decide
+adapters call it, so the live broker and the harness handler decide
 identically. It returns `None` only when nothing in the trusted boundary can
 settle the case, which is the only path that spends a judge call. Otherwise it
 returns a `CodeDecision`: `approve_once` or `deny`, the rule that decided it in
@@ -152,7 +156,7 @@ request proceeds to the judge exactly as before. A match produces
 same evidence an approval carries plus the rule provenance; no pending approval
 and no judge task are created. A `proposedExecpolicyAmendment` in the request
 is validated by normalization and otherwise ignored, so the runtime's policy is
-never amended by this path. Both adapters share the step; the one-shot handler
+never amended by this path. Both adapters share the step; the harness handler
 reports it through `on_decision` with the reason prefixed `allowed by exec
 policy`.
 
@@ -187,7 +191,7 @@ every later session of that project.
 and reports the first `.codex/rules` entry, `*.rules` file under a `.codex`
 directory, or symlinked `.codex` the scan cannot see through. The contents are
 never read: presence is the finding, and an unfinishable scan is refused rather
-than passed. `CoordinatorService.start_session` and
+than passed. `CoordinatorService.start_session` and the harness's
 `JudgedSessionSupervisor.start` call it before `thread/start`, both callers call
 it again before every `turn/start` on an existing thread, and
 `codex-coordinator-preflight` calls it when validating a project. The service
@@ -209,9 +213,10 @@ project cannot read another project's policy. Service-mode configuration always
 sets `require_project_policy`, so an uncovered project raises
 `PolicyUnavailable`, which the judge converts to a denial without calling a
 model, and `start_session` refuses the project outright. The flag exists because
-the one-shot path builds a one-tier `Constitution.single` from judge-policy text
-and has no per-project documents to require. `provenance` returns the source path and text
-digest of each tier for the audit record. Tier selection is keyed on the
+the harness builds a one-tier `Constitution.single` from `judge_policy` text
+and has no per-project documents to require; that setting has no other consumer.
+`provenance` returns the source path and text digest of each tier for the audit
+record. Tier selection is keyed on the
 registered project path, never on request content, and the keys are the
 canonical paths the operator config validated. In all paths, invalid
 responses, judge errors, ambiguity, conflicting evidence, and ceiling violations
@@ -231,7 +236,7 @@ or resolve it.
 ## Untrusted evidence
 
 Worker messages, files, diffs, summaries, command descriptions, reasons, and all
-approval fields are untrusted evidence. The one-shot judge prompt separates that
+approval fields are untrusted evidence. The judge prompt separates that
 evidence from trusted instructions, but prompt construction is not the security
 boundary. Decisions bind to normalized fields and registered identity.
 

@@ -59,7 +59,7 @@ must identify the active turn; a stale completion emits
 completion denies any still-pending approvals and clears that turn's cached
 items. A completion without a valid turn ID yields `protocol_unknown`, never
 success.
-The one-shot judge subprocess is terminated and reaped if its call times out
+A judge's `codex exec` subprocess is terminated and reaped if its call times out
 or is cancelled; neither case grants an approval.
 A control-plane request that fails for an unanticipated reason answers HTTP
 `500` with a fixed body carrying no detail, and emits one

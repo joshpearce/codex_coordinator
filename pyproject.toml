@@ -25,7 +25,6 @@ Issues = "https://github.com/joshpearce/codex_coordinator/issues"
 test = ["build>=1", "pytest>=8", "pytest-asyncio>=0.24"]
 
 [project.scripts]
-codex-coordinator = "codex_coordinator.cli:main"
 codex-coordinator-service = "codex_coordinator.service:main"
 codex-coordinator-preflight = "codex_coordinator.preflight:main"
 

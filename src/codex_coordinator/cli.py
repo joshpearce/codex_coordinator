@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Opt-in live smoke test for a Codex worker judged by one-shot Codex calls."""
+"""Opt-in live smoke test for a Codex worker judged by one-shot Codex calls.
+
+A test harness, not a supported surface: it is deliberately not an installed
+command. Run it as `python -m codex_coordinator.cli`, like the other harnesses
+in this package. The supported surfaces are `codex-coordinator-service` and the
+Python API in `api.py`.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ from .protocol import ProtocolClient
 
 
 def arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(prog="python -m codex_coordinator.cli")
     parser.add_argument("project", type=Path)
     parser.add_argument("prompt")
     parser.add_argument("judge_policy", nargs="?")
