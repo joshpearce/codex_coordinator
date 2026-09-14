@@ -18,6 +18,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
+from .execpolicy import ExecPolicy, ExecPolicyMatch
 from .protocol import ProtocolClient
 
 Verdict = Literal["approve_once", "approve_session", "deny"]
@@ -188,15 +189,31 @@ class WorkerPermissions:
     WIRE_APPROVAL_POLICIES = frozenset({"on-request", "untrusted"})
     SANDBOX_MODES = frozenset({"read-only", "workspace-write"})
     FIELDS = ("approval_policy", "approvals_reviewer", "sandbox_mode")
+    # Declares an operator-owned rules file, evaluated by the coordinator and
+    # never handed to the runtime; see ``execpolicy.py`` for why.
+    EXEC_POLICY_FIELD = "exec_policy"
 
     approval_policy: str = "on-request"
     approvals_reviewer: str = "user"
     sandbox_mode: str = "workspace-write"
     source: str = "built-in default"
+    # The path the permissions file declared, as written, and the rules loaded
+    # from it. A declared path with no loaded policy is an unfinished
+    # configuration: the loader must resolve it or startup must fail.
+    exec_policy_path: str | None = None
+    exec_policy: ExecPolicy | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, str) or not self.source:
             raise ValueError("worker permission source must be nonempty")
+        if self.exec_policy_path is not None and (
+            not isinstance(self.exec_policy_path, str) or not self.exec_policy_path.strip()
+        ):
+            raise ValueError(f"{self.source}: exec_policy must be a nonempty path")
+        if self.exec_policy is not None and not isinstance(self.exec_policy, ExecPolicy):
+            raise ValueError(f"{self.source}: exec_policy must be a loaded ExecPolicy")
+        if self.exec_policy is not None and self.exec_policy_path is None:
+            raise ValueError(f"{self.source}: a loaded exec policy must record its declared path")
         if self.approval_policy not in self.WIRE_APPROVAL_POLICIES:
             raise ValueError(
                 f"{self.source}: approval_policy must be one of "
@@ -228,7 +245,7 @@ class WorkerPermissions:
             values = tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"{source}: invalid TOML: {exc}") from exc
-        unknown = sorted(set(values) - set(cls.FIELDS))
+        unknown = sorted(set(values) - set(cls.FIELDS) - {cls.EXEC_POLICY_FIELD})
         if unknown:
             raise ValueError(f"{source}: unsupported worker permission fields: {unknown}")
         base = default if default is not None else cls()
@@ -238,7 +255,17 @@ class WorkerPermissions:
             if not isinstance(value, str):
                 raise ValueError(f"{source}: {name} must be a string")
             declared[name] = value
-        return cls(source=source, **declared)
+        exec_policy_path = values.get(cls.EXEC_POLICY_FIELD)
+        if exec_policy_path is not None and not isinstance(exec_policy_path, str):
+            raise ValueError(f"{source}: exec_policy must be a string path")
+        # Deliberately not inherited from the operator-wide default: an allow
+        # list is scoped to the project whose file names it.
+        return cls(source=source, exec_policy_path=exec_policy_path, **declared)
+
+    @property
+    def exec_policy_loaded(self) -> bool:
+        """True unless a rules file is declared but was never loaded."""
+        return self.exec_policy_path is None or self.exec_policy is not None
 
     @property
     def digest(self) -> str:
@@ -248,13 +275,14 @@ class WorkerPermissions:
         )
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
-    def provenance(self) -> dict[str, str]:
+    def provenance(self) -> dict[str, Any]:
         return {
             "source": self.source,
             "digest": self.digest,
             "approvalPolicy": self.approval_policy,
             "approvalsReviewer": self.approvals_reviewer,
             "sandboxMode": self.sandbox_mode,
+            "execPolicy": None if self.exec_policy is None else self.exec_policy.provenance(),
         }
 
     def enforced_sandbox(self, project: Path) -> dict[str, Any]:
@@ -306,7 +334,8 @@ class ApprovalPolicy:
     _FILE_FIELDS = _BASE_FIELDS | frozenset({"grantRoot", "reason"})
     _PERMISSION_FIELDS = _BASE_FIELDS | frozenset({"cwd", "permissions", "reason", "environmentId"})
     __slots__ = (
-        "project", "sandbox_mode", "allow_session_approval", "allowed_permissions", "_sealed"
+        "project", "sandbox_mode", "allow_session_approval", "allowed_permissions",
+        "exec_policy", "_sealed",
     )
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -322,12 +351,16 @@ class ApprovalPolicy:
         allow_session_approval: bool = False,
         allowed_permissions: Mapping[str, Any] | None = None,
         allowed_permission_keys: frozenset[str] = frozenset(),
+        exec_policy: ExecPolicy | None = None,
     ) -> None:
         self.project = project.resolve()
         if sandbox_mode not in {"read-only", "workspace-write"}:
             raise ValueError("unsupported policy sandbox mode")
         self.sandbox_mode = sandbox_mode
         self.allow_session_approval = bool(allow_session_approval)
+        if exec_policy is not None and not isinstance(exec_policy, ExecPolicy):
+            raise ValueError("exec policy must be a loaded ExecPolicy")
+        self.exec_policy = exec_policy
         ceiling = mutable_evidence(allowed_permissions or {})
         for key in allowed_permission_keys:
             ceiling.setdefault(key, True)
@@ -594,6 +627,34 @@ class ApprovalPolicy:
                 return False
         return True
 
+    def deterministic_allow(self, case: ApprovalCase) -> ExecPolicyMatch | None:
+        """Decide a mundane project-local command by operator rule, or defer.
+
+        Only a normalized command approval qualifies, and only when it asks
+        for nothing beyond running the command: no network context, no extra
+        permissions, and ``accept`` among the offered decisions. The match
+        never widens anything — the response is a single-turn ``accept`` and
+        a proposed execpolicy amendment in the request is ignored, so a worker
+        cannot use this path to change the rules that govern it.
+        """
+        if self.exec_policy is None or case.method != self.COMMAND:
+            return None
+        if str(self.project) != case.project:
+            return None
+        request = case.request
+        if request.get("networkApprovalContext") is not None:
+            return None
+        if request.get("additionalPermissions") not in (None, {}):
+            return None
+        offered = request.get("availableDecisions")
+        if offered is not None and "accept" not in offered:
+            return None
+        command = request.get("command")
+        cwd = request.get("cwd")
+        if not isinstance(command, str) or not isinstance(cwd, str):
+            return None
+        return self.exec_policy.evaluate(command, cwd=cwd, project=self.project)
+
     def constrain(self, case: ApprovalCase, decision: JudgeDecision) -> JudgeDecision:
         if decision.verdict not in {"approve_once", "approve_session", "deny"}:
             return JudgeDecision("deny", "judge returned an invalid verdict")
@@ -771,6 +832,15 @@ class JudgedApprovalHandler:
             case = registration.policy.normalize(message, session_id=registration.session_id, thread_id=thread_id, item=item)
         except ValueError:
             return self._deny(method)
+        match = registration.policy.deterministic_allow(case)
+        if match is not None:
+            decision = JudgeDecision(
+                "approve_once", "allowed by exec policy: " + "; ".join(match.justifications),
+            )
+            response = self._encode(case, decision)
+            if self.on_decision:
+                self.on_decision(case, decision, response)
+            return response
         try:
             decision = registration.policy.constrain(case, await self.judge.decide(case))
         except Exception:
@@ -819,6 +889,10 @@ class JudgedSessionSupervisor:
             raise ValueError("approval policy project does not match worker project")
         if approvals.policy.sandbox_mode != self.permissions.sandbox_mode:
             raise ValueError("approval policy sandbox does not match worker configuration")
+        if not self.permissions.exec_policy_loaded:
+            raise ValueError(
+                f"{self.permissions.source}: exec_policy is declared but no rules were loaded"
+            )
 
     async def start(self, prompt: str) -> str:
         start_params = {

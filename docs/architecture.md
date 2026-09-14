@@ -85,6 +85,40 @@ broker also invokes an independent restricted judge and rejects HTTP verdicts;
 explicit external mode instead accepts verdicts over HTTP. Both modes emit a
 normalized `approval.requested` event.
 
+## Deterministic allow for mundane project-local commands
+
+Between normalization and the judge sits one more deterministic step,
+`ApprovalPolicy.deterministic_allow`. It applies only to a normalized command
+approval that asks for nothing beyond running the command — no network
+approval context, no additional permissions, `accept` among the offered
+decisions — and only when the project's `WorkerPermissions` carry an
+`ExecPolicy`. That policy is loaded by `OperatorConfig` from the rules file a
+project's permissions file names under `exec_policy`, resolved beside that
+file, validated like a constitution, and never read from inside a project.
+
+`execpolicy.py` parses the file as a strict subset of Codex's own `prefix_rule`
+syntax (so `codex execpolicy check --rules` lints it) and evaluates a request
+itself: it unwraps `<shell> -lc "<script>"`, splits the script on `&&`, `||`,
+`;`, `|`, newline, and the `if`/`then`/`else`/`fi` words, refuses any other
+punctuation or expansion character, requires every simple command to match an
+allow rule by argv prefix, allows only `exit N`, `true`, and `false` without a
+rule, and requires every argument to resolve inside the registered project
+relative to the request's working directory. Any failure returns `None` and the
+request proceeds to the judge exactly as before. A match produces
+`{"decision": "accept"}` and an `approval.allowed_by_policy` event with the
+same evidence an approval carries plus the rule provenance; no pending approval
+and no judge task are created. A `proposedExecpolicyAmendment` in the request
+is validated by normalization and otherwise ignored, so the runtime's policy is
+never amended by this path. Both adapters share the step; the one-shot handler
+reports it through `on_decision` with the reason prefixed `allowed by exec
+policy`.
+
+The decision to evaluate rules here rather than hand them to the runtime is
+recorded with its evidence in `docs/security.md`: the runtime unwraps the
+wrapper and evaluates chains per command, but offers no per-thread way to load
+rules, reads worker-writable project rules (#0017), ignores paths in its prefix
+match, and does not decide the guard shape workers issue.
+
 ## Two-tier constitution
 
 `Constitution` holds one overall `PolicyDocument` and a mapping of canonical

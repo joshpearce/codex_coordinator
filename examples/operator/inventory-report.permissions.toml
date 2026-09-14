@@ -15,3 +15,9 @@
 approval_policy = "untrusted"
 approvals_reviewer = "user"
 sandbox_mode = "workspace-write"
+# Mundane project-local commands the coordinator decides itself, by rule,
+# before a request would reach a judge: range reads, searches, and this
+# project's own test and CLI entry points. The file sits beside this one under
+# the same ownership rules and is never handed to the Codex runtime. Everything
+# it does not name, including every file change, still reaches a judge.
+exec_policy = "inventory-report.rules"

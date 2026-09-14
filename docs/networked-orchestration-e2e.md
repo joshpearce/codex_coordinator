@@ -33,6 +33,16 @@ project and disables the network. Approval traffic is therefore a product of the
 permission configuration and the children's own behavior, not of prompt
 instructions.
 
+Each permissions file also names a rules file, `inventory-app.rules` or
+`inventory-report.rules`, beside it in the operator directory. Range reads,
+searches, and the project's own `python -m unittest` and `--help` invocations
+that stay inside the project are decided by the service from those rules and
+appear as `approval.allowed_by_policy` events rather than judged approvals; the
+harness reports them separately. The report child's prompt asks it, as an
+ordinary task step, to look at the producer's README, which lies outside its
+project: no rule can decide that read, so it must reach a judge, and the
+constitutions' isolation principle decides it.
+
 Two earlier configurations are worth knowing about, because both were tried and
 neither works. With `on-request` and a task that is completable inside the
 project, nothing escalates at all: a run finishes with zero approvals and the

@@ -93,6 +93,17 @@ def _approval_summary(service_log: Path) -> dict[str, Any]:
             elif event.get("type") == "approval.resolved" and approval_id:
                 resolutions[approval_id] = event
 
+    policy_allowed: dict[str, int] = {}
+    if service_log.exists():
+        for line in service_log.read_text(errors="replace").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "approval.allowed_by_policy":
+                project = Path(str(event.get("project") or "unknown")).name
+                policy_allowed[project] = policy_allowed.get(project, 0) + 1
+
     by_project: dict[str, dict[str, int]] = {}
     denied: list[dict[str, str]] = []
     for approval_id, request in requests.items():
@@ -109,7 +120,10 @@ def _approval_summary(service_log: Path) -> dict[str, Any]:
                 ),
                 "reason": OutputRenderer._compact((resolution or {}).get("reason"), 120),
             })
-    return {"total": len(requests), "byProject": by_project, "denied": denied}
+    return {
+        "total": len(requests), "byProject": by_project, "denied": denied,
+        "policyAllowed": policy_allowed,
+    }
 
 
 def _policy_provenance_errors(
@@ -365,6 +379,10 @@ class OutputRenderer:
             for entry in approvals.get("denied") or []:
                 self._line(f"  DENIED {entry['project']}: {entry['command']}")
                 self._block("    because:", entry["reason"])
+            policy_allowed = approvals.get("policyAllowed") or {}
+            self._line(f"Allowed by exec policy without a judge: {sum(policy_allowed.values())}")
+            for project, count in sorted(policy_allowed.items()):
+                self._line(f"  {project}: {count}")
             self._line(f"Result: {outcome} (exit {data.get('returnCode')})")
             for error in data.get("validationErrors") or []:
                 self._line(f"VALIDATION ERROR: {error}")
@@ -390,6 +408,16 @@ class OutputRenderer:
             request = event.get("request") or {}
             command = request.get("command") or event.get("method")
             self._line(f"APPROVAL REQUEST {name}: {self._compact(command)}")
+            return
+        if event_type == "approval.allowed_by_policy":
+            name = Path(str(event.get("project") or "child")).name
+            request = event.get("request") or {}
+            rule = (event.get("execPolicy") or {}).get("justifications") or []
+            self._line(
+                f"ALLOWED BY POLICY {name}: {self._compact(request.get('command'))}"
+            )
+            if rule:
+                self._line(f"         rule: {self._compact('; '.join(rule))}")
             return
         if event_type == "approval.resolved":
             verdict = str(event.get("verdict", "unknown")).replace("_", " ").upper()

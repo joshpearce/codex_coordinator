@@ -185,3 +185,37 @@ async def test_session_scoped_grant_is_not_an_approval(monkeypatch):
     ]
     assert approvals
     assert all(entry["verdict"] == "deny" for entry in approvals)
+
+
+def test_exec_policy_rules_are_not_a_constitution():
+    """The allow list lives in an execpolicy file; the constitution scan never reads it.
+
+    The rules files deliberately name the mundane commands — that is their
+    job — and the guard above must keep scanning only the constitutions, or
+    the two kinds of file would collapse into one.
+    """
+    from codex_coordinator.execpolicy import ExecPolicy
+
+    config = gate.load_operator_config()
+    constitution_sources = set(_constitution_texts())
+    rules_files = sorted((Path(gate.EXAMPLES) / "operator").glob("*.rules"))
+    assert [path.name for path in rules_files] == ["inventory-app.rules", "inventory-report.rules"]
+
+    for project, permissions in config.worker_permissions.items():
+        policy = permissions.exec_policy
+        assert policy is not None, project
+        assert Path(policy.source).name == f"{project.name}.rules"
+        assert policy.source not in constitution_sources
+        assert policy.text not in _constitution_texts().values()
+        # The rules name programs; the constitutions, by the test above, do not.
+        programs = {rule.pattern[0][0] for rule in policy.rules}
+        assert programs == {"sed", "rg", "python"}
+        assert all(
+            token not in text.lower()
+            for token in ("prefix_rule", "sed -n")
+            for text in _constitution_texts().values()
+        )
+    # And the scan is over constitutions only: a rules file is not a PolicyDocument.
+    assert all(not source.endswith(".rules") for source in constitution_sources)
+    for path in rules_files:
+        ExecPolicy.from_text(path.read_text(), source=str(path))

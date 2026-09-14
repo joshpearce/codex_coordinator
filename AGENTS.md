@@ -24,7 +24,11 @@ no Codex configuration of its own; its boundary is declared beside
 `operator.toml`, outside every root a worker can write. A constitution states
 principles and capability profiles, never a list of allowed or blocked commands;
 `tests/test_judge_live_gate.py` fails if a catalogued request is named verbatim
-in a policy document.
+in a policy document. Commands are named only in a project's operator-owned
+execpolicy rules file (`exec_policy` in its permissions file), which the
+coordinator evaluates itself for mundane project-local commands; the Codex
+runtime's own rules loading is not used, for reasons recorded in
+`docs/security.md`.
 
 ## Issue tracking and priority
 

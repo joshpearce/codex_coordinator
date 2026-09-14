@@ -8,7 +8,7 @@ import os
 import stat
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -21,6 +21,7 @@ from .coordinator import (
     select_worker_permissions,
 )
 from .daemon import default_daemon_socket
+from .execpolicy import ExecPolicy, ExecPolicyError
 
 
 _FIELDS = frozenset({
@@ -57,8 +58,11 @@ _ENV_FIELDS = {
 
 
 def _trusted_policy_file(path: Path, label: str) -> str:
-    info = path.lstat()
-    parent_info = path.parent.lstat()
+    try:
+        info = path.lstat()
+        parent_info = path.parent.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} does not exist: {path}") from exc
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
         raise ValueError(f"{label} must be an owner-controlled regular file")
     if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o022:
@@ -384,9 +388,30 @@ class OperatorConfig:
                 policy_directory=policy_directory, forbidden_roots=forbidden_roots,
             )
             worker_permission_paths[project] = permissions_path
-            worker_permissions[project] = WorkerPermissions.from_toml(
+            permissions = WorkerPermissions.from_toml(
                 permissions_text, str(permissions_path), default=default_worker_permissions,
             )
+            if permissions.exec_policy_path is not None:
+                # The rules file is trusted the way the permissions file is:
+                # beside operator.toml, owner-controlled, no symlink, outside
+                # every worker- and coordinator-writable root. A relative path
+                # is taken from the permissions file's own directory, which
+                # has already passed those checks. Any parse or self-check
+                # failure raises here, so a policy that did not load fails
+                # startup rather than quietly sending everything to a judge.
+                declared = Path(permissions.exec_policy_path).expanduser()
+                if not declared.is_absolute():
+                    declared = permissions_path.resolve(strict=True).parent / declared
+                rules_path, rules_text = _trusted_sibling_file(
+                    declared, f"exec policy for {project}",
+                    policy_directory=policy_directory, forbidden_roots=forbidden_roots,
+                )
+                try:
+                    exec_policy = ExecPolicy.from_text(rules_text, source=str(rules_path))
+                except ExecPolicyError as exc:
+                    raise ValueError(str(exc)) from exc
+                permissions = replace(permissions, exec_policy=exec_policy)
+            worker_permissions[project] = permissions
 
         raw_ceilings = values["permission_ceilings"]
         if not isinstance(raw_ceilings, Mapping):

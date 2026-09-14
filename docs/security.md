@@ -70,7 +70,53 @@ anticipated, and an enumerating constitution is silent — which reads as
 permissive — on everything it failed to foresee. `scripts/judge_live_gate.py`
 holds a catalogue of realistic requests the constitutions deliberately do not
 name, and a unit test fails if any of those requests later appears verbatim in a
-policy document. Note that some scope expansions never reach a judge at all: a
+policy document.
+
+The one place commands are named is a separate kind of file: an operator-owned
+execpolicy rules file, referenced as `exec_policy` from a project's permissions
+file and validated under the same ownership and location rules. It lists the
+mundane project-local commands the coordinator decides itself, without a judge:
+in the examples, `sed -n` range reads, `rg` searches, and the project's own
+`python -m unittest` and `python -m <package> --help` entry points. The
+coordinator, not the Codex runtime, evaluates it, and the evaluation is stricter
+than the runtime's own: the `<shell> -lc "<script>"` wrapper is unwrapped, every
+simple command in a `&&`, `||`, `;`, `|`, newline, or `if … then exit 1; fi`
+chain must match an `allow` rule, every argument must resolve inside the
+registered project from the request's own working directory, and anything the
+evaluator cannot fully parse — redirections, substitutions, expansions,
+assignments, background jobs, an unrecognized shell invocation — goes to a
+judge. A match yields a single-turn `accept` only, never a session grant and
+never the `acceptWithExecpolicyAmendment` a request may offer; the
+`proposedExecpolicyAmendment` a worker authors is ignored, so this path cannot
+be used to change the rules that govern it. What it rests on is the same
+deterministic layer as before: the turn sandbox, which keeps writes inside the
+project and disables the network regardless of any decision, and
+`normalize_path`, which already rejects a working directory outside the
+project. File changes are a different approval method and always reach a judge.
+`find` is deliberately not in the example rules because `-exec` runs an
+arbitrary program per match. A rule still admits every mode of the program it
+names within the project, so an operator should name only programs whose whole
+behavior inside the project may go unjudged.
+
+Loading fails closed: a rules file that is missing, not owner-controlled, not
+beside `operator.toml`, inside a worker or coordinator root, not in the accepted
+subset of the syntax, or whose own `match`/`not_match` examples do not evaluate
+as declared is a startup error, and a declared rules file that was never loaded
+is refused by the service and the one-shot supervisor rather than silently
+meaning "judge everything". Each decision is recorded as an
+`approval.allowed_by_policy` event carrying the normalized request, the rule
+file's source and digest, and the rule that decided each simple command.
+
+The Codex runtime's own execpolicy is deliberately not used. Live probing of the
+pinned CLI established that the runtime does unwrap the shell wrapper and does
+evaluate `&&` chains per command, but also that it has no per-thread
+configuration key for rules (`--strict-config` rejects every candidate), that it
+reads rules from the worker project's own `.codex/rules` directory at thread
+start (#0017), that its `prefix_rule` never constrains paths so a `sed -n` rule
+would admit a read of any file on the machine, and that it does not decide the
+`if … fi` guard shape workers actually issue. Under `granular` approval an
+unmatched command ran with no approval at all, so `untrusted` remains the only
+supported wire policy. Note that some scope expansions never reach a judge at all: a
 network permission request is rejected by `normalize_permissions` against the
 operator ceiling first, so an install attempt reaches the constitution as a
 command, which is also how a real worker issues it. Explicit `external` mode

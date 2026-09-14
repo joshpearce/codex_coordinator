@@ -1763,3 +1763,166 @@ async def test_worker_boundary_comes_from_operator_declarations(tmp_path: Path, 
             allowed_roots=(tmp_path,), worker_approval_policy="never",
         )
     capsys.readouterr()
+
+
+def _rules_policy(text: str = 'prefix_rule(pattern=["sed", "-n"], decision="allow", justification="range reads")\n'):
+    from codex_coordinator.execpolicy import ExecPolicy
+
+    return ExecPolicy.from_text(text, source="/operator/worker.rules")
+
+
+@pytest.mark.asyncio
+async def test_rule_allowed_command_is_decided_without_a_judge_and_recorded(tmp_path: Path, capsys):
+    """A mundane project-local command costs no judge call and leaves a full audit record."""
+    class Judge:
+        calls = 0
+
+        async def decide(self, case):
+            Judge.calls += 1
+            return JudgeDecision("deny", "the judge should not have been asked")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    (project / "README.md").write_text("x")
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project, exec_policy=_rules_policy())
+    command = "/bin/zsh -lc \"sed -n '1,240p' README.md && sed -n '1,120p' README.md\""
+    request = command_request(
+        command=command,
+        proposedExecpolicyAmendment=["sed", "-n", "1,240p", "README.md"],
+        availableDecisions=[
+            "accept",
+            {"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["sed", "-n"]}},
+            "decline",
+        ],
+    )
+    response = await asyncio.wait_for(broker(request), 1)
+
+    # The response is a plain single-turn accept: never acceptForSession, and
+    # never the amendment the worker proposed, which would rewrite the
+    # runtime's own policy for every later command.
+    assert response == {"decision": "accept"}
+    assert Judge.calls == 0
+    assert broker.pending == {}
+    assert [event["type"] for event in events.events] == ["approval.allowed_by_policy"]
+    allowed = events.events[0]
+    assert allowed["rpcRequestId"] == 7
+    assert allowed["sessionId"] == "session-1" and allowed["threadId"] == "worker-1"
+    assert allowed["project"] == str(project.resolve())
+    assert allowed["request"]["command"] == command
+    assert allowed["declaredIntent"]["command"] == command
+    assert allowed["enforcedCapabilities"]["sandboxRequired"] is True
+    assert allowed["response"] == {"decision": "accept"}
+    assert allowed["execPolicy"] == {
+        "source": "/operator/worker.rules",
+        "digest": _rules_policy().digest,
+        "rules": 1,
+        "commands": [["sed", "-n", "1,240p", "README.md"], ["sed", "-n", "1,120p", "README.md"]],
+        "justifications": ["range reads", "range reads"],
+    }
+    assert "approvalId" not in allowed
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_commands_outside_the_rules_still_reach_the_judge(tmp_path: Path, capsys):
+    seen = []
+
+    class Judge:
+        async def decide(self, case):
+            seen.append(case.request["command"])
+            return JudgeDecision("deny", "judged")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    outside = tmp_path / "other"
+    outside.mkdir()
+    (outside / "README.md").write_text("secret")
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project, exec_policy=_rules_policy())
+    commands = [
+        # The planted out-of-project read: the program is allowed, the path is not.
+        "/bin/zsh -lc \"sed -n '1,40p' ../other/README.md\"",
+        # The find -exec pair from the recorded run.
+        "/bin/zsh -lc \"find . -maxdepth 3 -type f -not -path './.git/*' -print -exec sed -n '1,220p' {} \\\\;\"",
+        # Allowed program, but the request carries a network escalation.
+        "/bin/zsh -lc \"sed -n '1,5p' README.md\"",
+    ]
+    responses = []
+    for index, command in enumerate(commands):
+        request = command_request(command=command, itemId=f"item-{index}")
+        request["id"] = 10 + index
+        if index == 2:
+            request["params"]["networkApprovalContext"] = {"host": "example.com", "protocol": "https"}
+        responses.append(await asyncio.wait_for(broker(request), 1))
+
+    assert seen == commands
+    assert responses == [{"decision": "decline"}] * 3
+    assert not [event for event in events.events if event["type"] == "approval.allowed_by_policy"]
+    assert len([event for event in events.events if event["type"] == "approval.requested"]) == 3
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_file_changes_are_never_decided_by_rule(tmp_path: Path, capsys):
+    seen = []
+
+    class Judge:
+        async def decide(self, case):
+            seen.append(case.method)
+            return JudgeDecision("approve_once", "judged")
+
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    register(broker, project, exec_policy=_rules_policy())
+    broker.items[("worker-1", "turn-1", "change-1")] = {
+        "id": "change-1", "type": "fileChange",
+        "changes": [{"path": "README.md", "kind": "update"}],
+    }
+    assert await asyncio.wait_for(broker(file_request()), 1) == {"decision": "accept"}
+    assert seen == [ApprovalPolicy.FILE]
+    assert [event["type"] for event in events.events] == ["approval.requested", "approval.resolved"]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_service_refuses_a_declared_but_unloaded_exec_policy(tmp_path: Path):
+    """A declared rules file that was never loaded must not silently mean 'judge everything'."""
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    with pytest.raises(ValueError, match="exec_policy is declared but no rules were loaded"):
+        CoordinatorService(
+            object(), ApprovalBroker(events), events, allowed_roots=(project,),
+            worker_permissions={
+                project: WorkerPermissions(source="operator", exec_policy_path="worker.rules"),
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_registration_carries_the_project_exec_policy(tmp_path: Path, capsys):
+    project = tmp_path / "worker"
+    project.mkdir()
+    events = EventLog()
+    broker = ApprovalBroker(events)
+    policy = _rules_policy()
+    service = CoordinatorService(
+        _StartClient(), broker, events, allowed_roots=(project,),
+        worker_permissions={
+            project: WorkerPermissions(
+                approval_policy="untrusted", source="operator/worker.permissions.toml",
+                exec_policy_path="worker.rules", exec_policy=policy,
+            ),
+        },
+    )
+    started = await service.start_session(str(project), "Build")
+    registration = broker.registrations[started["threadId"]]
+    assert registration.policy.exec_policy is policy
+    event = next(event for event in events.events if event["type"] == "session.started")
+    assert event["workerPermissions"]["execPolicy"] == policy.provenance()
+    capsys.readouterr()

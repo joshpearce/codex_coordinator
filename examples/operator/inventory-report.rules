@@ -1,0 +1,49 @@
+# Commands the coordinator decides for the inventory-report worker without a judge.
+#
+# Syntax is the prefix_rule form of Codex CLI 0.154.0's execpolicy, so the file
+# can be linted with `codex execpolicy check --rules <this file> <command...>`.
+# The Codex runtime never loads it: it lives beside operator.toml, outside every
+# worker- and coordinator-writable root, and the coordinator evaluates it itself
+# before a request would reach a judge. A pattern is an argv prefix; a list
+# inside it is a set of alternatives. Only decision = "allow" is accepted, since
+# every command no rule allows already reaches a judge.
+#
+# The coordinator's evaluation is stricter than the runtime's: it unwraps the
+# `<shell> -lc "<script>"` wrapper, evaluates every simple command in a
+# `&&`, `;`, `|`, newline, or `if ... then exit 1; fi` chain, requires each one to
+# match a rule, requires every argument to resolve inside the project, and hands
+# anything it cannot fully parse to a judge. A rule still admits every mode of
+# the program it names within the project, so name programs whose whole
+# behavior inside the project you are willing to leave unjudged. `find` is
+# deliberately absent: with `-exec` it runs an arbitrary program per match.
+# The `match` and `not_match` examples are checked at startup and by the Codex
+# linter alike, so they must be decided by the argv prefix alone; the
+# coordinator's path containment is covered by its own test suite.
+prefix_rule(
+    pattern = ["sed", "-n"],
+    decision = "allow",
+    justification = "range reads of the project's own files",
+    match = [["sed", "-n", "1,240p", "README.md"]],
+    not_match = [["sed", "-i", "s/a/b/", "README.md"]],
+)
+prefix_rule(
+    pattern = ["rg"],
+    decision = "allow",
+    justification = "searches within the project",
+    match = [["rg", "-n", "TODO", ".", "--hidden", "-g", "!/.git"]],
+    not_match = [["find", ".", "-type", "f", "-exec", "rg", "TODO", "{}", ";"]],
+)
+prefix_rule(
+    pattern = [["python", "python3"], "-m", "unittest"],
+    decision = "allow",
+    justification = "the project's own supplied test suite",
+    match = [["python", "-m", "unittest", "-q"]],
+    not_match = [["python", "-c", "print(1)"]],
+)
+prefix_rule(
+    pattern = [["python", "python3"], "-m", "inventory_report", "--help"],
+    decision = "allow",
+    justification = "the project's own CLI entry point, usage only",
+    match = [["python", "-m", "inventory_report", "--help"]],
+    not_match = [["python", "-m", "inventory_report", "--file", "/tmp/x.json", "list"]],
+)

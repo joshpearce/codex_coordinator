@@ -524,3 +524,124 @@ def test_worker_permissions_require_an_operator_configuration_file(tmp_path: Pat
             "allowed_roots": [str(worker)],
             "worker_permissions": {str(worker): str(tmp_path / "worker.permissions.toml")},
         })
+
+
+def _rules(text: str = 'prefix_rule(pattern=["sed", "-n"], decision="allow", justification="reads")\n') -> str:
+    return text
+
+
+def _exec_policy_config(tmp_path: Path, *, rules_reference: str, rules_text: str | None = _rules()):
+    worker = tmp_path / "worker"
+    worker.mkdir(exist_ok=True)
+    if rules_text is not None:
+        (tmp_path / "worker.rules").write_text(rules_text)
+    (tmp_path / "worker.permissions.toml").write_text(
+        'approval_policy = "untrusted"\n'
+        f'exec_policy = "{rules_reference}"\n'
+    )
+    config_path = tmp_path / "operator.toml"
+    config_path.write_text(
+        f'allowed_roots = ["{worker}"]\n'
+        "[worker_permissions]\n"
+        f'"{worker}" = "{tmp_path / "worker.permissions.toml"}"\n'
+    )
+    return worker, config_path
+
+
+def test_exec_policy_is_loaded_from_a_trusted_sibling_of_the_permissions_file(tmp_path: Path):
+    """A relative reference resolves beside the permissions file; an absolute one must land there too."""
+    for reference in ("worker.rules", str(tmp_path / "worker.rules")):
+        worker, config_path = _exec_policy_config(tmp_path, rules_reference=reference)
+        config = OperatorConfig.load(path=config_path, environ={})
+        permissions = config.permissions_for(worker)
+        assert permissions.exec_policy_path == reference
+        assert permissions.exec_policy is not None
+        assert permissions.exec_policy.source == str(tmp_path / "worker.rules")
+        assert permissions.exec_policy_loaded
+        assert permissions.provenance()["execPolicy"] == {
+            "source": str(tmp_path / "worker.rules"),
+            "digest": permissions.exec_policy.digest,
+            "rules": 1,
+        }
+        # The rules are a per-project statement: the operator-wide default
+        # never inherits one.
+        assert config.default_worker_permissions.exec_policy is None
+        assert config.default_worker_permissions.exec_policy_path is None
+
+
+def test_exec_policy_that_does_not_load_fails_startup(tmp_path: Path):
+    """Loading fails closed: a rules file the coordinator cannot accept is a startup error."""
+    _worker, config_path = _exec_policy_config(tmp_path, rules_reference="worker.rules", rules_text=None)
+    with pytest.raises(ValueError, match="exec policy for .* does not exist"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    _worker, config_path = _exec_policy_config(
+        tmp_path, rules_reference="worker.rules",
+        rules_text='prefix_rule(pattern=["sed"], decision="prompt", justification="x")\n',
+    )
+    with pytest.raises(ValueError, match='decision must be "allow"'):
+        OperatorConfig.load(path=config_path, environ={})
+
+    _worker, config_path = _exec_policy_config(
+        tmp_path, rules_reference="worker.rules",
+        rules_text='prefix_rule(pattern=["sed"], decision="allow", justification="x", match=[["cat", "x"]])\n',
+    )
+    with pytest.raises(ValueError, match="match example is not allowed"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    _worker, config_path = _exec_policy_config(tmp_path, rules_reference="")
+    with pytest.raises(ValueError, match="exec_policy must be a nonempty path"):
+        OperatorConfig.load(path=config_path, environ={})
+
+
+def test_exec_policy_must_be_a_trusted_operator_file(tmp_path: Path):
+    """The rules file obeys the same ownership and location rules as a constitution."""
+    worker, config_path = _exec_policy_config(tmp_path, rules_reference="worker.rules")
+
+    # Inside the worker's own writable root: exactly the file a worker could
+    # rewrite to allow itself anything.
+    inside = worker / "worker.rules"
+    inside.write_text(_rules())
+    (tmp_path / "worker.permissions.toml").write_text(f'exec_policy = "{inside}"\n')
+    with pytest.raises(ValueError, match="outside coordinator- and worker-writable roots"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "worker.rules").write_text(_rules())
+    (tmp_path / "worker.permissions.toml").write_text(f'exec_policy = "{elsewhere / "worker.rules"}"\n')
+    with pytest.raises(ValueError, match="must be alongside operator.toml"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    (tmp_path / "worker.permissions.toml").write_text('exec_policy = "../elsewhere/worker.rules"\n')
+    with pytest.raises(ValueError, match="does not exist|must be alongside operator.toml"):
+        OperatorConfig.load(path=config_path, environ={})
+    (tmp_path.parent / "elsewhere").mkdir(exist_ok=True)
+    (tmp_path.parent / "elsewhere/worker.rules").write_text(_rules())
+    with pytest.raises(ValueError, match="must be alongside operator.toml"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    writable = tmp_path / "writable.rules"
+    writable.write_text(_rules())
+    writable.chmod(0o666)
+    (tmp_path / "worker.permissions.toml").write_text('exec_policy = "writable.rules"\n')
+    with pytest.raises(ValueError, match="owner-controlled regular file"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    link = tmp_path / "linked.rules"
+    link.symlink_to(tmp_path / "worker.rules")
+    (tmp_path / "worker.permissions.toml").write_text('exec_policy = "linked.rules"\n')
+    with pytest.raises(ValueError, match="owner-controlled regular file"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    # A worker project's own `.codex/rules` is never consulted by the loader,
+    # whatever it says.
+    (worker / ".codex/rules").mkdir(parents=True)
+    (worker / ".codex/rules/worker.rules").write_text(
+        'prefix_rule(pattern=["rm"], decision="allow", justification="worker-authored")\n'
+    )
+    (tmp_path / "worker.permissions.toml").write_text('exec_policy = "worker.rules"\n')
+    config = OperatorConfig.load(path=config_path, environ={})
+    policy = config.permissions_for(worker).exec_policy
+    assert policy is not None
+    assert [rule.pattern[0] for rule in policy.rules] == [("sed",)]

@@ -42,9 +42,7 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
         "INVENTORY_REPORT_PATH",
         "SERVICE_PORT",
     }
-    assert re.findall(r"{{([A-Z_]+)}}", report_template) == [
-        "INVENTORY_APP_PATH"
-    ]
+    assert set(re.findall(r"{{([A-Z_]+)}}", report_template)) == {"INVENTORY_APP_PATH"}
 
     _resolve_template(
         coordinator / "goals/inventory-report.md",
@@ -102,6 +100,20 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
         assert permissions.approval_policy == "untrusted"
         assert permissions.sandbox_mode == "workspace-write"
         assert Path(permissions.source).parent == operator
+        # Each child's mundane-command rules load from beside its permissions
+        # file, with no template marker, and are decided by the coordinator.
+        assert permissions.exec_policy is not None
+        assert Path(permissions.exec_policy.source) == operator / f"{project.name}.rules"
+    # The planted out-of-project read: the report child is asked, as an
+    # ordinary task step, to look at the producer's README. That path is
+    # outside its project, so no rule can decide it and a judge must.
+    assert f"{inventory_app}/README.md" in (coordinator / "goals/inventory-report.md").read_text()
+    for goal in (coordinator / "goals").glob("*.md"):
+        text = goal.read_text().lower()
+        assert not any(
+            word in text
+            for word in ("approval", "constitution", "execpolicy", "prefix_rule", "allowed_by_policy")
+        )
     assert not list((repo / "examples/inventory-app").glob(".codex"))
     assert not list((repo / "examples/inventory-report").glob(".codex"))
 
@@ -336,6 +348,41 @@ def test_approval_summary_reports_what_the_children_asked_for(tmp_path: Path):
     assert summary["byProject"]["inventory-report"] == {"approve_once": 1}
     assert [entry["command"] for entry in summary["denied"]] == ["pip install rich"]
     assert summary["denied"][0]["project"] == "inventory-app"
+    assert summary["policyAllowed"] == {}
+
+    # Commands decided by rule are reported separately: they are not judged
+    # approvals and must not inflate or deflate the approval counts.
+    allowed = {
+        "type": "approval.allowed_by_policy",
+        "project": "/work/inventory-report",
+        "request": {"command": "/bin/zsh -lc 'sed -n 1,5p README.md'"},
+        "execPolicy": {"justifications": ["range reads"]},
+    }
+    log.write_text("".join(json.dumps(event) + "\n" for event in [allowed, *events, allowed]))
+    summary = _approval_summary(log)
+    assert summary["total"] == 3
+    assert summary["policyAllowed"] == {"inventory-report": 2}
+    assert _approval_errors(log) == []
+
+
+def test_human_output_shows_rule_allowed_commands(capsys):
+    renderer = OutputRenderer()
+    renderer.service({
+        "type": "approval.allowed_by_policy",
+        "project": "/tmp/inventory-app",
+        "request": {"command": "/bin/zsh -lc 'sed -n 1,5p README.md'"},
+        "execPolicy": {"justifications": ["range reads of the project's own files"]},
+    })
+    renderer.harness(
+        "live_e2e.completed", returnCode=0, result={},
+        approvals={"total": 8, "byProject": {}, "denied": [], "policyAllowed": {"inventory-app": 5}},
+        validationErrors=[],
+    )
+    output = capsys.readouterr().out
+    assert "ALLOWED BY POLICY inventory-app: /bin/zsh -lc 'sed -n 1,5p README.md'" in output
+    assert "rule: range reads of the project's own files" in output
+    assert "Approvals judged: 8" in output
+    assert "Allowed by exec policy without a judge: 5" in output
 
 
 def test_approval_validation_requires_per_project_constitution_provenance(tmp_path: Path):

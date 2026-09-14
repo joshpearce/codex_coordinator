@@ -31,6 +31,12 @@ entering during shutdown's drain window.
 `approval.resolved` records the computed policy response. A separate
 `approval.wire_sent` event is emitted only after the app-server WebSocket send
 returns; it does not by itself prove the remote worker executed the command.
+A command every part of which matches the project's operator-owned execpolicy
+rules and stays inside the project is answered `accept` immediately and
+recorded as `approval.allowed_by_policy`, with the normalized request, the
+rules file's source and digest, and the rule behind each simple command. It
+has no `approvalId`, is never pending, and does not count as an approval; a
+later `approval.wire_sent` still records the send.
 `approval.server_resolved` records the app-server's receipt or clearance of a
 request, while `approval.command_completed` records the correlated command
 item's terminal status. The strict live gate checks all three signals.

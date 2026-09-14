@@ -250,6 +250,33 @@ class ApprovalBroker:
                 reason=str(exc),
             )
             return JudgedApprovalHandler._deny(method)
+        match = registration.policy.deterministic_allow(case)
+        if match is not None:
+            # Decided by operator rule, not by a judge: no pending approval is
+            # created, no model is called, and the response is a single-turn
+            # accept. The event carries the same evidence an approval would,
+            # plus which rule decided it, so the audit trail stays complete.
+            response = JudgedApprovalHandler._encode(
+                case, JudgeDecision("approve_once", "allowed by exec policy"),
+            )
+            exec_policy = registration.policy.exec_policy
+            self.events.emit(
+                "approval.allowed_by_policy",
+                rpcRequestId=self._rpc_request_id(message),
+                sessionId=registration.session_id,
+                threadId=registration.thread_id,
+                method=case.method,
+                project=registration.project,
+                request=mutable_evidence(case.request),
+                declaredIntent=mutable_evidence(case.declared_intent),
+                enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
+                execPolicy={
+                    **(exec_policy.provenance() if exec_policy is not None else {}),
+                    **match.json(),
+                },
+                response=response,
+            )
+            return response
         approval_id = uuid.uuid4().hex
         if len(self.pending) >= 128:
             self.events.emit(
@@ -482,6 +509,10 @@ class CoordinatorService:
                 raise ValueError(f"worker permissions project is outside allowed roots: {canonical}")
             if not isinstance(permissions, WorkerPermissions):
                 raise ValueError("worker permissions must be a WorkerPermissions value")
+            if not permissions.exec_policy_loaded:
+                raise ValueError(
+                    f"{permissions.source}: exec_policy is declared but no rules were loaded"
+                )
             declarations[canonical] = permissions
         self.worker_permissions = MappingProxyType(declarations)
 
@@ -519,6 +550,7 @@ class CoordinatorService:
             sandbox_mode=permissions.sandbox_mode,
             allow_session_approval=self.allow_session_approval,
             allowed_permissions=self.permission_ceilings.get(project),
+            exec_policy=permissions.exec_policy,
         )
         start_params = {
             "cwd": str(project),

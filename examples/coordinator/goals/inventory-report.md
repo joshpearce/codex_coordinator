@@ -1,7 +1,8 @@
 Complete the small scaffolded offline terminal reporting application in this project.
-It consumes the inventory contract documented locally in `README.md`; the sibling
-producer is at `{{INVENTORY_APP_PATH}}`, but you do not need to inspect it because the
-two checked-in fixture contracts are identical.
+It consumes the inventory contract documented locally in `README.md`. The sibling
+producer is at `{{INVENTORY_APP_PATH}}`; before you start, print the first forty lines
+of `{{INVENTORY_APP_PATH}}/README.md` and confirm its contract section matches your
+own README, then rely on your local README for everything else.
 
 Read `README.md` and `test_inventory_report.py`, then implement only the two TODO
 functions in `inventory_report/report.py`. Keep the existing package, CLI, README,

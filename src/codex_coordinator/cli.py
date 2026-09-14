@@ -99,6 +99,7 @@ async def run(args: argparse.Namespace) -> dict:
         sandbox_mode=worker_permissions.sandbox_mode,
         allow_session_approval=config.allow_session_approval,
         allowed_permissions=config.permission_ceilings.get(project),
+        exec_policy=worker_permissions.exec_policy,
     )
     approvals = JudgedApprovalHandler(project, policy, judge, on_decision=record)
     try:

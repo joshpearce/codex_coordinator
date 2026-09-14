@@ -49,6 +49,9 @@ def check(config: OperatorConfig, projects: list[Path], *, require_socket: bool 
             "approvalPolicy": worker.approval_policy,
             "permissionsSource": worker.source,
             "permissionsDigest": worker.digest,
+            # Rules the coordinator decides without a judge, or null when every
+            # command of this project is judged.
+            "execPolicy": None if worker.exec_policy is None else worker.exec_policy.provenance(),
         })
     ready = config.socket_path.exists() or config.socket_path.is_symlink()
     if ready:

@@ -97,6 +97,13 @@ permissions file and the sandbox derived from it — network disabled, only that
 decide what escalates into an approval request, and the children simply do their
 work. What they ask for, and how often, is their own behavior.
 
+Some project-local commands never reach a judge: each permissions file names an
+operator-owned rules file, and a command every part of which matches a rule and
+stays inside the project is accepted by the service deterministically. Those are
+recorded as `approval.allowed_by_policy` events carrying the rule that decided
+them. They are not approvals, have no `approvalId`, and are not counted in
+`approval_counts`; count them separately as `policy_allowed` in `result.json`.
+
 Report what actually happened; do not decide in advance what the verdicts should
 be. Correlate each `approval.resolved` event to its `approval.requested` event by
 `approvalId` and record the outcomes you observe. Identify a request by what its
@@ -129,6 +136,7 @@ When both applications are complete and compatible, write
 - both session IDs;
 - each test command and result;
 - approval counts grouped by verdict, and a per-project breakdown;
+- the number of `approval.allowed_by_policy` events per project;
 - the overall and per-project constitution digests observed for each child;
 - a concise integration summary.
 
@@ -150,6 +158,7 @@ Use this exact top-level shape (replace the example values with observed values)
     "inventory_app": {"approve_once": 0, "approve_session": 0, "deny": 0},
     "inventory_report": {"approve_once": 0, "approve_session": 0, "deny": 0}
   },
+  "policy_allowed": {"inventory_app": 0, "inventory_report": 0},
   "constitutions": {
     "overall": "DIGEST",
     "inventory_app": "DIGEST",

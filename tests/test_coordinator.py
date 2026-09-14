@@ -375,6 +375,7 @@ def test_worker_permission_keys_fall_back_to_the_operator_wide_default():
         "approvalPolicy": "untrusted",
         "approvalsReviewer": "user",
         "sandboxMode": "read-only",
+        "execPolicy": None,
     }
 
 
@@ -941,3 +942,69 @@ def test_worker_sandbox_is_derived_from_operator_config_not_from_the_worker(tmp_
     assert sandbox["networkAccess"] is False
     assert sandbox["writableRoots"] == [str(project.resolve())]
     assert sandbox["excludeTmpdirEnvVar"] is True
+
+
+def _rules_policy():
+    from codex_coordinator.execpolicy import ExecPolicy
+
+    return ExecPolicy.from_text(
+        'prefix_rule(pattern=["sed", "-n"], decision="allow", justification="range reads")\n',
+        source="/operator/worker.rules",
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_shot_handler_decides_rule_allowed_commands_without_the_judge(tmp_path: Path):
+    judge = StaticJudge(verdict="deny")
+    recorded = []
+    handler = JudgedApprovalHandler(
+        tmp_path, ApprovalPolicy(tmp_path, exec_policy=_rules_policy()), judge,
+        on_decision=lambda case, decision, response: recorded.append((case, decision, response)),
+    )
+    handler.register_worker("worker-1")
+    allowed = command_request(
+        command="/bin/zsh -lc \"sed -n '1,120p' README.md\"",
+        proposedExecpolicyAmendment=["sed", "-n", "1,120p", "README.md"],
+    )
+    assert await handler(allowed) == {"decision": "accept"}
+    assert judge.cases == []
+    case, decision, response = recorded[0]
+    assert decision.verdict == "approve_once"
+    assert decision.reason == "allowed by exec policy: range reads"
+    assert response == {"decision": "accept"}
+    assert case.request["proposedExecpolicyAmendment"] == ("sed", "-n", "1,120p", "README.md")
+
+    # The judge still sees everything else, including the same program used
+    # on a path outside the project.
+    escaped = command_request(command="/bin/zsh -lc \"sed -n '1,120p' ../other/README.md\"")
+    assert await handler(escaped) == {"decision": "decline"}
+    assert [case.request["command"] for case in judge.cases] == [escaped["params"]["command"]]
+
+
+def test_worker_permissions_declare_an_exec_policy_path_without_loading_it():
+    permissions = WorkerPermissions.from_toml(
+        'approval_policy = "untrusted"\nexec_policy = "worker.rules"\n',
+        "operator/worker.permissions.toml",
+    )
+    assert permissions.exec_policy_path == "worker.rules"
+    assert permissions.exec_policy is None
+    assert not permissions.exec_policy_loaded
+    # The declared path is not part of the boundary digest; the loaded rules
+    # carry their own digest in provenance.
+    assert permissions.digest == WorkerPermissions(approval_policy="untrusted").digest
+    with pytest.raises(ValueError, match="exec_policy must be a string path"):
+        WorkerPermissions.from_toml("exec_policy = 7\n", "operator/worker.permissions.toml")
+    with pytest.raises(ValueError, match="must record its declared path"):
+        WorkerPermissions(exec_policy=_rules_policy())
+    with pytest.raises(ValueError, match="must be a loaded ExecPolicy"):
+        WorkerPermissions(exec_policy_path="worker.rules", exec_policy="not a policy")
+
+
+@pytest.mark.asyncio
+async def test_supervisor_refuses_a_declared_but_unloaded_exec_policy(tmp_path: Path):
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), StaticJudge())
+    with pytest.raises(ValueError, match="exec_policy is declared but no rules were loaded"):
+        JudgedSessionSupervisor(
+            FakeClient(), handler, tmp_path,
+            permissions=WorkerPermissions(source="operator", exec_policy_path="worker.rules"),
+        )

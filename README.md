@@ -119,6 +119,53 @@ Do not tell a worker to stage approval requests. Configure the boundary and let
 the worker's ordinary work meet it: with a self-contained task under
 `on-request`, nothing escalates and nothing is judged.
 
+Under `untrusted`, mundane project-local commands — range reads, searches, the
+project's own test and CLI entry points — would each cost a judge call. A
+permissions file may name an operator-owned rules file that the coordinator
+decides those by itself:
+
+```sh
+for NAME in project-a project-b; do
+  printf '%s\n' \
+    'prefix_rule(' \
+    '    pattern = ["sed", "-n"],' \
+    '    decision = "allow",' \
+    '    justification = "range reads of the project'"'"'s own files",' \
+    ')' \
+    'prefix_rule(' \
+    '    pattern = ["rg"],' \
+    '    decision = "allow",' \
+    '    justification = "searches within the project",' \
+    ')' \
+    'prefix_rule(' \
+    '    pattern = [["python", "python3"], "-m", "unittest"],' \
+    '    decision = "allow",' \
+    '    justification = "the project'"'"'s own supplied test suite",' \
+    ')' > "$COORD_DIR/$NAME.rules"
+  printf 'exec_policy = "%s.rules"\n' "$NAME" >> "$COORD_DIR/$NAME.permissions.toml"
+done
+```
+
+The file uses the `prefix_rule` syntax of Codex CLI 0.154.0's execpolicy, so
+`codex execpolicy check --rules "$COORD_DIR/project-a.rules" sed -n 1,5p README.md`
+lints it, but the Codex runtime never loads it: it must sit beside
+`operator.toml` under the same ownership rules as a constitution, a relative
+`exec_policy` resolves there, and the coordinator evaluates it before a request
+would reach a judge. A pattern is an argv prefix and a nested list is a set of
+alternatives; only `decision = "allow"` is accepted, because everything no rule
+allows already reaches a judge. The coordinator unwraps the shell wrapper the
+runtime adds, requires every command in a `&&`, `;`, `|`, newline, or
+`if … then exit 1; fi` chain to match a rule, requires every argument to stay
+inside the project, and sends anything it cannot fully parse to a judge. File
+changes always reach a judge. A rule admits every mode of the program it names
+within the project, so name only programs whose whole behavior there may go
+unjudged; do not add `find`, whose `-exec` runs an arbitrary program per match.
+A rules file that is missing, malformed, misplaced, or whose `match`/`not_match`
+examples do not hold fails startup, and each command decided this way is
+recorded as an `approval.allowed_by_policy` event naming the rule.
+See the checked-in [`inventory-app.rules`](examples/operator/inventory-app.rules)
+for a commented example.
+
 With `workspace-write`, each worker can edit only its own project; the
 coordinator disables worker network access. Choose `read-only` explicitly for
 inspection-only workers.
@@ -179,7 +226,7 @@ codex-coordinator-service --config "$COORD_DIR/operator.toml" --port 8765
 ```
 
 Preflight checks the CLI version and schema, sign-in, allowed roots, worker
-settings, and socket safety. `"socketReady": false` is normal if the default
+settings including each project's loaded rules file, and socket safety. `"socketReady": false` is normal if the default
 Codex app-server daemon has not started; the service starts it as needed.
 Preflight also reports which project constitutions are configured. Leave the
 service running
@@ -346,8 +393,9 @@ limits. Paths in the config must be absolute. A custom app-server socket must
 already have a private listener; the default socket is
 `~/.codex/app-server-control/app-server-control.sock`.
 
-Each declared `approval_policy` and `approvals_reviewer` is validated rather
-than trusted to expand authority, and every one of them is operator-owned.
+Each declared `approval_policy`, `approvals_reviewer`, and `exec_policy` is
+validated rather than trusted to expand authority, and every one of them is
+operator-owned.
 Every turn receives an explicit sandbox policy;
 for workspace-write, the canonical project is the only writable root, with
 network and ambient temporary-directory writes disabled. Approval evidence is
