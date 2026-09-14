@@ -23,6 +23,7 @@ import websockets
 from .coordinator import (
     ApprovalCase,
     ApprovalPolicy,
+    AssignmentLedger,
     Constitution,
     JudgeDecision,
     Judge,
@@ -204,6 +205,7 @@ class ApprovalBroker:
         self.item_capacity = item_capacity
         self.item_max_bytes = item_max_bytes
         self.registrations: dict[str, SessionRegistration] = {}
+        self.assignments = AssignmentLedger()
         self.items: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
         self.pending: dict[str, PendingApproval] = {}
         self.unmanaged_request_count = 0
@@ -242,6 +244,7 @@ class ApprovalBroker:
                 session_id=registration.session_id,
                 thread_id=registration.thread_id,
                 item=item,
+                assignment=self.assignments.current(registration.thread_id),
             )
         except ValueError as exc:
             self.events.emit(
@@ -281,6 +284,7 @@ class ApprovalBroker:
                 request=mutable_evidence(case.request),
                 declaredIntent=mutable_evidence(case.declared_intent),
                 enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
+                assignment=case.assignment_provenance,
                 response=response,
                 **extra,
             )
@@ -308,6 +312,9 @@ class ApprovalBroker:
             request=mutable_evidence(case.request),
             declaredIntent=mutable_evidence(case.declared_intent),
             enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
+            # What the judge was told the task was. The text itself is recorded
+            # once by the event that started the turn; the digest joins them.
+            assignment=case.assignment_provenance,
             policy=self._policy_provenance(registration.project),
             # Present only when an operator rule sent a case a containment rule
             # would otherwise have decided, so an audit can tell an escalated
@@ -430,6 +437,7 @@ class ApprovalBroker:
             response=response,
             declaredIntent=mutable_evidence(pending.case.declared_intent),
             enforcedCapabilities=mutable_evidence(pending.case.enforced_capabilities),
+            assignment=pending.case.assignment_provenance,
             policy=self._policy_provenance(pending.registration.project),
         )
         return response
@@ -618,6 +626,11 @@ class CoordinatorService:
         self.approvals.register(SessionRegistration(session_id, thread_id, str(project), policy))
         self.sessions[session_id] = session
         self.thread_sessions[thread_id] = session_id
+        # Before turn/start: an approval request from this turn must never
+        # reach a judge without the task it is meant to serve.
+        assignment = self.approvals.assignments.record(
+            thread_id, prompt, source="coordinator-api"
+        )
         try:
             turn_result = await self.client.call("turn/start", {
                 "threadId": thread_id,
@@ -636,6 +649,7 @@ class CoordinatorService:
             session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
         self.events.emit(
             "session.started", session=session.json(), prompt=prompt,
+            assignment=assignment.provenance(),
             workerPermissions=permissions.provenance(),
         )
         return session.json()
@@ -655,6 +669,9 @@ class CoordinatorService:
         self._refuse_project_rules(Path(session.project), session_id)
         session.state = "active"
         session.turn_id = None
+        assignment = self.approvals.assignments.record(
+            session.thread_id, prompt, source="coordinator-api"
+        )
         try:
             result = await self.client.call("turn/start", {
                 "threadId": session.thread_id,
@@ -671,7 +688,10 @@ class CoordinatorService:
         turn = (result or {}).get("turn", result or {})
         if session.state == "active":
             session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
-        self.events.emit("session.turn_started", session=session.json(), prompt=prompt)
+        self.events.emit(
+            "session.turn_started", session=session.json(), prompt=prompt,
+            assignment=assignment.provenance(),
+        )
         return session.json()
 
     async def cancel_session(self, session_id: str) -> dict[str, Any]:

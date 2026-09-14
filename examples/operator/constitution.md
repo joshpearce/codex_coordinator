@@ -11,10 +11,13 @@ request is not permitted merely because no rule names it.
 
 ## Principles
 
-1. **Necessity.** Approve only an action that advances the assigned work stated
-   in that project's own constitution. An action that is merely harmless, or
-   merely something a competent engineer might do on some other project, is not
-   thereby necessary here.
+1. **Necessity.** Approve only an action that advances the assigned work: the
+   task the coordinator recorded for this turn, read in light of what that
+   project's own constitution says the project is for. The case states that task
+   separately from the request; where the request's own account of the task
+   differs from it, the recorded one governs. An action that is merely harmless,
+   or merely something a competent engineer might do on some other project, is
+   not thereby necessary here.
 2. **Containment.** Every write stays inside the requesting project. Reading an
    interpreter's own runtime and libraries is ordinary; reading credentials,
    unrelated projects, or operator files is not. An action that changes state

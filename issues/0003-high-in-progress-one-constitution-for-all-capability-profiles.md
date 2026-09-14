@@ -63,10 +63,19 @@ work. Judge reasons cited the governing project's own text, for example
 approving a project-local read as "project-local and read-only, with no network
 access or dependency changes".
 
-Remaining: `make judge-gate` has not run, so no live run has yet shown a real
-judge reaching the right verdict on a request the constitutions deliberately do
-not name. The E2E exercised approvals only; every verdict was an approval,
-because honest work inside the constitution produces no denials.
+`make judge-gate` has since run, on 2026-09-14: 16 of 16 scenarios returned the
+catalogued verdict, 6 approvals and 10 denials, each decided by a principle on a
+request no constitution names. That covers what the live E2E could not — the
+E2E exercised approvals only, because honest work inside the constitution
+produces no denials.
+
+Both tiers were amended that same day for the per-turn task assignment (#0002):
+the overall document's necessity principle now names the recorded task as the
+subject of the test, and each project document says that a supplied path means
+one named in that record. The digests quoted above are of the text as it stood
+during the live E2E run, not of the current files.
+
+No remaining condition is outstanding.
 
 ## Why it matters
 
@@ -85,7 +94,8 @@ constrained worker.
 - Startup fails closed when a registered allowed root has no policy in a mode
   that requires one. **Done** — service mode always requires one.
 - `make judge-gate` passes: a real judge returns the catalogued verdict for every
-  scenario, including the two that differ only in which project asked.
+  scenario, including the two that differ only in which project asked. **Done** —
+  16 of 16 on 2026-09-14.
 - The live networked gate runs against a two-tier configuration and shows both
   children judged under a shared overall document and distinct project
   documents. **Done** — eight approvals across two children with the digests

@@ -102,6 +102,7 @@ def _approval_errors(service_log: Path) -> list[str]:
             )
 
     errors.extend(_policy_provenance_errors(matched))
+    errors.extend(_assignment_provenance_errors(matched, _events(service_log)))
     return errors
 
 
@@ -229,6 +230,51 @@ def _policy_provenance_errors(
     ] if project_digests else []
     if shared:
         errors.append("two projects were judged against the same project constitution")
+    return errors
+
+
+def _assignment_provenance_errors(
+    matched: list[tuple[dict[str, Any], dict[str, Any] | None]],
+    events: list[dict[str, Any]],
+) -> list[str]:
+    """Check that each judged request records the task it was judged against.
+
+    A judge applies a necessity test, so every approval must name the turn's
+    assignment, and that digest must belong to a prompt this run's coordinator
+    actually sent. An approval citing a digest no `session.started` or
+    `session.turn_started` event recorded would mean the descriptor came from
+    somewhere other than the coordination path (#0002).
+    """
+    errors: list[str] = []
+    sent: dict[str, set[str]] = {}
+    for event in events:
+        if event.get("type") not in {"session.started", "session.turn_started"}:
+            continue
+        assignment = event.get("assignment")
+        session = (event.get("session") or {}).get("id")
+        if isinstance(assignment, dict) and assignment.get("digest") and session:
+            sent.setdefault(str(session), set()).add(str(assignment["digest"]))
+    for request, resolution in matched:
+        approval_id = request.get("approvalId")
+        session = str(request.get("sessionId") or "")
+        for label, event in (("requested", request), ("resolved", resolution)):
+            if event is None:
+                continue
+            assignment = event.get("assignment")
+            if not isinstance(assignment, dict) or not assignment.get("digest"):
+                errors.append(
+                    f"approval.{label} {approval_id} records no task assignment; "
+                    "the judge was asked whether an action was necessary for an "
+                    "unstated task"
+                )
+                continue
+            if "text" in assignment:
+                errors.append(f"approval.{label} {approval_id} repeats the assignment text")
+            if str(assignment["digest"]) not in sent.get(session, set()):
+                errors.append(
+                    f"approval.{label} {approval_id} cites an assignment this run "
+                    f"never sent to session {session}"
+                )
     return errors
 
 

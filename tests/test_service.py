@@ -703,6 +703,87 @@ async def test_http_starts_session_with_immutable_registration_and_enforced_sand
 
 
 @pytest.mark.asyncio
+async def test_approval_events_record_what_the_judge_was_told_the_task_was(tmp_path: Path, capsys):
+    """Every judged request carries the descriptor's provenance for audit (#0002)."""
+
+    class FakeClient:
+        async def call(self, method, _params):
+            return {"thread": {"id": "thread-1"}} if method == "thread/start" else {"turn": {"id": "turn-1"}}
+
+    seen = []
+
+    class Judge:
+        async def decide(self, case):
+            seen.append(case)
+            return JudgeDecision("approve_once", "necessary for the assigned task")
+
+    events = EventLog()
+    broker = ApprovalBroker(events, judge=Judge())
+    project = tmp_path / "worker"
+    project.mkdir()
+    service = CoordinatorService(FakeClient(), broker, events, allowed_roots=(tmp_path,))
+    session = await service.start_session(str(project), "Implement the two functions marked TODO.")
+
+    assert await broker(command_request(thread="thread-1", cwd=str(project))) == {"decision": "accept"}
+    started = next(item for item in events.events if item["type"] == "session.started")
+    requested = next(item for item in events.events if item["type"] == "approval.requested")
+    resolved = next(item for item in events.events if item["type"] == "approval.resolved")
+
+    # The judge saw the coordinator's prompt, not the worker's account of it.
+    assert seen[0].assignment["text"] == "Implement the two functions marked TODO."
+    assert seen[0].assignment["source"] == "coordinator-api"
+    # The prompt's text is recorded once, by the event that started the turn;
+    # the approval carries the digest that joins the two.
+    assert started["prompt"] == "Implement the two functions marked TODO."
+    assert started["assignment"]["digest"] == seen[0].assignment["digest"]
+    for event in (requested, resolved):
+        assert event["assignment"] == started["assignment"]
+        assert "text" not in event["assignment"]
+        assert event["assignment"]["turn"] == 1
+
+    # A follow-up turn is a different assignment, distinguishable in the log.
+    service.sessions[session["id"]].state = "completed"
+    await service.send_message(session["id"], "The suite still fails on rounding; fix only that.")
+    assert await broker(command_request(thread="thread-1", cwd=str(project))) == {"decision": "accept"}
+    follow_up = [item for item in events.events if item["type"] == "approval.requested"][-1]
+    turn_started = next(item for item in events.events if item["type"] == "session.turn_started")
+
+    assert seen[1].assignment["text"] == "The suite still fails on rounding; fix only that."
+    assert follow_up["assignment"]["turn"] == 2
+    assert follow_up["assignment"]["digest"] == turn_started["assignment"]["digest"]
+    assert follow_up["assignment"]["digest"] != requested["assignment"]["digest"]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
+async def test_first_request_of_a_turn_cannot_precede_its_assignment(tmp_path: Path, capsys):
+    """The ledger is written before turn/start, so no request beats it there."""
+    ledgered = []
+
+    class FakeClient:
+        async def call(self, method, params):
+            if method == "turn/start":
+                ledgered.append(broker.assignments.current(params["threadId"]))
+                return {"turn": {"id": "turn-1"}}
+            return {"thread": {"id": "thread-1"}}
+
+    events = EventLog()
+    broker = ApprovalBroker(events)
+    project = tmp_path / "worker"
+    project.mkdir()
+    service = CoordinatorService(FakeClient(), broker, events, allowed_roots=(tmp_path,))
+    session = await service.start_session(str(project), "Implement the two functions marked TODO.")
+    service.sessions[session["id"]].state = "completed"
+    await service.send_message(session["id"], "Fix the rounding failure only.")
+
+    assert [assignment.turn for assignment in ledgered] == [1, 2]
+    assert [assignment.text for assignment in ledgered] == [
+        "Implement the two functions marked TODO.", "Fix the rounding failure only.",
+    ]
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
 async def test_duplicate_app_server_thread_id_does_not_rebind_existing_session(tmp_path: Path):
 
     class DuplicateThreadClient:

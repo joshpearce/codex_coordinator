@@ -294,6 +294,16 @@ invalid or unavailable verdicts are denied. Every `approval.requested` and
 `approval.resolved` event records the source path and digest of the two
 documents that judge was given.
 
+Each judge is also told what that worker was asked to do. The prompt you send
+with `POST /sessions` or `/sessions/{id}/messages` is recorded against the
+thread before its turn starts and reaches the judge as its own tier, separate
+from the worker's request: the constitutions test whether an action is
+necessary for the assigned task, and without it the only account of that task
+is the one the worker writes. Approvals record the prompt's turn number and
+digest rather than its text, which the turn's own `session.started` or
+`session.turn_started` event carries. So write session prompts as a statement
+of the turn's task; a vague prompt gives the judge a vague necessity test.
+
 ## Coordinate multiple projects
 
 The service can run multiple workers concurrently. In the configured `service`

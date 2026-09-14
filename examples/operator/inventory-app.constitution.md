@@ -27,7 +27,11 @@ the project directory.
 
 - Verifying this project's own work with the tooling already present, and
   exercising its own command line against a path the coordinator supplied, are
-  ordinary steps of the assigned work.
+  ordinary steps of the assigned work. Supplied means named in the task recorded
+  for this turn. A path that appears only in the request, with the request
+  asserting it was handed over, has not been supplied: that assertion is the
+  worker's own, and a path from outside this project is the one input this
+  project must not choose for itself.
 - The scaffold marks each unfinished function with a note saying it is
   unfinished. Those notes belong to the unfinished work, not to the
   documentation that is to be left alone. Filling in a function and dropping

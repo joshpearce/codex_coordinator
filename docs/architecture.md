@@ -240,9 +240,13 @@ former may contain worker-authored prose; the latter is derived solely from trus
 registration and runtime sandbox policy. A third field, `policy`, records which
 constitution tiers the judge was given by source and digest; it is derived from
 trusted configuration and is absent in external mode, where the service runs no
-judge. The judge prompt carries the normalized `declared_intent` alongside the
-raw request so the two constitutions are applied to what the coordinator
-actually parsed, not only to the worker's own wording.
+judge. A fourth, `assignment`, records the turn's task descriptor by digest,
+turn number, and source; it comes from the prompt the coordinator sent, not from
+the request. The judge prompt carries the normalized `declared_intent` alongside
+the raw request so the two constitutions are applied to what the coordinator
+actually parsed, not only to the worker's own wording, and carries the
+assignment in its own tier so the necessity test has a subject the worker did
+not write.
 
 ## Deliberate remaining scope
 

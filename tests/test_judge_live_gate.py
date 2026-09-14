@@ -109,6 +109,16 @@ def test_each_scenario_normalizes_and_reaches_the_judge_with_its_own_policy():
         assert case.declared_intent["reason"] == scenario.reason
         assert Path(case.project).name == scenario.project
 
+        # The descriptor reaches the judge, and the request cannot carry one:
+        # it comes from the ledger the coordination path writes.
+        assignment = gate.assignment_for(scenario)
+        assert case.assignment["text"] == assignment
+        # A scenario carrying its own assignment is a follow-up turn, recorded
+        # after the goal prompt that opened the session.
+        assert case.assignment["digest"]
+        assert case.assignment["turn"] == (1 if scenario.assignment is None else 2)
+        assert "assignment" not in case.request
+
         policy = constitution.trusted_policy(case.project)
         expected = constitution.projects[gate.governed_projects()[scenario.project]]
         assert policy["project_constitution"]["text"] == expected.text
@@ -121,6 +131,39 @@ def test_each_scenario_normalizes_and_reaches_the_judge_with_its_own_policy():
         ]
         rendered = json.dumps(policy)
         assert all(text not in rendered for text in others)
+
+
+def test_catalogue_pairs_one_command_against_two_assignments():
+    """The gate must contain a case that only the task descriptor decides.
+
+    Without it, the live gate could pass while the judge ignored the
+    assignment entirely and read necessity out of the worker's own reason.
+    """
+    by_command: dict[str, list] = {}
+    for scenario in gate.SCENARIOS:
+        by_command.setdefault(scenario.command, []).append(scenario)
+    pairs = [
+        scenarios for scenarios in by_command.values()
+        if len({scenario.expected for scenario in scenarios}) > 1
+    ]
+    assert pairs, "no scenario pair differs only in its assignment"
+    for scenarios in pairs:
+        assert len({scenario.project for scenario in scenarios}) == 1
+        assert len({scenario.reason for scenario in scenarios}) == 1
+        # Every other input is identical, so the constitutions, the ceiling and
+        # the worker's evidence cannot be what separates the verdicts.
+        assert len({gate.assignment_for(scenario) for scenario in scenarios}) == len(scenarios)
+
+    # What separates them is whether the task names the work the command does.
+    # The denied side's assignment must not simply forbid the command: the judge
+    # has to find the action unnecessary, not prohibited.
+    for scenarios in pairs:
+        for scenario in scenarios:
+            named = any(
+                token.lower() in gate.assignment_for(scenario).lower()
+                for token in scenario.distinctive
+            )
+            assert named is (scenario.expected == "approve_once"), scenario.name
 
 
 @pytest.mark.asyncio
@@ -141,17 +184,25 @@ async def test_live_judge_gate_reports_every_scenario_that_disagrees(monkeypatch
 
 @pytest.mark.asyncio
 async def test_live_judge_gate_passes_when_every_verdict_matches(monkeypatch, capsys):
-    expectations = {scenario.command: scenario.expected for scenario in gate.SCENARIOS}
+    expectations = {
+        (scenario.command, gate.assignment_for(scenario)): scenario.expected
+        for scenario in gate.SCENARIOS
+    }
+    assert len(expectations) == len(gate.SCENARIOS)
 
     async def obedient(prompt):
-        command = json.loads(prompt)["untrusted_evidence"]["request"]["command"]
-        return json.dumps({"verdict": expectations[command], "reason": "per constitution"})
+        case = json.loads(prompt)
+        command = case["untrusted_evidence"]["request"]["command"]
+        assignment = case["assignment"]["text"]
+        return json.dumps(
+            {"verdict": expectations[(command, assignment)], "reason": "per constitution"}
+        )
 
     monkeypatch.setattr(gate, "codex_exec_json_runner", obedient)
     await gate.main()
     output = capsys.readouterr().out
     assert '"liveJudgeGate": "passed"' in output
-    assert '"scenarios": 14' in output
+    assert '"scenarios": 16' in output
     assert "FAIL" not in output
 
 

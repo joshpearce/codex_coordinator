@@ -74,6 +74,63 @@ holds a catalogue of realistic requests the constitutions deliberately do not
 name, and a unit test fails if any of those requests later appears verbatim in a
 policy document.
 
+## The judge is told what the worker was asked to do
+
+Both constitutions test necessity first: an action must be necessary for the
+task the child was assigned. Evaluating that needs a statement of the task, and
+the only candidates on the approval wire — `reason` and `command` — are written
+by the worker whose request is being judged. A compromised worker did not have
+to overrule the necessity rule; it supplied the evidence the rule was applied
+to (#0002).
+
+A judged case now carries a task assignment. It is the prompt the coordinator
+sent for that turn, recorded against the thread before `turn/start` is called,
+so the turn's first approval request already has one. Prompts are numbered per
+thread, so a follow-up turn replaces the previous turn's descriptor rather than
+adding to it. Three authorship tiers reach the judge, separated in the prompt:
+the operator's two constitutions, the coordinator's assignment, and the
+worker's own request evidence.
+
+A worker cannot author the descriptor it is judged against. The assignment
+never crosses the approval wire; it is read from a ledger the coordination path
+writes, and `ApprovalPolicy.normalize` rejects any request field it does not
+recognize, including one named `assignment`. A worker's `reason` is still
+recorded, still shown to the judge, and still only evidence.
+
+Judging fails closed without one. A judge asked to decide a case with no
+assignment denies it without invoking a model, the same way it denies a project
+no constitution governs: a necessity test with no stated task is not a test.
+
+The descriptor is not operator policy, and the judge is told so. The
+coordinating session composes prompts and may relay what a worker reported, so
+a worker can influence a *later* turn's assignment even though it cannot author
+the one it is judged under. That is why the assignment is a separate tier from
+the constitutions rather than folded into them, and it is one more reason the
+coordinator's own egress matters (#0007). The static half of the same question —
+what kind of worker this is, and what its standing purpose is — belongs to the
+per-project constitution.
+
+`approval.requested`, `approval.resolved`, and the by-policy decision events
+record the assignment's turn number, source, digest, and length, but not its
+text; the text is recorded once by the `session.started` or
+`session.turn_started` event that sent it, and the digest joins the two. A
+judge is shown the assignment's first 8192 characters — all the ledger keeps —
+with the digest and length of the whole and a flag when it was cut, so a very
+long prompt neither crowds out the policy tiers it is read beside nor sits in
+memory for the life of the session. The live E2E harness fails a run
+whose approvals carry no assignment, restate its text, or cite a digest no
+prompt in that run produced.
+
+Granularity is the turn. Every request in a turn is judged against that turn's
+assignment, so an injected instruction acted on halfway through a turn is
+judged against the task the turn began with — which is the point — but the
+descriptor cannot distinguish two actions within one turn. Requests are matched
+to an assignment by thread and turn order, not by the runtime's `turnId`, which
+is not known until `turn/start` returns and so cannot be recorded before the
+turn's first request may arrive. A request from an earlier turn arriving after
+a follow-up has started is therefore judged against the newer task; both turn
+numbers are on the record.
+
 ## Inside its project a worker acts by right
 
 A worker edits its own project the way a developer edits a checkout, and that
