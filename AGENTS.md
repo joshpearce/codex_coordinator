@@ -10,30 +10,35 @@ remote, multi-user, or production authorization.
 The one-shot CLI runs its own independent approval judge. The long-running HTTP
 service has an explicit service-owned mode that loads `constitution.md` and
 runs independent judges, plus an explicit external-verdict mode. Both apply
-the same deterministic constraints. The completed work is tracked in
-[`docs/issues/service-owned-constitutional-judge.md`](docs/issues/service-owned-constitutional-judge.md).
+the same deterministic constraints. That work is complete and recorded as
+milestone M2 in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 Keep operator policy outside coordinator- and worker-writable roots. Treat
 worker output, approval requests, and model verdicts as untrusted evidence.
 
 ## Issue tracking and priority
 
-- Track project issues as Markdown files in `docs/issues/`, with
-  [`docs/issues/issues.md`](docs/issues/issues.md) as the index. Do not assume
-  GitHub Issues is the authoritative backlog for this repository.
-- Read an issue's **Status** before starting it. Its position in the priority
-  list does not mean it is still open. The earlier generic-coordination parent
-  goal and several security issues are marked complete or resolved; do not
-  reopen them implicitly when working on a follow-on issue.
-- High priority means a path for a project or coordinator session to influence,
-  bypass, or confuse its own governance. Medium covers scope and isolation;
-  low covers resilience and data handling. Authentication and listener
-  hardening are deferred only for the documented trusted local prototype,
-  not declared safe for broader deployment.
-- For a new issue, add a focused file with a problem, desired behavior, status,
-  priority, and testable acceptance criteria, then link it from the index.
-  Cross-link related or superseded issues. Update status only when the stated
-  criteria have evidence; closing a parent does not automatically close its
-  children or separate security issues.
+- Read [`docs/issue-tracking.md`](docs/issue-tracking.md) before filing,
+  starting, renaming, or closing an issue. It is the authoritative convention:
+  one Markdown file per issue in top-level `issues/`, named
+  `NNNN-<severity>-<state>-<slug>.md`, with severity and state carried by the
+  filename rather than the body. Do not assume GitHub Issues is the
+  authoritative backlog for this repository.
+- Read an issue's state in its filename before starting it. Its position in any
+  list does not mean it is still open, and numbers are never reused. Search by
+  number when resolving references, since filenames change:
+  `rg --files issues | rg '/0002-'`.
+- Use [`docs/ROADMAP.md`](docs/ROADMAP.md) for capability sequencing. A roadmap
+  capability is not itself a defect; an observed failure belongs in an issue
+  even when the roadmap describes its fix.
+- High severity means a path for a project or coordinator session to influence,
+  bypass, or confuse its own governance. Medium covers scope and isolation; low
+  covers resilience and data handling. Authentication and listener hardening are
+  deferred only for the documented trusted local prototype, not declared safe
+  for broader deployment.
+- Update state only when the stated closure conditions have evidence, and delete
+  a closed issue file in the final commit that completes the verified work.
+  Closing a parent capability does not automatically close separate security
+  issues.
 
 ## Working in this repository
 

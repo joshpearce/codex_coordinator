@@ -307,7 +307,7 @@ includes fuller payloads with known secret-bearing fields redacted, but
 commands, diffs, and model output may still contain secrets. Use `umask 077`
 before redirecting logs and set your own retention policy. See the
 [security boundary](docs/security.md), [lifecycle contract](docs/lifecycle.md),
-and [open security issues](docs/issues/issues.md) before connecting sensitive
+and [open security issues](issues/) before connecting sensitive
 projects. A caller-supplied Python judge needs its own isolation.
 
 ## Development and verification
