@@ -41,6 +41,17 @@ def _schema_fixture(root: Path):
                 "properties": {"threadId": {}, "turnId": {}},
                 "required": ["threadId", "turnId"],
             },
+            "AskForApproval": {
+                "oneOf": [
+                    {"enum": ["untrusted", "on-request", "never"], "type": "string"},
+                    {"properties": {"granular": {"properties": {
+                        key: {"type": "boolean"} for key in (
+                            "mcp_elicitations", "request_permissions", "rules",
+                            "sandbox_approval", "skill_approval",
+                        )
+                    }}}},
+                ],
+            },
         },
     }
     approvals = (
@@ -202,3 +213,43 @@ def test_missing_and_unsupported_codex_are_actionable(monkeypatch):
     )
     with pytest.raises(CodexCompatibilityError, match="not verified"):
         check_codex_compatibility()
+
+
+def test_schema_gate_flags_a_new_approval_policy(tmp_path: Path):
+    """A CLI that gains a way to decide what it escalates must be re-examined.
+
+    The coordinator answers in-project file-change approvals itself only
+    because no policy here separates them from commands (#0018). A new policy,
+    or a new granular category, may remove that need, so it fails the gate
+    rather than passing silently into an upgrade.
+    """
+    documents = _schema_fixture(tmp_path)
+    approval = documents["ClientRequest.json"]["definitions"]["AskForApproval"]
+    approval["oneOf"][0]["enum"].append("on-file-change")
+    (tmp_path / "ClientRequest.json").write_text(json.dumps(documents["ClientRequest.json"]))
+    with pytest.raises(CodexCompatibilityError, match="approval policies changed"):
+        check_protocol_schema(tmp_path)
+
+    granular_root = tmp_path / "granular"
+    granular_root.mkdir()
+    documents = _schema_fixture(granular_root)
+    approval = documents["ClientRequest.json"]["definitions"]["AskForApproval"]
+    approval["oneOf"][1]["properties"]["granular"]["properties"]["file_changes"] = {
+        "type": "boolean",
+    }
+    (granular_root / "ClientRequest.json").write_text(
+        json.dumps(documents["ClientRequest.json"])
+    )
+    with pytest.raises(CodexCompatibilityError, match="granular approval categories changed"):
+        check_protocol_schema(granular_root)
+
+
+def test_schema_gate_flags_a_removed_approval_policy(tmp_path: Path):
+    """untrusted is the only wire policy that escalates without asking a worker."""
+    documents = _schema_fixture(tmp_path)
+    documents["ClientRequest.json"]["definitions"]["AskForApproval"]["oneOf"][0][
+        "enum"
+    ].remove("untrusted")
+    (tmp_path / "ClientRequest.json").write_text(json.dumps(documents["ClientRequest.json"]))
+    with pytest.raises(CodexCompatibilityError, match="approval policies changed"):
+        check_protocol_schema(tmp_path)

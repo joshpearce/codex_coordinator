@@ -106,6 +106,38 @@ there is no write authority to approve, and the misleading
 refuse every write and deadlocked such workers — is never shown to a judge for a
 file change at all.
 
+### Why this is decided here rather than configured in the runtime
+
+Answering a question the runtime asks is reviewer policy; deciding what the
+runtime may do is its permission system. The line matters, because every rule
+this codebase evaluates itself is a rule that can drift from what the runtime
+actually enforces. The reason the containment decision lives here is that the
+pinned CLI has no setting that stops the question being asked. Its complete
+wire approval vocabulary, read from the generated schema, is:
+
+```
+AskForApproval = "untrusted" | "on-request" | "never"
+               | {granular: {mcp_elicitations, request_permissions, rules,
+                             sandbox_approval, skill_approval}}
+```
+
+None of those separates an in-project file change from a command. `untrusted`
+raises an approval before both; `on-request` leaves the decision to the worker,
+so a worker that never asks is never judged; `never` executes unjudged; and
+`granular` has no file-change category and was observed letting an unmatched
+command run with no approval at all. Codex's rule language offers no help
+either: `prefix_rule`, `network_rule`, and `host_executable` are the whole
+vocabulary, and none of them is path-shaped. So a reviewer must answer file
+changes one way or another, and answering them from the boundary already
+configured is the narrowest available answer.
+
+This is tracked as issue #0018 rather than settled, and `compatibility.py`
+asserts both sets above, so a CLI that adds an approval policy or a granular
+category fails the startup gate and sends an operator back to that issue
+instead of silently keeping logic the runtime could now carry. The same
+reasoning, with its own probe evidence, is why the coordinator evaluates
+command rules itself rather than handing them to the runtime; see below.
+
 The single exception is opt-in and operator-owned. A `prefix_rule` in the
 project's execpolicy rules file whose program is the reserved
 `codex-coordinator-file-change` and whose decision is `prompt` names
@@ -149,8 +181,13 @@ contents are never read: presence is the finding. The service emits
 with HTTP 400 carrying the same text, and `codex-coordinator-preflight` reports
 it when validating a project. The check applies to worker roots only; the
 coordinator's own project and the operator directory are not worker roots and
-are not scanned. If a later pinned CLI offers an app-server or per-thread switch
-to ignore project rules, the refusal stays until that switch is proven live.
+are not scanned. The refusal is blunt on purpose: it denies a session to a
+project that may have legitimate reasons to carry rules, because the
+coordinator cannot tell the legitimate ones from the widening ones without
+reading a file it has decided not to trust. If a later pinned CLI offers an
+app-server or per-thread switch to ignore project rules, the coordinator sets
+it and asserts it loaded, and the refusal stays until that switch is proven
+live. That follow-up is tracked as issue #0019.
 
 ## Commands decided by operator rule rather than by a judge
 

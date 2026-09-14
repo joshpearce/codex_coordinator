@@ -118,6 +118,16 @@ authority to approve, and the misleading `filesystemWriteRoots: []` ceiling is
 never shown to a judge for a file change. The one exception that reaches a judge
 is an operator escalation rule (below).
 
+This step is provisional, and issue #0018 tracks removing it. It exists only
+because the pinned CLI has no approval policy that separates an in-project file
+change from a command — `untrusted` raises both, `on-request` leaves the
+decision to the worker, `never` executes unjudged, and `granular` has no
+file-change category — so a reviewer has to answer the question one way or
+another. `compatibility.py` asserts the complete approval-policy and granular
+category sets, so a CLI that gains such a policy fails the startup gate rather
+than leaving this logic in place unexamined. The reasoning is recorded in
+`docs/security.md`.
+
 ## Deterministic allow for mundane project-local commands
 
 For commands, `decide_by_code` delegates to
@@ -184,7 +194,10 @@ it again before every `turn/start` on an existing thread, and
 emits `session.project_rules_refused` naming the path and answers
 `POST /sessions` with HTTP 400 carrying the same text. The rule is about worker
 roots only; the coordinator's own project and the operator directory are not
-worker roots and are not scanned.
+worker roots and are not scanned. Like the file-change step above, the refusal
+is provisional: it is the only remedy the pinned CLI allows, and issue #0019
+tracks replacing it with a per-thread ignore switch once one exists and is
+proven live.
 
 ## Two-tier constitution
 

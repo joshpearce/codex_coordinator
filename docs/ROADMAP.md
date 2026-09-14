@@ -21,8 +21,15 @@ issue files were deleted on verification; the evidence is in Git history.
 Within M4, the file-change split and the project-rules refusal are complete:
 inside its project a worker acts by right under the sandbox, a judge decides
 what leaves it, and a project containing Codex rules of its own is refused a
-session. Their remaining M4 siblings — restricted judge reads (#0006), narrowed
-coordinator egress (#0007), and allowed-root hardening (#0005) — are open.
+session. Both were built around gaps in the pinned Codex CLI rather than around
+a permanent design, and both should shrink when the CLI closes those gaps: the
+coordinator answers file-change approvals only because no approval policy
+separates them from commands (#0018), and refuses whole projects only because
+no switch makes the runtime ignore their rules (#0019). The compatibility gate
+asserts the approval vocabulary that makes the first one necessary, so a CLI
+upgrade re-asks the question instead of inheriting the answer. Their remaining
+M4 siblings — restricted judge reads (#0006), narrowed coordinator egress
+(#0007), and allowed-root hardening (#0005) — are open.
 
 M3 is the current milestone. The two-tier constitution (#0003) is implemented
 and covered offline: the overall document is a ceiling every project inherits,

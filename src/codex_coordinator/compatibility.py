@@ -43,6 +43,46 @@ def _method(schema: dict[str, Any], name: str, ref: str) -> None:
     _required(match, {"method", "params"}, name)
 
 
+#: The complete set of approval policies the pinned CLI accepts on the wire,
+#: and the complete set of categories ``granular`` can be told to ask about.
+#: Neither separates an in-project file change from a command, which is why
+#: the coordinator answers file-change approvals itself rather than
+#: configuring the runtime not to raise them (issue #0018). This is asserted
+#: rather than merely documented so that a CLI upgrade adding a policy or a
+#: category fails the gate and sends someone back to that issue.
+WIRE_APPROVAL_POLICIES = frozenset({"untrusted", "on-request", "never"})
+GRANULAR_APPROVAL_CATEGORIES = frozenset({
+    "mcp_elicitations", "request_permissions", "rules", "sandbox_approval",
+    "skill_approval",
+})
+
+
+def _approval_policies(definition: dict[str, Any]) -> None:
+    """Fail if the runtime gained or lost a way to decide what it escalates."""
+    plain: set[str] = set()
+    granular: set[str] | None = None
+    for variant in definition.get("oneOf", []):
+        plain.update(variant.get("enum", []))
+        properties = variant.get("properties", {}).get("granular", {}).get("properties")
+        if isinstance(properties, dict):
+            granular = set(properties)
+    if plain != set(WIRE_APPROVAL_POLICIES):
+        raise CodexCompatibilityError(
+            "Codex approval policies changed: expected "
+            f"{sorted(WIRE_APPROVAL_POLICIES)}, found {sorted(plain)}. Re-read issue "
+            "#0018 before adopting this CLI; a new policy may remove the need for the "
+            "coordinator to decide in-project file changes itself."
+        )
+    if granular is None or granular != set(GRANULAR_APPROVAL_CATEGORIES):
+        raise CodexCompatibilityError(
+            "Codex granular approval categories changed: expected "
+            f"{sorted(GRANULAR_APPROVAL_CATEGORIES)}, found "
+            f"{sorted(granular) if granular is not None else 'no granular variant'}. "
+            "Re-read issue #0018 before adopting this CLI; a file-change category "
+            "would remove the need for the coordinator to decide those itself."
+        )
+
+
 def _decisions(definition: dict[str, Any], expected: set[str], context: str) -> None:
     found = {
         value for item in definition.get("oneOf", [])
@@ -89,6 +129,7 @@ def _check_protocol_schema(schema_dir: Path) -> None:
         "turn/start",
     )
     _required(requests["definitions"]["TurnStartParams"], {"threadId", "input"}, "turn/start")
+    _approval_policies(requests["definitions"]["AskForApproval"])
     _properties(requests["definitions"]["TurnInterruptParams"], {"threadId", "turnId"}, "turn/interrupt")
     _required(requests["definitions"]["TurnInterruptParams"], {"threadId", "turnId"}, "turn/interrupt")
     v2 = bundle["definitions"]["v2"]
