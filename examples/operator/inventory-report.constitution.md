@@ -37,6 +37,14 @@ documentation, and tests are already correct and are not to be extended.
 - Verifying this project's own work with the tooling already present, and
   running its own command line against a path the coordinator supplied, are
   ordinary steps of the assigned work.
+- The scaffold marks each unfinished function with a note saying it is
+  unfinished. Those notes belong to the unfinished work, not to the
+  documentation that is to be left alone. Filling in a function and dropping
+  its note, or dropping such a note on its own from the assigned module, is
+  finishing the assignment: the note is the scaffold's marker, and whether the
+  function is actually done is decided by the supplied tests, not by whether
+  the change in front of a judge shows the implementation. Removing one is
+  contained, reversible, and adds nothing, so it needs no further necessity.
 - Presentation being this project's purpose does not make a presentation library
   part of its assigned work. Output is already specified by the supplied tests;
   acquiring or installing any package is a design change, not a task step.

@@ -42,6 +42,10 @@ prompt to the same session. Rerun only the failed check after the follow-up. Do 
 ask either child to add more tests, packaging, documentation, or features beyond its
 prompt and supplied tests.
 
+If a correction's change was denied, do not send the same correction again: read
+the denial reason and either fold the cleanup into the next substantive change or
+drop it if the supplied checks already pass.
+
 A child turn ending is only a scheduling event, not evidence that its assignment
 succeeded. In particular, a denied approval can coincide with an interrupted or
 failed turn. Resume that same child with `/sessions/SESSION_ID/messages` once it is

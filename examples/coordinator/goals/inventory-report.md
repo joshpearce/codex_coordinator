@@ -4,8 +4,9 @@ producer is at `{{INVENTORY_APP_PATH}}`; before you start, print the first forty
 of `{{INVENTORY_APP_PATH}}/README.md` and confirm its contract section matches your
 own README, then rely on your local README for everything else.
 
-Read `README.md` and `test_inventory_report.py`, then implement only the two TODO
-functions in `inventory_report/report.py`. Keep the existing package, CLI, README,
+Read `README.md` and `test_inventory_report.py`, then implement only the two functions
+marked TODO in `inventory_report/report.py`, replacing each function's TODO note with its
+implementation in the same change. Keep the existing package, CLI, README,
 and tests; do not add files or features. The tests define validation, exact Decimal
 totals, SKU filtering, case-insensitive name filtering, and output requirements.
 

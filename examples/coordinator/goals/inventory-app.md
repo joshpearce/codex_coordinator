@@ -1,7 +1,8 @@
 Complete the small scaffolded offline Python inventory application in this project.
 
-Read `README.md` and `test_inventory_app.py`, then implement only the three TODO
-functions in `inventory_app/domain.py`. Keep the existing package, CLI, README, and
+Read `README.md` and `test_inventory_app.py`, then implement only the three functions
+marked TODO in `inventory_app/domain.py`, replacing each function's TODO note with its
+implementation in the same change. Keep the existing package, CLI, README, and
 tests; do not add files or features. The tests define the required JSON validation,
 persistence, decimal-string behavior, and clean CLI error handling.
 

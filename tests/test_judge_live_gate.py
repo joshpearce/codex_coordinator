@@ -151,7 +151,7 @@ async def test_live_judge_gate_passes_when_every_verdict_matches(monkeypatch, ca
     await gate.main()
     output = capsys.readouterr().out
     assert '"liveJudgeGate": "passed"' in output
-    assert '"scenarios": 12' in output
+    assert '"scenarios": 14' in output
     assert "FAIL" not in output
 
 
