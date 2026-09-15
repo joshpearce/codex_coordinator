@@ -28,8 +28,15 @@ Worker projects must not be told that judging exists: what reaches a judge is
 decided by each project's operator-owned permissions file and its actual task,
 never by instructing a worker to stage approval requests. A worker project holds
 no Codex configuration of its own; its boundary is declared beside
-`operator.toml`, outside every root a worker can write. A constitution states
-principles and capability profiles, never a list of allowed or blocked commands;
+`operator.toml`, outside every root a worker can write. That declaration names a
+permission profile, and the profile itself lives in the operator's Codex home
+(`codex_home`), held to the same ownership and location rules. The legacy
+`sandbox` literal is not sent: it detaches a thread from the profile system and
+leaves the boundary with no provenance. See `docs/architecture.md` for the model
+and `src/codex_coordinator/profiles.py` for the configurations that are refused
+at startup because the runtime accepts them and under-enforces them.
+A constitution states principles and capability profiles, never a list of
+allowed or blocked commands;
 `tests/test_judge_live_gate.py` fails if a catalogued request is named verbatim
 in a policy document. Commands are named only in a project's operator-owned
 execpolicy rules file (`exec_policy` in its permissions file), which the

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from support import codex_home, read_only_profile, started_thread, worker_profile
 from codex_coordinator.coordinator import (
     ApprovalPolicy,
     Constitution,
@@ -64,6 +65,10 @@ def file_request(thread="worker-1"):
 
 
 def register(broker, project: Path, thread="worker-1", session="session-1", **policy_args):
+    # A registration carries the resolved boundary, not a mode string: deciding
+    # an in-project file change needs to know whether the project is writable
+    # at all, and under a profile that is a property of the resolved chain.
+    policy_args.setdefault("profile", worker_profile())
     policy = ApprovalPolicy(project, **policy_args)
     broker.register(SessionRegistration(session, thread, str(project.resolve()), policy))
 
@@ -669,13 +674,16 @@ async def test_managed_summary_injection_is_event_data_not_policy(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_http_starts_session_with_immutable_registration_and_enforced_sandbox(tmp_path: Path, capsys):
+async def test_http_starts_session_with_immutable_registration_and_a_named_boundary(tmp_path: Path, capsys):
 
     class FakeClient:
         def __init__(self): self.calls = []
         async def call(self, method, params):
             self.calls.append((method, params))
-            return {"thread": {"id": "thread-1"}} if method == "thread/start" else {"turn": {"id": "turn-1"}}
+            return (
+                started_thread(params, "thread-1") if method == "thread/start"
+                else {"turn": {"id": "turn-1"}}
+            )
 
     events = EventLog()
     broker = ApprovalBroker(events)
@@ -687,17 +695,25 @@ async def test_http_starts_session_with_immutable_registration_and_enforced_sand
     registration = broker.registrations["thread-1"]
     assert registration.session_id == session["id"]
     assert registration.project == str(tmp_path.resolve())
-    sandbox = client.calls[1][1]["sandboxPolicy"]
-    assert "reasoningEffort" not in client.calls[0][1]
-    assert "historyMode" not in client.calls[0][1]
+    start = client.calls[0][1]
+    assert "reasoningEffort" not in start
+    assert "historyMode" not in start
+    # The boundary is a profile id, and never the legacy literal beside it: the
+    # two are mutually exclusive, and the literal reports no provenance.
+    assert start["permissions"] == ":read-only"
+    assert "sandbox" not in start
     assert client.calls[1][1]["effort"] == "low"
-    assert list(sandbox["writableRoots"]) == [str(tmp_path.resolve())]
-    assert sandbox["excludeTmpdirEnvVar"] is True
-    assert sandbox["excludeSlashTmp"] is True
-    # Every later turn replays the boundary captured at registration.
+    assert "sandboxPolicy" not in client.calls[1][1]
+    # The session records what it asked for and what the runtime selected.
+    assert session["permissionProfile"] == ":read-only"
+    assert session["activePermissionProfile"] == {
+        "id": ":read-only", "extends": ":workspace",
+    }
+    # Thread state is sticky, so a later turn reasserts no boundary at all.
     service.sessions[session["id"]].state = "completed"
     await service.send_message(session["id"], "Continue")
-    assert client.calls[-1][1]["sandboxPolicy"] == sandbox
+    assert "sandboxPolicy" not in client.calls[-1][1]
+    assert "permissions" not in client.calls[-1][1]
     assert client.calls[-1][1]["effort"] == "low"
     capsys.readouterr()
 
@@ -707,8 +723,11 @@ async def test_approval_events_record_what_the_judge_was_told_the_task_was(tmp_p
     """Every judged request carries the descriptor's provenance for audit (#0002)."""
 
     class FakeClient:
-        async def call(self, method, _params):
-            return {"thread": {"id": "thread-1"}} if method == "thread/start" else {"turn": {"id": "turn-1"}}
+        async def call(self, method, params):
+            return (
+                started_thread(params, "thread-1") if method == "thread/start"
+                else {"turn": {"id": "turn-1"}}
+            )
 
     seen = []
 
@@ -765,7 +784,7 @@ async def test_first_request_of_a_turn_cannot_precede_its_assignment(tmp_path: P
             if method == "turn/start":
                 ledgered.append(broker.assignments.current(params["threadId"]))
                 return {"turn": {"id": "turn-1"}}
-            return {"thread": {"id": "thread-1"}}
+            return started_thread(params, "thread-1")
 
     events = EventLog()
     broker = ApprovalBroker(events)
@@ -790,9 +809,12 @@ async def test_duplicate_app_server_thread_id_does_not_rebind_existing_session(t
         def __init__(self):
             self.methods = []
 
-        async def call(self, method, _params):
+        async def call(self, method, params):
             self.methods.append(method)
-            return {"thread": {"id": "thread-1"}} if method == "thread/start" else {"turn": {"id": "turn-1"}}
+            return (
+                started_thread(params, "thread-1") if method == "thread/start"
+                else {"turn": {"id": "turn-1"}}
+            )
 
     events = EventLog()
     broker = ApprovalBroker(events)
@@ -814,9 +836,9 @@ async def test_duplicate_app_server_thread_id_does_not_rebind_existing_session(t
 async def test_invalid_app_server_thread_id_is_not_registered(tmp_path: Path, thread_id):
 
     class InvalidThreadClient:
-        async def call(self, method, _params):
+        async def call(self, method, params):
             assert method == "thread/start"
-            return {"thread": {"id": thread_id}}
+            return started_thread(params, thread_id)
 
     events = EventLog()
     broker = ApprovalBroker(events)
@@ -864,7 +886,7 @@ async def test_worker_owned_config_is_never_read_for_a_session(tmp_path: Path, c
     project = tmp_path / "worker"
     project.mkdir()
     declared = WorkerPermissions(
-        approval_policy="untrusted", sandbox_mode="read-only",
+        approval_policy="untrusted", permission_profile=":read-only",
         source="operator/worker.permissions.toml",
     )
     events = EventLog()
@@ -879,7 +901,7 @@ async def test_worker_owned_config_is_never_read_for_a_session(tmp_path: Path, c
     (project / ".codex/config.toml").write_text(
         'approval_policy = "never"\n'
         'approvals_reviewer = "auto_review"\n'
-        'sandbox_mode = "workspace-write"\n'
+        'permission_profile = ":danger-full-access"\n'
     )
     (project / ".codex/config.toml").chmod(0o666)
     second = await service.start_session(str(project), "Build again")
@@ -887,11 +909,9 @@ async def test_worker_owned_config_is_never_read_for_a_session(tmp_path: Path, c
     starts = [params for method, params in client.calls if method == "thread/start"]
     turns = [params for method, params in client.calls if method == "turn/start"]
     assert [start["approvalPolicy"] for start in starts] == ["untrusted", "untrusted"]
-    assert [start["sandbox"] for start in starts] == ["read-only", "read-only"]
-    assert all(
-        turn["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False}
-        for turn in turns
-    )
+    assert [start["permissions"] for start in starts] == [":read-only", ":read-only"]
+    assert not any("sandbox" in start for start in starts)
+    assert not any("sandboxPolicy" in turn or "permissions" in turn for turn in turns)
     # Both registrations record the boundary they were derived from, so an
     # audit can show that nothing changed between the two sessions.
     started = [event for event in events.events if event["type"] == "session.started"]
@@ -925,9 +945,9 @@ async def test_service_uses_trusted_project_permission_ceiling(tmp_path: Path):
     ceiling = {"fileSystem": {"read": [str(first), str(second)]}}
 
     class FakeClient:
-        async def call(self, method, _params):
+        async def call(self, method, params):
             if method == "thread/start":
-                return {"thread": {"id": "worker-1"}}
+                return started_thread(params, "worker-1")
             return {"turn": {"id": "turn-1"}}
 
     events = EventLog()
@@ -991,9 +1011,9 @@ async def test_early_completion_does_not_get_overwritten_by_turn_response(tmp_pa
     class EarlyClient:
         turns = 0
 
-        async def call(self, method, _params):
+        async def call(self, method, params):
             if method == "thread/start":
-                return {"thread": {"id": "thread-1"}}
+                return started_thread(params, "thread-1")
             self.turns += 1
             turn_id = f"turn-{self.turns}"
             await service_ref.notification({
@@ -1584,6 +1604,7 @@ async def test_service_startup_wires_snapshotted_constitution_to_judge(monkeypat
     assert captured["runner"].keywords == {
         "codex_command": config.codex_command,
         "timeout_seconds": config.judge_timeout_seconds,
+        "codex_home": None,
     }
 
 
@@ -1641,7 +1662,7 @@ class _StartClient:
         self.calls.append((method, params))
         if method == "thread/start":
             self.threads += 1
-            return {"thread": {"id": f"thread-{self.threads}"}}
+            return started_thread(params, f"thread-{self.threads}")
         return {"turn": {"id": "turn-1"}}
 
 
@@ -1816,7 +1837,7 @@ async def test_worker_boundary_comes_from_operator_declarations(tmp_path: Path, 
     await service.start_session(str(project), "Build")
     assert client.calls[0][0] == "thread/start"
     assert client.calls[0][1]["approvalPolicy"] == "untrusted"
-    assert client.calls[0][1]["sandbox"] == "workspace-write"
+    assert client.calls[0][1]["permissions"] == ":read-only"
 
     # A project declaration is the more specific statement and is what is sent.
     declared = CoordinatorService(
@@ -1824,14 +1845,14 @@ async def test_worker_boundary_comes_from_operator_declarations(tmp_path: Path, 
         allowed_roots=(tmp_path,), worker_approval_policy="untrusted",
         worker_permissions={
             project: WorkerPermissions(
-                approval_policy="on-request", sandbox_mode="read-only",
-                source="operator/worker.permissions.toml",
+                approval_policy="on-request", permission_profile=worker_profile().id,
+                profile=worker_profile(), source="operator/worker.permissions.toml",
             ),
         },
     )
     await declared.start_session(str(project), "Build")
     assert declared.client.calls[0][1]["approvalPolicy"] == "on-request"
-    assert declared.client.calls[0][1]["sandbox"] == "read-only"
+    assert declared.client.calls[0][1]["permissions"] == worker_profile().id
 
     # With nothing declared at all, the built-in default still keeps a judge in
     # the loop.
@@ -2122,7 +2143,7 @@ async def test_read_only_project_patch_is_declined_without_a_judge(tmp_path: Pat
     project.mkdir()
     events = EventLog()
     broker = ApprovalBroker(events, judge=Judge())
-    register(broker, project, sandbox_mode="read-only")
+    register(broker, project, profile=read_only_profile())
     broker.items[("worker-1", "turn-1", "change-1")] = {
         "id": "change-1", "type": "fileChange", "changes": [{"path": "domain.py"}],
     }
@@ -2260,7 +2281,9 @@ async def test_a_project_without_codex_rules_is_unaffected(tmp_path: Path, capsy
     (project / ".codex").mkdir(parents=True)
     # A worker project holds no Codex configuration in the supported setup, but
     # the refusal is about rules the runtime loads, not about the directory.
-    (project / ".codex/config.toml").write_text('sandbox_mode = "workspace-write"\n')
+    (project / ".codex/config.toml").write_text(
+        'permission_profile = ":danger-full-access"\n'
+    )
     (project / "notes.rules").write_text("not under .codex\n")
     events = EventLog()
     service = CoordinatorService(

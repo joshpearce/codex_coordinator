@@ -24,3 +24,27 @@ python -m inventory_app --file inventory.json add SKU-100 "Coffee Beans" 3 12.34
 python -m inventory_app --file inventory.json list
 python -m unittest -q
 ```
+
+## Dependencies
+
+This project declares its dependencies in two manifests. Restore them into an
+environment inside the project — that is the only directory a session here can
+write, so installing into the ambient interpreter is refused by the filesystem
+boundary rather than the network one:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install --no-cache-dir -r requirements.txt
+.venv/bin/python -m pip install --no-cache-dir -r requirements-dev.txt
+```
+
+`requirements.txt` names only PyPI packages, which this project's
+operator-declared network ceiling allows, so it restores. `requirements-dev.txt`
+names a tarball on a host that ceiling does not allow, so it is refused at the
+proxy. That is survivable: the supplied test suite needs nothing from either
+manifest.
+
+The manifests are not what grants the access. The operator records that in a
+permission profile outside every directory this project can write, and the
+sandbox enforces it; a change to either manifest is reviewed before it takes
+effect.

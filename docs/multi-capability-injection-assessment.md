@@ -112,7 +112,7 @@ than ignored.
 What that does not settle is what Codex CLI 0.154.0 itself honors from a
 `<cwd>/.codex/config.toml` when a thread runs with a worker project as its
 `cwd`. The three keys that decide the governance boundary are sent explicitly on
-the wire and the turn sandbox is sent on every `turn/start`, so those are not
+the wire and the thread's permission profile is verified at start, so those are not
 reachable from such a file; anything else the runtime reads from it is
 unenumerated.
 

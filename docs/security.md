@@ -59,8 +59,9 @@ instructing a worker to stage approval requests: worker prompts in the examples
 contain no mention of judging, and the example child project trees contain
 neither prompts nor Codex configuration. Worker-owned permission configuration
 is not supported. Those files live beside `operator.toml`, outside every worker-
-and coordinator-writable root, so a worker cannot widen its `sandbox_mode` for a
-later session by writing inside the root it is allowed to write. The current
+and coordinator-writable root, so a worker cannot widen its permission profile
+for a later session by writing inside the root it is allowed to write. The Codex
+home that defines those profiles is held to the same rule. The current
 session is likewise unaffected by anything: registration snapshots the boundary
 and every turn replays it, and `session.started` records the source and digest
 of the permissions used, so an audit can show whether the boundary changed
@@ -134,7 +135,7 @@ numbers are on the record.
 ## Inside its project a worker acts by right
 
 A worker edits its own project the way a developer edits a checkout, and that
-authority is enforced twice before any judge is involved. The turn sandbox makes
+authority is enforced twice before any judge is involved. The permission profile makes
 the project the only writable root with no network, and `normalize_path`
 resolves every change path against the registered project and refuses anything
 outside it. A `workspace-write` file change whose every path clears both is
@@ -215,7 +216,7 @@ pinned CLI, repeated after this refusal was designed, shows the loading is
 unchanged: a thread started in a project containing
 `.codex/rules/worker.rules` logs `loaded 1 .rules files in
 <project>/.codex/rules` at thread start, and under `approval_policy =
-"untrusted"` with `sandbox_mode = "workspace-write"` an `allow` rule there
+"untrusted"` with a writable permission profile an `allow` rule there
 suppressed the approval request entirely — the worker's `cat NOTES.md` ran with
 no approval at all. Rules are read at thread start, not per turn, so a worker
 cannot change its current session's policy; but one in-scope, in-sandbox write —
@@ -297,7 +298,7 @@ judge. A match yields a single-turn `accept` only, never a session grant and
 never the `acceptWithExecpolicyAmendment` a request may offer; the
 `proposedExecpolicyAmendment` a worker authors is ignored, so this path cannot
 be used to change the rules that govern it. What it rests on is the same
-deterministic layer as before: the turn sandbox, which keeps writes inside the
+deterministic layer as before: the permission profile, which keeps writes inside the
 project and disables the network regardless of any decision, and
 `normalize_path`, which already rejects a working directory outside the
 project. File changes are a different approval method, decided by containment
@@ -366,3 +367,45 @@ supported CLI and host; keep the fail-closed probe when changing either.
 A caller-supplied judge in the Python API can operate on the frozen, minimal
 `ApprovalCase` evidence, but the caller is responsible for isolating its own
 implementation. This remains a requirement for caller-supplied judges.
+
+## The boundary's provenance is the permission profile
+
+The coordinator names a permission profile per project and sends the id on
+`thread/start`. The runtime answers with `activePermissionProfile`, and a
+session is refused unless that names the profile that was requested. This is the
+only provenance the wire carries, and it is why the legacy `sandbox` literal is
+no longer sent: sending it does not select a profile but detaches the thread
+from the profile system, and `activePermissionProfile` comes back `null`.
+
+The legacy readback is also lossy in the direction that matters. Under a profile
+limited to a single host the derived `sandbox` view reports
+`networkAccess: true`, so an audit that read that field back could not see a
+host-scoped ceiling at all. Under every shape it reports `writableRoots: []`,
+with the writable scope living in `runtimeWorkspaceRoots`, so it cannot answer
+what a thread may write either.
+
+`default_permissions` must be pinned in the operator's Codex home. The implicit
+default follows project trust records rather than the file: probed against the
+pinned CLI, the same unconfigured thread resolved to `:read-only` before a trust
+record existed for its cwd and to `:workspace` after one did. A home carrying a
+`[permissions]` table without `default_permissions` is refused outright, by the
+runtime and by this coordinator.
+
+Three further configurations are accepted by the runtime and enforce less than
+they read as enforcing, so the coordinator refuses each at startup rather than
+discovering it through a worker: an unrecognized key or `filesystem` token,
+which is ignored rather than rejected; a writable profile that does not demote
+`:tmpdir` and `:slash_tmp`, which leaves `/tmp` and `$TMPDIR` writable where the
+previous boundary did not; and a `domains` or `unix_sockets` grant declared
+while `[features] network_proxy` is off, which enforces nothing at all while
+reading as a ceiling. The first two are rules about a profile a worker is given,
+so they are applied where one is selected. The third is a rule about the home:
+it is applied to every profile defined there, because a home carrying an inert
+ceiling misleads its reader whichever profile is selected today.
+
+A fourth trap is not refusable, only documented: `network.mode` grants nothing.
+Probed with the proxy on, `mode = "full"` and `mode = "limited"` behave
+identically on all three axes, and each axis is governed only by its own grant —
+so `mode = "full"` with no `domains` map reaches no external host at all, every
+request coming back `403` from the proxy. It reads far wider than it enforces.
+Write the axes explicitly and do not rely on the mode to mean anything.

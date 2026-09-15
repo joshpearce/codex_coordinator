@@ -49,7 +49,7 @@ def check(config: OperatorConfig, projects: list[Path], *, require_socket: bool 
         worker = config.permissions_for(project)
         validated.append({
             "project": str(project),
-            "sandboxMode": worker.sandbox_mode,
+            "permissionProfile": worker.provenance()["permissionProfile"],
             "approvalPolicy": worker.approval_policy,
             "permissionsSource": worker.source,
             "permissionsDigest": worker.digest,
@@ -60,7 +60,9 @@ def check(config: OperatorConfig, projects: list[Path], *, require_socket: bool 
     ready = config.socket_path.exists() or config.socket_path.is_symlink()
     if ready:
         probe_local_socket(config.socket_path)
-    elif config.socket_path != default_daemon_socket():
+    elif config.socket_path != default_daemon_socket(
+        None if config.codex_home is None else config.codex_home.path
+    ):
         raise ValueError(
             f"custom Codex socket is unavailable: {config.socket_path}; start an app-server listener there first"
         )
@@ -68,9 +70,20 @@ def check(config: OperatorConfig, projects: list[Path], *, require_socket: bool 
         raise ValueError(
             f"Codex socket is unavailable: {config.socket_path}; start the daemon or omit --require-socket"
         )
+    # A live run fails before a turn rather than during one if the home it will
+    # select profiles from is reported here (#0021).
     return {
         "ok": True,
         "codexVersion": version,
+        "codexHome": None if config.codex_home is None else {
+            "path": str(config.codex_home.path),
+            "defaultPermissions": config.codex_home.default_permissions,
+            "profiles": list(config.codex_home.profile_ids),
+            "networkProxy": config.codex_home.network_proxy,
+            # Auth lives in the home, so a rendered one with no symlink to a
+            # signed-in auth.json fails on the first turn rather than at start.
+            "authenticated": (config.codex_home.path / "auth.json").exists(),
+        },
         "socketReady": ready,
         "socketPath": str(config.socket_path),
         "projects": validated,

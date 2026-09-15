@@ -15,12 +15,70 @@ adapter; `JudgedSessionSupervisor` is the harness adapter.
 
 Both take a worker's boundary from operator-owned configuration and send it
 explicitly on `thread/start`. `WorkerPermissions` accepts `on-request` or
-`untrusted` as the approval policy, the `user` reviewer, and `read-only` or
-`workspace-write` as the sandbox mode. `never` is rejected because it would
-execute unjudged. The protocol's `AskForApproval` enum lists `untrusted` and
-Codex CLI 0.154.0 accepts it as a `thread/start` parameter, though the same CLI
-removed it as a config value — one more reason these values travel on the wire
-rather than sitting in a file.
+`untrusted` as the approval policy, the `user` reviewer, and a permission
+profile id. `never` is rejected because it would execute unjudged. The
+protocol's `AskForApproval` enum lists `untrusted` and Codex CLI 0.154.0 accepts
+it as a `thread/start` parameter, though the same CLI removed it as a config
+value — one more reason these values travel on the wire rather than sitting in a
+file.
+
+## The permission model: who owns which half
+
+The runtime owns the permission profile. The operator owns the Codex home that
+defines it. The coordinator selects one by id per project, verifies that the
+runtime selected that same one, and judges what escalates past it.
+
+The legacy `sandbox` literal is the shape this project no longer sends. It is
+mutually exclusive with `permissions` on the wire, and sending it does not
+select a profile — it detaches the thread from the profile system, so the
+response's `activePermissionProfile` comes back `null` and the boundary has no
+provenance at all. Nor can the literal express a host-scoped network ceiling:
+the wire grant type carries one bit where a profile carries a per-domain map, a
+per-socket map, and loopback binding separately.
+
+`codex_home` in `operator.toml` names the home. It is operator-owned and outside
+every worker- and coordinator-writable root, for the same reason `operator.toml`
+and the constitutions are: a session that can write its own permission profile
+has no boundary. `examples/operator/codex-home/config.toml` is the worked
+example. A home is required exactly when an operator names a profile of their
+own; the built-in ids need no definition and mean the same thing in every home,
+so nothing is ever quietly resolved from whichever `~/.codex` the machine
+happens to have.
+
+Every id is resolved to a concrete boundary at startup, before any thread
+exists, because the runtime accepts several configurations it does not enforce:
+
+- An unrecognized key in a profile, or an unrecognized token in its `filesystem`
+  map, is ignored rather than refused. `:tmp`, `:temp` and `:system_tmp` all
+  parse and do nothing where `:tmpdir` and `:slash_tmp` take effect.
+- `:workspace` leaves `/tmp` and `$TMPDIR` writable, which the sandbox literal
+  excluded. A writable profile that does not demote both is refused, because it
+  is a widening of the old boundary rather than a re-spelling of it.
+- A `domains` or `unix_sockets` grant enforces nothing unless
+  `[features] network_proxy = true`, and that feature is off by default. A
+  declared-but-inert ceiling fails startup on the same principle as a declared
+  `exec_policy` that loaded no rules. This one is checked across every profile
+  the home defines rather than only the selected ones: such a home is
+  misconfigured whichever profile a project names today, and an operator
+  reading it believes in a boundary that is not there.
+- `default_permissions` must be pinned. Without it the runtime refuses to load a
+  home that has a `[permissions]` table at all, and the implicit default follows
+  project trust records rather than the file.
+
+The socket follows the home. `default_daemon_socket` derives from the configured
+Codex home rather than from `Path.home()`, and `ensure_daemon` starts the daemon
+with that `CODEX_HOME`, so an operator whose home is the managed one gets a
+daemon on it. `socket_path` overrides that with an already-running listener,
+which `ensure_daemon` validates rather than starts.
+
+The live harness uses the override, and runs `codex app-server --listen
+unix://<run-dir>/app-server.sock` itself. The shared daemon is not an option
+there: `codex app-server daemon start` requires the managed standalone install
+at `$CODEX_HOME/packages/standalone/current/codex`, which a rendered home has no
+business containing, and lending it the developer's would put the run back on
+their install — the thing the isolation exists to prevent. A private listener
+needs nothing but the home, and removes the shared-daemon question from the run
+entirely.
 
 Nothing inside a worker project is read. `[worker_permissions]` in
 `operator.toml` maps a project to a permissions file beside `operator.toml`,
@@ -34,26 +92,28 @@ earlier project-owned arrangement left open.
 
 Under `untrusted` the runtime raises an approval request before anything it does
 not already trust; under `on-request` a worker that never asks is never judged.
-The turn sandbox derived from `sandbox_mode` is unchanged either way and still
-disables network access. Worker prompts are never the mechanism. A managed
+The profile is unchanged either way. Worker prompts are never the mechanism. A managed
 thread is then registered with an immutable session ID, canonical project root,
 and `ApprovalPolicy`, and `session.started` records the source and digest of the
 permissions the session was derived from, so an audit can compare one session's
 boundary against the next.
 
-Every `turn/start`, including follow-up turns, carries the sandbox policy captured
-at registration. Read-only workers get a network-disabled read-only policy.
-Workspace-write workers get:
+`thread/start` carries the profile id and nothing else about the boundary. No
+turn carries one at all: thread state is sticky, and the turn-level fields are
+documented as overriding "for this turn and subsequent turns" rather than as a
+per-turn re-imposition, so re-sending a boundary would only reassert state that
+never lapsed. Startup fails if the server reports a different profile than the
+one requested, or reports none.
 
-- the canonical project as their only writable root;
-- network disabled;
-- the ambient `$TMPDIR` write exception disabled; and
-- the `/tmp` write exception disabled.
-
-The app-server's OS sandbox is the execution-time boundary, so the restriction also
-applies to subprocesses, standard temporary-file APIs, symlinks, and other indirect
-effects. No worker-authored file feeds this boundary, and a registered
-session replays the boundary it started with.
+A worker profile gives the project as the only writable root, no network, and
+neither temporary root writable — `filesystem = { ":tmpdir" = "read",
+":slash_tmp" = "read" }` is the profile spelling of the literal's
+`excludeTmpdirEnvVar` and `excludeSlashTmp`, keeping the reads the literal also
+allowed. The app-server's OS sandbox is the execution-time boundary, so the
+restriction also applies to subprocesses, standard temporary-file APIs,
+symlinks, and other indirect effects; `tests/test_runtime_boundary.py` runs one
+escape probe under both shapes and compares them axis by axis. No worker-authored
+file feeds this boundary.
 
 ## Unified approval boundary
 
@@ -105,7 +165,7 @@ escalation under `containment`.
 ### In-project file changes
 
 A worker edits its own project by right. The authority is already enforced twice
-before this step: the turn sandbox makes the project the only writable root with
+before this step: the permission profile makes the project the only writable root with
 no network, and `normalize_path` resolves every change path against the
 registered project and raises if it lands outside, which the adapters answer
 with `decline` and an `approval.rejected` event. `_decide_file_change`

@@ -19,6 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
+from . import profiles
 from .execpolicy import ExecPolicy, ExecPolicyMatch, FileChangeEscalation
 from .protocol import ProtocolClient
 
@@ -350,21 +351,28 @@ class WorkerPermissions:
     # config value but accepts it as the thread/start parameter, which is the
     # only way these values are applied.
     WIRE_APPROVAL_POLICIES = frozenset({"on-request", "untrusted"})
-    SANDBOX_MODES = frozenset({"read-only", "workspace-write"})
-    FIELDS = ("approval_policy", "approvals_reviewer", "sandbox_mode")
+    FIELDS = ("approval_policy", "approvals_reviewer", "permission_profile")
     # Declares an operator-owned rules file, evaluated by the coordinator and
     # never handed to the runtime; see ``execpolicy.py`` for why.
     EXEC_POLICY_FIELD = "exec_policy"
 
     approval_policy: str = "on-request"
     approvals_reviewer: str = "user"
-    sandbox_mode: str = "workspace-write"
+    # A profile id, resolved against the operator's Codex home. The default is
+    # the narrowest built-in rather than the widest: a write boundary has to be
+    # named by an operator, because only a profile they define can exclude the
+    # temporary roots the sandbox literal used to exclude (#0021).
+    permission_profile: str = profiles.READ_ONLY
     source: str = "built-in default"
     # The path the permissions file declared, as written, and the rules loaded
     # from it. A declared path with no loaded policy is an unfinished
     # configuration: the loader must resolve it or startup must fail.
     exec_policy_path: str | None = None
     exec_policy: ExecPolicy | None = None
+    # The boundary the declared id actually means, resolved from the operator's
+    # Codex home. Unresolved is an unfinished configuration in the same way an
+    # unloaded exec policy is.
+    profile: profiles.PermissionProfile | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, str) or not self.source:
@@ -387,9 +395,28 @@ class WorkerPermissions:
                 f"{self.source}: approvals_reviewer must be 'user'; no other "
                 "reviewer routes an approval to a judge"
             )
-        if self.sandbox_mode not in self.SANDBOX_MODES:
+        if not isinstance(self.permission_profile, str) or not self.permission_profile.strip():
+            raise ValueError(f"{self.source}: permission_profile must be a nonempty id")
+        if self.permission_profile == profiles.DANGER_FULL_ACCESS:
             raise ValueError(
-                f"{self.source}: sandbox_mode must be one of {sorted(self.SANDBOX_MODES)}"
+                f"{self.source}: permission_profile must not be "
+                f"{profiles.DANGER_FULL_ACCESS}; a worker session is never given a "
+                "boundary that enforces nothing"
+            )
+        if self.profile is None and self.permission_profile in profiles.BUILTIN_PROFILES:
+            # A built-in means the same boundary in every Codex home, so it
+            # needs no operator definition to be resolved — and resolving it
+            # here still applies the refusals, which is why a bare ":workspace"
+            # is rejected for leaving the temporary roots writable.
+            object.__setattr__(
+                self, "profile", profiles.resolve_profile(self.permission_profile, None),
+            )
+        if self.profile is not None and not isinstance(self.profile, profiles.PermissionProfile):
+            raise ValueError(f"{self.source}: profile must be a resolved PermissionProfile")
+        if self.profile is not None and self.profile.id != self.permission_profile:
+            raise ValueError(
+                f"{self.source}: resolved profile {self.profile.id!r} does not match "
+                f"the declared permission_profile {self.permission_profile!r}"
             )
 
     @classmethod
@@ -431,10 +458,22 @@ class WorkerPermissions:
         return self.exec_policy_path is None or self.exec_policy is not None
 
     @property
+    def writable(self) -> bool:
+        """Whether the resolved boundary lets the worker write its project."""
+        return self.profile is not None and self.profile.writable
+
+    @property
     def digest(self) -> str:
         """Digest of the boundary itself, so an audit can spot a changed one."""
         payload = json.dumps(
-            {name: getattr(self, name) for name in self.FIELDS}, sort_keys=True,
+            {
+                **{name: getattr(self, name) for name in self.FIELDS},
+                # An operator editing a parent profile changes this boundary
+                # without changing any file this project owns, so the resolved
+                # chain is part of what an audit compares.
+                "profile": None if self.profile is None else self.profile.provenance(),
+            },
+            sort_keys=True,
         )
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -444,21 +483,37 @@ class WorkerPermissions:
             "digest": self.digest,
             "approvalPolicy": self.approval_policy,
             "approvalsReviewer": self.approvals_reviewer,
-            "sandboxMode": self.sandbox_mode,
+            "permissionProfile": (
+                {"id": self.permission_profile, "resolved": False}
+                if self.profile is None else self.profile.provenance()
+            ),
             "execPolicy": None if self.exec_policy is None else self.exec_policy.provenance(),
         }
 
-    def enforced_sandbox(self, project: Path) -> dict[str, Any]:
-        """Return the app-server execution boundary, not a prompt-time hint."""
-        if self.sandbox_mode == "read-only":
-            return {"type": "readOnly", "networkAccess": False}
-        return {
-            "type": "workspaceWrite",
-            "writableRoots": [str(project.resolve())],
-            "networkAccess": False,
-            "excludeTmpdirEnvVar": True,
-            "excludeSlashTmp": True,
-        }
+
+def verify_active_profile(result: Mapping[str, Any], requested: str) -> dict[str, Any]:
+    """Fail the session unless the server selected the boundary we asked for.
+
+    ``activePermissionProfile`` is the only provenance the wire carries. The
+    legacy ``sandbox`` view cannot stand in for it: under a profile limited to
+    one host it reports ``networkAccess: true``, and under every shape it
+    reports ``writableRoots: []``. A ``null`` here means the thread is not
+    attached to the profile system at all, which is the state this project
+    migrated away from (#0021).
+    """
+    active = (result or {}).get("activePermissionProfile")
+    if not isinstance(active, Mapping) or not active.get("id"):
+        raise RuntimeError(
+            f"thread/start reported no active permission profile for {requested!r}; "
+            "the boundary has no provenance and the session is refused"
+        )
+    if active.get("id") != requested:
+        raise RuntimeError(
+            f"thread/start selected permission profile {active.get('id')!r} rather "
+            f"than the requested {requested!r}; the operator's Codex home does not "
+            "define the boundary this project configured"
+        )
+    return {"id": active["id"], "extends": active.get("extends")}
 
 
 #: Where the Codex runtime reads a project's own execpolicy rules. Probed
@@ -575,7 +630,7 @@ class ApprovalPolicy:
     _FILE_FIELDS = _BASE_FIELDS | frozenset({"grantRoot", "reason"})
     _PERMISSION_FIELDS = _BASE_FIELDS | frozenset({"cwd", "permissions", "reason", "environmentId"})
     __slots__ = (
-        "project", "sandbox_mode", "allow_session_approval", "allowed_permissions",
+        "project", "profile", "allow_session_approval", "allowed_permissions",
         "exec_policy", "_sealed",
     )
 
@@ -588,16 +643,23 @@ class ApprovalPolicy:
         self,
         project: Path,
         *,
-        sandbox_mode: str = "workspace-write",
+        profile: profiles.PermissionProfile | None = None,
         allow_session_approval: bool = False,
         allowed_permissions: Mapping[str, Any] | None = None,
         allowed_permission_keys: frozenset[str] = frozenset(),
         exec_policy: ExecPolicy | None = None,
     ) -> None:
         self.project = project.resolve()
-        if sandbox_mode not in {"read-only", "workspace-write"}:
-            raise ValueError("unsupported policy sandbox mode")
-        self.sandbox_mode = sandbox_mode
+        # The boundary the runtime will enforce, resolved from the operator's
+        # Codex home before any thread exists. Deciding an in-project file
+        # change needs to know whether the project is writable at all, and under
+        # a profile that is a property of the resolved chain rather than of a
+        # mode string this process chose (#0021).
+        if profile is None:
+            profile = profiles.builtin_profile(profiles.READ_ONLY)
+        if not isinstance(profile, profiles.PermissionProfile):
+            raise ValueError("policy profile must be a resolved PermissionProfile")
+        self.profile = profile
         self.allow_session_approval = bool(allow_session_approval)
         if exec_policy is not None and not isinstance(exec_policy, ExecPolicy):
             raise ValueError("exec policy must be a loaded ExecPolicy")
@@ -626,12 +688,28 @@ class ApprovalPolicy:
 
     @property
     def enforced_capabilities(self) -> Mapping[str, Any]:
+        """The ceiling as the runtime will actually enforce it, for the judge.
+
+        This is deterministic evidence, so it has to track the profile rather
+        than restate what the boundary used to be. Under the sandbox literal
+        every worker had `networkAccess: False`, and leaving that hardcoded
+        after the migration told a judge the opposite of the truth for any
+        project whose operator granted it hosts — a live judge refused a
+        declared dependency restore on exactly that basis, correctly, because
+        the evidence it was handed said the network was closed.
+
+        `networkHosts` is the whole of what the project may reach: absent when
+        it may reach nothing, and never a claim that everything else is open.
+        """
+        domains = self.profile.network.get("domains") or {}
+        allowed = sorted(
+            host for host, access in domains.items() if access == "allow"
+        ) if self.profile.grants_network else []
         return self._freeze({
-            "filesystemWriteRoots": (
-                [str(self.project)] if self.sandbox_mode == "workspace-write" else []
-            ),
+            "filesystemWriteRoots": [str(self.project)] if self.profile.writable else [],
             "temporaryDirectoriesWritable": False,
-            "networkAccess": False,
+            "networkAccess": self.profile.grants_network,
+            "networkHosts": allowed,
             "sandboxRequired": True,
         })
 
@@ -875,12 +953,12 @@ class ApprovalPolicy:
         return True
 
     #: Why an in-project file change needs no judge. The authority is granted
-    #: twice over before this rule applies: the turn sandbox makes the project
+    #: twice over before this rule applies: the permission profile makes the project
     #: the only writable root with no network, and ``normalize_path`` has
     #: already refused every path outside it.
     CONTAINMENT_RULE = (
         "accepted by containment: every change path normalizes inside the "
-        "registered project, which the turn sandbox makes the only writable root"
+        "registered project, which the permission profile makes the only writable root"
     )
     #: ``read-only`` is the inspection-only mode. A worker there has no write
     #: authority at all, so there is no judgement to make and the misleading
@@ -894,7 +972,7 @@ class ApprovalPolicy:
     #: widens, so it is refused rather than judged.
     GRANT_ROOT_RULE = (
         "declined by containment: a file change carrying a grantRoot asks for "
-        "authority beyond the change itself, which the turn sandbox never grants"
+        "authority beyond the change itself, which the permission profile never grants"
     )
     #: Reached only if an invariant ``normalize`` enforces were broken. A file
     #: change whose change list cannot be read against the registered project
@@ -952,7 +1030,7 @@ class ApprovalPolicy:
                 "deny", self.UNREADABLE_CHANGES_RULE, DECLINED_BY_POLICY_EVENT,
                 paths=normalized,
             )
-        if self.sandbox_mode != "workspace-write":
+        if not self.profile.writable:
             return CodeDecision(
                 "deny", self.READ_ONLY_RULE, DECLINED_BY_POLICY_EVENT, paths=normalized,
             )
@@ -1258,8 +1336,14 @@ class JudgedSessionSupervisor:
         self.worker_reasoning_effort = worker_reasoning_effort
         if approvals.policy.project != self.project:
             raise ValueError("approval policy project does not match worker project")
-        if approvals.policy.sandbox_mode != self.permissions.sandbox_mode:
-            raise ValueError("approval policy sandbox does not match worker configuration")
+        if approvals.policy.profile.id != self.permissions.permission_profile:
+            raise ValueError("approval policy profile does not match worker configuration")
+        if self.permissions.profile is None:
+            raise ValueError(
+                f"{self.permissions.source}: permission profile "
+                f"{self.permissions.permission_profile!r} was never resolved against a "
+                "Codex home"
+            )
         if not self.permissions.exec_policy_loaded:
             raise ValueError(
                 f"{self.permissions.source}: exec_policy is declared but no rules were loaded"
@@ -1273,11 +1357,16 @@ class JudgedSessionSupervisor:
         start_params = {
             "cwd": str(self.project), "runtimeWorkspaceRoots": [str(self.project)],
             "approvalPolicy": self.permissions.approval_policy,
-            "approvalsReviewer": self.permissions.approvals_reviewer, "sandbox": self.permissions.sandbox_mode,
+            "approvalsReviewer": self.permissions.approvals_reviewer,
+            # Never `sandbox`: it is mutually exclusive with `permissions`, and
+            # sending it detaches the thread from the profile system so the
+            # runtime reports no provenance for the boundary at all.
+            "permissions": self.permissions.permission_profile,
         }
         if self.worker_model:
             start_params["model"] = self.worker_model
         result = await self.client.call("thread/start", start_params)
+        verify_active_profile(result, self.permissions.permission_profile)
         thread = result.get("thread", result)
         thread_id = str(thread.get("id") or thread.get("threadId") or "")
         if not thread_id:
@@ -1289,7 +1378,9 @@ class JudgedSessionSupervisor:
         turn_params = {
             "threadId": thread_id, "cwd": str(self.project),
             "input": [{"type": "text", "text": prompt}], "turnTrigger": "codex-judged-worker",
-            "sandboxPolicy": self.permissions.enforced_sandbox(self.project),
+            # No boundary field: thread state is sticky, and the turn-level
+            # fields are documented as overriding "for this turn and subsequent
+            # turns" rather than as a per-turn re-imposition.
         }
         if self.worker_reasoning_effort:
             turn_params["effort"] = self.worker_reasoning_effort
@@ -1398,8 +1489,15 @@ def _probe_judge_read_boundary(codex_command: str, readable_directory: str) -> N
 
 
 async def codex_exec_json_runner(
-    prompt: str, *, codex_command: str = "codex", timeout_seconds: float = 120
+    prompt: str, *, codex_command: str = "codex", timeout_seconds: float = 120,
+    codex_home: Path | None = None,
 ) -> str:
+    """Run one judge in its own sandbox, reading no configuration of its own.
+
+    ``--ignore-user-config`` already keeps a judge off the operator's config,
+    but authentication lives in the Codex home, so the home is passed through
+    to keep a live run off the developer's ``~/.codex`` entirely (#0021).
+    """
     executable = shutil.which(codex_command)
     if executable is None:
         raise RuntimeError(f"Codex executable not found: {codex_command}")
@@ -1425,6 +1523,9 @@ async def codex_exec_json_runner(
             )
             for argument in ("--config", override)
         ]
+        environment = None if codex_home is None else {
+            **os.environ, "CODEX_HOME": str(codex_home),
+        }
         process = await asyncio.create_subprocess_exec(
             resolved_command, "exec", "--strict-config", "--config", 'approval_policy="never"',
             *permission_args,
@@ -1434,7 +1535,7 @@ async def codex_exec_json_runner(
             "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
             "--ephemeral", "--cd", isolated_cwd,
             "--output-schema", str(schema_path), prompt,
-            cwd=isolated_cwd,
+            cwd=isolated_cwd, env=environment,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         try:

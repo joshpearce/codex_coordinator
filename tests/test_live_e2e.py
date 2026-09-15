@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import os
 import re
 import shutil
 import stat
@@ -14,13 +15,23 @@ from codex_coordinator.live_e2e import (
     _approval_errors,
     _approval_summary,
     _control_plane_error,
-    _coordinator_permission_overrides,
+    COORDINATOR_PROFILE,
+    _render_codex_home,
     _relay_coordinator_events,
     _relay_service_events,
     _resolve_template,
     run,
 )
 from codex_coordinator.config import OperatorConfig
+
+
+def _rendered_home(root: Path) -> Path:
+    """A Codex home for tests, lent a stand-in credential rather than the real one."""
+    auth = root / "auth.json"
+    auth.write_text("{}")
+    return _render_codex_home(
+        root, Path(__file__).resolve().parents[1] / "examples", auth=auth,
+    )
 
 
 def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
@@ -57,6 +68,8 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
             "INVENTORY_REPORT_PATH": inventory_report,
             "OPERATOR_PATH": operator,
             "COORDINATOR_PATH": coordinator,
+            "CODEX_HOME_PATH": _rendered_home(tmp_path),
+            "APP_SERVER_SOCKET": tmp_path / "app-server.sock",
         },
     )
     rendered = _resolve_template(
@@ -100,7 +113,20 @@ def test_checked_in_goals_only_template_runtime_paths(tmp_path: Path):
     for project in (inventory_app, inventory_report):
         permissions = config.permissions_for(project)
         assert permissions.approval_policy == "untrusted"
-        assert permissions.sandbox_mode == "workspace-write"
+        # The two projects get different ceilings, and that is the point: the
+        # producer declares dependencies and is granted the hosts that serve
+        # them, while the stdlib-only consumer is granted no host at all.
+        assert permissions.profile is not None
+        assert permissions.writable
+        if project.name == "inventory-app":
+            assert permissions.permission_profile == "worker_pypi"
+            assert permissions.profile.grants_network
+            assert sorted(permissions.profile.network["domains"]) == [
+                "files.pythonhosted.org", "pypi.org",
+            ]
+        else:
+            assert permissions.permission_profile == "worker_workspace"
+            assert not permissions.profile.grants_network
         assert Path(permissions.source).parent == operator
         # Each child's mundane-command rules load from beside its permissions
         # file, with no template marker, and are decided by the coordinator.
@@ -219,7 +245,7 @@ def test_human_output_shows_prompts_and_suppresses_token_deltas(capsys):
     })
 
     output = capsys.readouterr().out
-    assert "Started inventory-app" in output
+    assert "session/start" in output and "inventory-app" in output
     assert "Build the inventory app." in output
     assert "Run its tests." in output
     assert "noisy token" not in output
@@ -421,8 +447,10 @@ def test_human_output_shows_rule_allowed_commands(capsys):
         validationErrors=[],
     )
     output = capsys.readouterr().out
-    assert "ALLOWED BY POLICY inventory-app: /bin/zsh -lc 'sed -n 1,5p README.md'" in output
-    assert "rule: range reads of the project's own files" in output
+    # The layer that decided it leads the line: an operator rule, not a judge.
+    assert "rule/allow" in output
+    assert "/bin/zsh -lc 'sed -n 1,5p README.md'" in output
+    assert "range reads of the project's own files" in output
     assert "Approvals judged: 8" in output
     assert "Commands allowed by exec policy without a judge: 5" in output
 
@@ -461,9 +489,10 @@ def test_human_output_distinguishes_code_accepted_file_changes(capsys):
         validationErrors=[],
     )
     output = capsys.readouterr().out
-    assert "ALLOWED BY POLICY inventory-app: 1 file: domain.py" in output
-    assert "DECLINED BY POLICY inventory-report: 1 file: report.py" in output
-    assert "rule: declined by containment: sandbox mode is read-only" in output
+    # Containment is code, not a rule and not a judge.
+    assert "code/allow" in output and "1 file: domain.py" in output
+    assert "code/deny" in output and "1 file: report.py" in output
+    assert "declined by containment: sandbox mode is read-only" in output
     assert "In-project file changes accepted by code without a judge: 17" in output
     assert "File changes declined by code without a judge: 1" in output
 
@@ -583,22 +612,71 @@ def test_live_e2e_allows_its_generated_non_git_workspace():
     assert '"--skip-git-repo-check"' in source
 
 
-def test_coordinator_permission_overrides_declare_a_usable_sandbox(tmp_path: Path):
-    socket = tmp_path / "app-server-control.sock"
+def test_the_rendered_codex_home_holds_every_profile_a_run_selects(tmp_path: Path):
+    """The boundary of a live run is readable in one operator-owned file.
 
-    overrides = _coordinator_permission_overrides(socket)
+    Before #0021 the coordinating session's profile was assembled from six
+    `--config` flags, because a profile left in the working directory is
+    silently ignored. A home removes the need for them, and puts the worker
+    profiles beside the coordinating one.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}")
+    home = _render_codex_home(tmp_path, repo / "examples", auth=auth)
 
-    assert overrides[::2] == ["--config"] * (len(overrides) // 2)
-    settings = overrides[1::2]
-    assert 'default_permissions="coordinator"' in settings
-    assert 'permissions.coordinator.extends=":workspace"' in settings
-    # Without this the session cannot reach the loopback control plane at all.
-    assert "permissions.coordinator.network.enabled=true" in settings
-    assert not any("danger-full-access" in setting for setting in settings)
-    parsed = tomllib.loads("\n".join(settings))
-    profile = parsed["permissions"]["coordinator"]
-    assert profile["network"]["mode"] == "full"
-    assert profile["network"]["unix_sockets"][str(socket)] == "allow"
+    rendered = tomllib.loads((home / "config.toml").read_text())
+    assert rendered["default_permissions"] == ":read-only"
+    # Every domain and unix-socket grant below is inert without this.
+    assert rendered["features"]["network_proxy"] is True
+    profiles = rendered["permissions"]
+    assert COORDINATOR_PROFILE in profiles
+    coordinator_network = profiles[COORDINATOR_PROFILE]["network"]
+    assert coordinator_network["allow_local_binding"] is True
+    # The service owns the app-server connection and is not sandboxed; a
+    # coordinating session that could reach the control socket could drive the
+    # runtime directly and bypass judging entirely.
+    assert "unix_sockets" not in coordinator_network
+    assert "domains" not in coordinator_network
+    # The trusted session keeps its temporary roots: a live run showed that
+    # demoting them makes tempfile.TemporaryDirectory() fail outright.
+    assert "filesystem" not in profiles[COORDINATOR_PROFILE]
+    for worker in ("worker_workspace", "worker_pypi"):
+        profile = profiles[worker]
+        assert profile["extends"] == ":workspace"
+        # :workspace alone leaves both temporary roots writable; the boundary
+        # this project enforced with a sandbox literal did not.
+        assert profile["filesystem"] == {":tmpdir": "read", ":slash_tmp": "read"}
+        assert "unix_sockets" not in profile.get("network", {})
+    assert profiles["worker_workspace"]["network"]["enabled"] is False
+    network = profiles["worker_pypi"]["network"]
+    assert network["mode"] == "limited"
+    # Neither loopback path into this system is open to a worker.
+    assert network["allow_local_binding"] is False
+    # Both PyPI hosts, and nothing else: the index and the wheel store. Allowing
+    # only the first gets an index hit followed by a refused download.
+    assert sorted(network["domains"]) == ["files.pythonhosted.org", "pypi.org"]
+    assert not any("danger-full-access" in str(profile) for profile in profiles.values())
+    # Auth lives in the home: a fresh one reports "Not logged in".
+    assert (home / "auth.json").is_symlink()
+    assert home.stat().st_mode & 0o077 == 0
+
+
+def test_the_rendered_home_is_a_copy_so_a_run_cannot_rewrite_the_checked_in_source(tmp_path: Path):
+    """The runtime writes trust records and sqlite state into CODEX_HOME."""
+    repo = Path(__file__).resolve().parents[1]
+    source = repo / "examples/operator/codex-home/config.toml"
+    before = source.read_bytes()
+
+    auth = tmp_path / "auth.json"
+    auth.write_text("{}")
+    home = _render_codex_home(tmp_path, repo / "examples", auth=auth)
+
+    assert (home / "config.toml").resolve() != source.resolve()
+    assert not (home / "config.toml").is_symlink()
+    assert source.read_bytes() == before
+    # The home names no runtime path at all, so there is nothing to render in.
+    assert "{{" not in before.decode()
 
 
 def test_started_processes_do_not_inherit_a_stdin_that_may_never_close():
@@ -610,8 +688,19 @@ def test_started_processes_do_not_inherit_a_stdin_that_may_never_close():
 def test_coordinator_command_carries_its_permission_profile():
     """A profile inside the coordinator's project would be silently ignored."""
     source = inspect.getsource(run)
-    assert "*permission_overrides," in source
+    assert '\'default_permissions="{COORDINATOR_PROFILE}"\'' in source
+    # No reviewer is watching the coordinating session to answer a request.
+    assert '\'approval_policy="never"\'' in source
+    # Never the six-flag form this replaced: the profile body lives in the home.
+    assert "permissions.coordinator" not in source
     assert '.codex/config.toml' not in source
+
+
+def test_every_child_of_a_live_run_reads_the_rendered_home():
+    """A run that reads ~/.codex is evidence about one machine, not a boundary."""
+    source = inspect.getsource(run)
+    assert source.count("env=run_environment") == 2
+    assert '"CODEX_HOME": str(codex_home)' in source
 
 
 def test_idle_service_log_is_reported_as_an_unreachable_control_plane(tmp_path: Path):
@@ -634,3 +723,239 @@ def test_a_used_control_plane_reports_no_reachability_error(tmp_path: Path):
     )
 
     assert _control_plane_error(log, 8765, True) is None
+
+
+def test_the_live_harness_names_only_things_that_exist():
+    """Nothing offline executes `run`, so a stale name costs a whole live run.
+
+    This is not hypothetical: moving the harness onto a private listener left
+    `run` calling a helper it no longer imported, and every test still passed
+    because the failure lived in a function only a live run reaches.
+    """
+    import builtins
+    import symtable
+
+    import codex_coordinator.live_e2e as module
+
+    source = Path(module.__file__).read_text()
+    table = symtable.symtable(source, module.__file__, "exec")
+
+    def unresolved(scope) -> list[str]:
+        missing = [
+            symbol.get_name() for symbol in scope.get_symbols()
+            if symbol.is_global() and not symbol.is_assigned()
+            and not hasattr(module, symbol.get_name())
+            and not hasattr(builtins, symbol.get_name())
+        ]
+        for child in scope.get_children():
+            missing.extend(unresolved(child))
+        return missing
+
+    assert sorted(set(unresolved(table))) == []
+
+
+def test_the_network_gate_runs_before_the_listener_is_torn_down():
+    """A refusal has to be the sandbox's, not a missing file's.
+
+    A live run caught this: with the probe after teardown, the connect to the
+    control socket failed with ENOENT before the sandbox's socket policy was
+    consulted at all, which would read as a passing refusal while proving
+    nothing about the boundary.
+    """
+    source = inspect.getsource(run)
+    probe = source.index("_network_boundary_report(")
+    teardown = source.index("os.killpg(listener.pid")
+    assert probe < teardown
+
+
+def test_a_passing_boundary_check_is_reported_rather_than_silent(capsys):
+    """A run that checked and a run that did not must not look the same.
+
+    The network and isolation assertions contribute only to `validationErrors`,
+    so on success they used to print nothing at all — and a reader of the
+    default output had no way to tell an enforced ceiling from one that was
+    never exercised. That is the same silently-inert failure this project
+    refuses in a permission profile, so it is refused in the harness too.
+    """
+    renderer = OutputRenderer()
+    renderer.harness(
+        "live_e2e.completed", returnCode=0, workspace="/tmp/w", result={"ok": True},
+        approvals={}, validationErrors=[],
+        networkBoundary={
+            "allowed_restore": "ok:restored",
+            "refused_restore": "RuntimeError:refused by the proxy: 403 Forbidden",
+            "control_socket": "PermissionError:[Errno 1] Operation not permitted",
+            "service_port": "PermissionError:[Errno 1] Operation not permitted",
+            "offline_allowed_restore": "RuntimeError:no network at all: the host did not resolve",
+            "offline_control_socket": "PermissionError:[Errno 1] Operation not permitted",
+            "offline_service_port": "PermissionError:[Errno 1] Operation not permitted",
+        },
+        isolation={
+            "home": "/tmp/w/codex-home", "trustRecord": True,
+            "sqlite": ["state_5.sqlite"], "developerHomeUnchanged": True,
+        },
+    )
+
+    printed = capsys.readouterr().out
+    assert "Worker network boundaries" in printed
+    for expected in (
+        "worker_pypi: declared restore from PyPI: restored — ok:restored",
+        "worker_pypi: a requirement from any other host: refused at the proxy",
+        "worker_workspace: any install at all: no network to reach",
+        "app-server control socket: refused by the sandbox — PermissionError",
+        "coordination service port: refused by the sandbox — PermissionError",
+    ):
+        assert expected in printed, printed
+    assert "Codex home isolation: /tmp/w/codex-home" in printed
+    assert "trust record True, 1 sqlite files" in printed
+    assert "NOT CHECKED" not in printed
+
+
+def test_a_boundary_check_that_did_not_run_says_so(capsys):
+    """Absence of a result is reported as absence, never as a pass."""
+    renderer = OutputRenderer()
+    renderer.harness(
+        "live_e2e.completed", returnCode=0, workspace="/tmp/w", result={"ok": True},
+        approvals={}, validationErrors=[],
+    )
+
+    printed = capsys.readouterr().out
+    assert "Worker network boundary: NOT CHECKED" in printed
+    assert "Codex home isolation: NOT CHECKED" in printed
+
+
+def test_a_worker_that_could_not_restore_fails_the_run_before_it_starts(tmp_path: Path):
+    """A broken environment must not read as a refused restore.
+
+    The projects restore into a `.venv` of their own, so what a worker needs is
+    an interpreter whose bundled ensurepip can seed one — not an ambient pip.
+    Without this check the run would report a failed restore, and nothing would
+    distinguish "this interpreter cannot build a venv" from "the network ceiling
+    refused the host".
+    """
+    import codex_coordinator.live_e2e as module
+
+    assert module._require_worker_venv(dict(os.environ)).endswith("python3")
+
+    # An interpreter that exists but cannot create an environment.
+    broken = tmp_path / "bin"
+    broken.mkdir()
+    (broken / "python3").symlink_to(shutil.which("false") or "/usr/bin/false")
+    with pytest.raises(RuntimeError, match="cannot create a virtual environment"):
+        module._require_worker_venv({**os.environ, "PATH": str(broken)})
+
+    # No interpreter at all is reported as such, not as a broken environment.
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    with pytest.raises(RuntimeError, match="no python3 on the PATH"):
+        module._require_worker_venv({**os.environ, "PATH": str(bare)})
+
+
+def _proxy_log(home: Path, rows: list[tuple[int, str, str]]) -> None:
+    """A stand-in for the runtime's own log database, in its own shape."""
+    import sqlite3
+
+    connection = sqlite3.connect(home / "logs_2.sqlite")
+    connection.execute("create table logs (id integer primary key, target text, feedback_log_body text)")
+    connection.executemany("insert into logs values (?, ?, ?)", rows)
+    connection.commit()
+    connection.close()
+
+
+def _decision(thread: str, host: str, decision: str, reason: str) -> str:
+    return (
+        'event.name="codex.network_proxy.policy_decision" '
+        f'conversation.id="{thread}" '
+        'network.policy.scope="domain" '
+        f'network.policy.decision="{decision}" '
+        f'network.policy.reason="{reason}" '
+        'network.transport.protocol="https_connect" '
+        f'server.address="{host}" server.port=443'
+    )
+
+
+def test_proxy_decisions_are_read_from_the_runtime_log(tmp_path: Path):
+    """The sandbox's own verdicts, in the shape the runtime records them."""
+    from codex_coordinator.live_e2e import PROXY_LOG_TARGET, _proxy_decisions
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    assert _proxy_decisions(home, 0) == []  # No database yet is not an error.
+    _proxy_log(home, [
+        (1, "some.other.target", "unrelated"),
+        (2, PROXY_LOG_TARGET, _decision("thread-a", "pypi.org", "allow", "allow")),
+        (3, PROXY_LOG_TARGET, _decision("thread-b", "github.com", "deny", "not_allowed")),
+    ])
+
+    decisions = _proxy_decisions(home, 0)
+
+    assert [(d["thread"], d["host"], d["decision"], d["reason"]) for d in decisions] == [
+        ("thread-a", "pypi.org", "allow", "allow"),
+        ("thread-b", "github.com", "deny", "not_allowed"),
+    ]
+    # Only what is new, so a relay does not repeat itself every poll.
+    assert _proxy_decisions(home, 2) == [decisions[1]]
+
+
+def test_a_proxy_decision_names_the_worker_it_was_made_for(capsys):
+    """A network refusal has to land beside that worker's judged approvals.
+
+    The proxy records against the thread and the service against the session,
+    so without this the two enforcement layers could not be read as one
+    timeline — which is the whole reason for interleaving them.
+    """
+    renderer = OutputRenderer()
+    renderer.service({
+        "type": "session.started",
+        "session": {"id": "s1", "threadId": "thread-a", "project": "/tmp/inventory-app"},
+        "prompt": "Build it.",
+    })
+
+    renderer.proxy({
+        "thread": "thread-a", "host": "pypi.org", "port": "443",
+        "decision": "allow", "reason": "allow",
+    })
+    renderer.proxy({
+        "thread": "thread-a", "host": "github.com", "port": "443",
+        "decision": "deny", "reason": "not_allowed",
+    })
+
+    printed = capsys.readouterr().out
+    assert "proxy/allow" in printed and "pypi.org:443" in printed
+    assert "proxy/deny" in printed and "github.com:443" in printed
+    # Attributed, so it reads beside that worker's judged lines.
+    assert printed.count("inventory-app") >= 3
+    # A refusal says why; an allow needs no excuse.
+    assert "reason: not_allowed" in printed
+
+
+def test_every_timeline_tag_fits_its_column(capsys):
+    """A tag that overflows pushes every later field out of line.
+
+    The tag is the column a reader scans, so the timeline is only readable if
+    they all align — `session/completed` did not, which is why a finished turn
+    renders as `session/done`.
+    """
+    renderer = OutputRenderer()
+    renderer.service({
+        "type": "session.started",
+        "session": {"id": "s1", "threadId": "t1", "project": "/tmp/inventory-report"},
+        "prompt": "go",
+    })
+    renderer.service({
+        "type": "app_server.notification", "method": "turn/completed", "sessionId": "s1",
+        "message": {"params": {"turn": {"status": "completed", "items": []}}},
+    })
+    renderer.service({"type": "approval.requested", "project": "/tmp/inventory-report",
+                      "request": {"command": "x"}})
+    renderer.service({"type": "approval.resolved", "sessionId": "s1",
+                      "verdict": "approve_once", "reason": "fine"})
+    renderer.proxy({"thread": "t1", "host": "pypi.org", "port": "443",
+                    "decision": "allow", "reason": "allow"})
+
+    for line in capsys.readouterr().out.splitlines():
+        body = line.split("] ", 1)[-1]
+        if not body or body.startswith(" "):
+            continue
+        tag = body.split(" ", 1)[0]
+        assert len(tag) <= OutputRenderer.TAG_WIDTH, tag

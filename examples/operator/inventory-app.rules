@@ -64,3 +64,27 @@ prefix_rule(
     match = [["python", "-m", "inventory_app", "--help"]],
     not_match = [["python", "-m", "inventory_app", "--file", "/tmp/x.json", "list"]],
 )
+prefix_rule(
+    pattern = [["python", "python3"], "-m", "venv", ".venv"],
+    decision = "allow",
+    justification = "the project-local environment its dependencies restore into",
+    match = [["python3", "-m", "venv", ".venv"]],
+    not_match = [["python3", "-m", "venv", "/tmp/elsewhere"]],
+)
+# The install itself is deliberately not allowed here. It runs as
+# `.venv/bin/python -m pip install -r requirements.txt`, and this file may not
+# name a program by path: a worker can write `.venv/bin/python` inside its own
+# project, so a path-based rule would let it supply the program it is allowed to
+# run. Restoring dependencies therefore reaches a judge, and what the restore
+# can actually contact is settled by the project's network ceiling regardless of
+# what the judge decides.
+# A manifest this project can edit is not a declaration on its own. Restoring
+# what the project already declares is ordinary work, so a worker that could
+# silently add a line could declare anything and then restore it as though the
+# operator had asked for it. Changes to the declared set therefore reach a
+# judge, while every other in-project change stays decided by containment.
+prefix_rule(
+    pattern = ["codex-coordinator-file-change", ["requirements.txt", "requirements-dev.txt"]],
+    decision = "prompt",
+    justification = "the declared dependency set is reviewed before it changes",
+)

@@ -2,6 +2,16 @@
 # Keep this file and every constitution outside the coordinator and both worker
 # project directories.
 allowed_roots = ["{{INVENTORY_APP_PATH}}", "{{INVENTORY_REPORT_PATH}}"]
+# Where every permission profile named below is defined. The harness renders
+# examples/operator/codex-home/config.toml into a temporary home per run, so a
+# passing run is evidence about the configuration under test rather than about
+# whatever ~/.codex happens to hold on one machine.
+codex_home = "{{CODEX_HOME_PATH}}"
+# This run's own app-server, started by the harness on the rendered home. The
+# shared daemon is not used: `codex app-server daemon start` requires the
+# managed standalone install under the home it is given, and lending it the
+# developer's would put the run back on their install.
+socket_path = "{{APP_SERVER_SOCKET}}"
 approval_mode = "service"
 constitution_path = "{{OPERATOR_PATH}}/constitution.md"
 coordinator_root = "{{COORDINATOR_PATH}}"
@@ -15,7 +25,9 @@ worker_reasoning_effort = "low"
 
 # Each worker's execution boundary, kept here rather than in the project it
 # governs: a file inside a worker's writable root is a file that worker can
-# rewrite. The coordinator sends these values on thread/start.
+# rewrite. Each file names a permission profile id; the coordinator sends the id
+# on thread/start and refuses the session unless the runtime reports back that
+# it selected that same profile.
 [worker_permissions]
 "{{INVENTORY_APP_PATH}}" = "{{OPERATOR_PATH}}/inventory-app.permissions.toml"
 "{{INVENTORY_REPORT_PATH}}" = "{{OPERATOR_PATH}}/inventory-report.permissions.toml"

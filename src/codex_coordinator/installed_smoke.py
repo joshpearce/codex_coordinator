@@ -7,7 +7,20 @@ from pathlib import Path
 
 from codex_coordinator import ApprovalRequest, CoordinationEvent, Coordinator, JudgeDecision
 from codex_coordinator.coordinator import ApprovalPolicy, WorkerPermissions
+from codex_coordinator.profiles import PermissionProfile
 from codex_coordinator.service import ApprovalBroker, CoordinatorService, EventLog
+
+
+#: The boundary shape an operator writes for a worker: a named profile
+#: extending :workspace that gives back the temporary roots the runtime would
+#: otherwise leave writable. The fixture states it explicitly rather than
+#: loading a Codex home, because nothing here starts a real thread.
+FIXTURE_PROFILE = PermissionProfile(
+    id="installed_worker", extends=":workspace",
+    chain=("installed_worker", ":workspace"), builtin=":workspace", writable=True,
+    filesystem={":tmpdir": "read", ":slash_tmp": "read"}, network={},
+    source="installed fixture",
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -26,7 +39,14 @@ class FixtureClient:
         self.calls.append((method, params))
         if method == "thread/start":
             require("historyMode" not in params, "paginated thread creation is unsupported")
-            return {"thread": {"id": f"thread-{len(self.calls)}"}}
+            return {
+                "thread": {"id": f"thread-{len(self.calls)}"},
+                # The runtime reports the profile it selected, and the
+                # coordinator refuses a session that gets any other one.
+                "activePermissionProfile": {
+                    "id": params["permissions"], "extends": FIXTURE_PROFILE.extends,
+                },
+            }
         if method == "turn/start":
             return {"turn": {"id": f"turn-{len(self.calls)}"}}
         return {}
@@ -71,8 +91,14 @@ async def run(first: Path, second: Path) -> None:
     service = CoordinatorService(
         client, broker, events, allowed_roots=(first, second),
         worker_permissions={
-            first: WorkerPermissions(sandbox_mode="workspace-write", source="installed fixture"),
-            second: WorkerPermissions(sandbox_mode="workspace-write", source="installed fixture"),
+            first: WorkerPermissions(
+                permission_profile=FIXTURE_PROFILE.id, source="installed fixture",
+                profile=FIXTURE_PROFILE,
+            ),
+            second: WorkerPermissions(
+                permission_profile=FIXTURE_PROFILE.id, source="installed fixture",
+                profile=FIXTURE_PROFILE,
+            ),
         },
     )
     coordinator = Coordinator(service, broker, events, client)

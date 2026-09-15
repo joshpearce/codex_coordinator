@@ -105,4 +105,7 @@ async def test_one_shot_cli_uses_operator_judge_settings(monkeypatch, tmp_path: 
     assert captured["runner"].keywords == {
         "codex_command": config.codex_command,
         "timeout_seconds": 42,
+        # Authentication lives in the Codex home, so a judge is pointed at the
+        # operator's rather than left to find the developer's (#0021).
+        "codex_home": None,
     }

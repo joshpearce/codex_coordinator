@@ -1,0 +1,7 @@
+# Development extras, kept separate from the runtime manifest on purpose.
+#
+# This one names a tarball on github.com, which the operator's ceiling does
+# not allow: the proxy refuses that host with `403 Forbidden` and this
+# restore fails. That is survivable rather than fatal — the runtime manifest
+# has already restored, and the supplied test suite needs nothing from here.
+https://github.com/astanin/python-tabulate/archive/refs/tags/v0.9.0.tar.gz

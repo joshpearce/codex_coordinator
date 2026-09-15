@@ -31,6 +31,16 @@ upgrade re-asks the question instead of inheriting the answer. Their remaining
 M4 siblings — restricted judge reads (#0006), narrowed coordinator egress
 (#0007), and allowed-root hardening (#0005) — are open.
 
+M3's host-scoped network ceiling (#0001) has a precondition rather than a
+parallel item. A ceiling scoped to a host can only be expressed as a permission
+profile: the wire grant type carries a single bit, while a profile carries a
+per-domain map, a per-socket map, and loopback binding as separately
+controllable axes. #0021 moved the worker boundary onto profiles, gave the
+operator a Codex home to define them in, and built a live harness that proves
+all three axes in one run. What #0001 still decides is what the ceiling for a
+real network-capable worker should be, how an operator declares it per project,
+and whether the `network_proxy` feature is depended on outside a test home.
+
 M3 is the current milestone. The two-tier constitution (#0003) is implemented
 and covered offline: the overall document is a ceiling every project inherits,
 every project must add one document that only narrows it, and a judge receives

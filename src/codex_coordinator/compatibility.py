@@ -83,6 +83,70 @@ def _approval_policies(definition: dict[str, Any]) -> None:
         )
 
 
+#: The network axes a permission profile can control independently, as the
+#: runtime reports them. A profile is the only shape that can express a
+#: host-scoped ceiling: the wire grant type carries one bit, while these carry a
+#: per-domain map, a per-socket map, and loopback binding separately. The
+#: config-file spelling differs (`network.mode`, `network.domains`,
+#: `network.unix_sockets`, `network.allow_local_binding`) and `mode` has no wire
+#: key at all, so only the reported shape is asserted here.
+PROFILE_NETWORK_AXES = frozenset({
+    "allowLocalBinding", "domains", "enabled", "unixSockets",
+})
+
+
+def _permission_profile_surface(requests: dict[str, Any], v2: dict[str, Any]) -> None:
+    """Fail if the runtime loses the shape that gives a boundary its provenance.
+
+    Issue #0021: the coordinator selects a named permission profile rather than
+    sending the legacy sandbox literal, because only a profile is reported back
+    as `activePermissionProfile` and only a profile can carry a host-scoped
+    network ceiling. A CLI that drops `permissions` or renames these keys has
+    taken that away, and the coordinator must refuse to start rather than fall
+    back to a shape with no provenance.
+
+    The one rule this cannot check is that `permissions` and `sandbox` are
+    mutually exclusive: the schema states it only in prose, and the runtime
+    enforces it by answering `-32600`. That is asserted live instead, in
+    `tests/test_runtime_boundary.py`.
+    """
+    for params in ("ThreadStartParams", "TurnStartParams"):
+        if "permissions" not in requests["definitions"][params].get("properties", {}):
+            raise CodexCompatibilityError(
+                f"Codex dropped the {params} `permissions` field. Re-read issue #0021 "
+                "before adopting this CLI: without it the only way to set a boundary is "
+                "the legacy sandbox literal, which the runtime reports no profile "
+                "provenance for."
+            )
+    if "activePermissionProfile" not in v2["ThreadStartResponse"].get("properties", {}):
+        raise CodexCompatibilityError(
+            "Codex dropped `activePermissionProfile` from the thread/start response. "
+            "Re-read issue #0021 before adopting this CLI: the coordinator verifies the "
+            "profile the server actually selected, and cannot do so from the legacy "
+            "`sandbox` view, which is lossy for host-scoped network grants."
+        )
+    _required(v2["ActivePermissionProfile"], {"id"}, "active permission profile")
+    _properties(v2["ActivePermissionProfile"], {"id", "extends"}, "active permission profile")
+    axes = set(v2["NetworkRequirements"].get("properties", {}))
+    if not PROFILE_NETWORK_AXES.issubset(axes):
+        raise CodexCompatibilityError(
+            "Codex network permission axes changed: expected "
+            f"{sorted(PROFILE_NETWORK_AXES)}, found {sorted(axes)}. Re-read issue #0021 "
+            "before adopting this CLI; the live boundary gate asserts external hosts, "
+            "unix sockets, and loopback binding as separately controllable axes."
+        )
+    for definition, context in (
+        ("NetworkDomainPermission", "network domain permission"),
+        ("NetworkUnixSocketPermission", "network unix socket permission"),
+    ):
+        if set(v2[definition].get("enum", [])) != {"allow", "deny"}:
+            raise CodexCompatibilityError(
+                f"Codex {context} values changed: expected ['allow', 'deny'], found "
+                f"{sorted(v2[definition].get('enum', []))}. Re-read issue #0021 before "
+                "adopting this CLI."
+            )
+
+
 def _decisions(definition: dict[str, Any], expected: set[str], context: str) -> None:
     found = {
         value for item in definition.get("oneOf", [])
@@ -130,6 +194,7 @@ def _check_protocol_schema(schema_dir: Path) -> None:
     )
     _required(requests["definitions"]["TurnStartParams"], {"threadId", "input"}, "turn/start")
     _approval_policies(requests["definitions"]["AskForApproval"])
+    _permission_profile_surface(requests, bundle["definitions"]["v2"])
     _properties(requests["definitions"]["TurnInterruptParams"], {"threadId", "turnId"}, "turn/interrupt")
     _required(requests["definitions"]["TurnInterruptParams"], {"threadId", "turnId"}, "turn/interrupt")
     v2 = bundle["definitions"]["v2"]

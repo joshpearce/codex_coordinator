@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from support import started_thread
 from codex_coordinator import ApprovalRequest, Coordinator, CoordinationEvent, JudgeDecision, OperatorConfig
 from codex_coordinator.service import ApprovalBroker, CoordinatorService, EventCursorExpired, EventLog, Session
 from codex_coordinator.coordinator import ApprovalPolicy, SessionRegistration
@@ -18,7 +19,10 @@ class FakeClient:
     async def call(self, method, params):
         self.calls.append((method, params))
         if method == "thread/start":
-            return {"thread": {"id": f"thread-{len([c for c in self.calls if c[0] == 'thread/start'])}"}}
+            return started_thread(
+                params,
+                f"thread-{len([c for c in self.calls if c[0] == 'thread/start'])}",
+            )
         if method == "turn/start":
             return {"turn": {"id": f"turn-{len([c for c in self.calls if c[0] == 'turn/start'])}"}}
         return {}

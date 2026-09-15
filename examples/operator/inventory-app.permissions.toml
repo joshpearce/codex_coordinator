@@ -6,15 +6,20 @@
 # Codex configuration, so nothing the worker can write decides what its next
 # session may do.
 #
-# Execution is confined to a sandbox in which only this project directory is
-# writable and the network is unavailable, so anything beyond that boundary has
-# to be approved by a reviewer before it runs. Under "untrusted" the runtime
-# raises an approval request before anything it does not already trust, so what
+# The boundary is named, not spelled out here: `permission_profile` selects one
+# of the `[permissions.<id>]` profiles defined in the operator's Codex home, and
+# the coordinator resolves it before any thread starts, so an id that names
+# nothing — or a profile wider than it reads — fails startup rather than a
+# session. `worker_workspace` confines execution to a sandbox in which only this
+# project directory is writable and the network is unavailable, so anything
+# beyond that boundary has to be approved by a reviewer before it runs. Under
+# "untrusted" the runtime raises an approval request before anything it does not
+# already trust, so what
 # reaches a reviewer follows this file rather than the worker's own discretion.
 # Any key may be omitted to take the operator-wide default from operator.toml.
 approval_policy = "untrusted"
 approvals_reviewer = "user"
-sandbox_mode = "workspace-write"
+permission_profile = "worker_pypi"
 # Mundane project-local commands the coordinator decides itself, by rule,
 # before a request would reach a judge: range reads, searches, and this
 # project's own test and CLI entry points. The file sits beside this one under

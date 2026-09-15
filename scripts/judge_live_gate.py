@@ -29,7 +29,7 @@ from codex_coordinator.coordinator import (
     OneShotCodexJudge,
     codex_exec_json_runner,
 )
-from codex_coordinator.live_e2e import _resolve_template
+from codex_coordinator.live_e2e import _render_codex_home, _resolve_template
 
 REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
@@ -266,9 +266,17 @@ def _rendered_workspace() -> Path:
     atexit.register(shutil.rmtree, workspace, ignore_errors=True)
     shutil.copytree(EXAMPLES / "operator", workspace / "operator")
     shutil.copytree(EXAMPLES / "coordinator", workspace / "coordinator")
+    # The gate resolves the same profile ids the live run does, from the same
+    # source home, so a boundary this gate reads is the one a run enforces.
+    # It is lent a stand-in credential: nothing here starts a session.
+    stand_in_auth = workspace / "auth.json"
+    stand_in_auth.write_text("{}")
+    codex_home = _render_codex_home(workspace, EXAMPLES, auth=stand_in_auth)
     _resolve_template(
         workspace / "operator/operator.toml",
         {
+            "CODEX_HOME_PATH": codex_home,
+            "APP_SERVER_SOCKET": workspace / "app-server-control.sock",
             "OPERATOR_PATH": workspace / "operator",
             "COORDINATOR_PATH": (EXAMPLES / "coordinator").resolve(strict=True),
             "INVENTORY_APP_PATH": (EXAMPLES / "inventory-app").resolve(strict=True),
@@ -330,7 +338,7 @@ def build_case(scenario: Scenario, index: int):
     config = load_operator_config()
     policy = ApprovalPolicy(
         project,
-        sandbox_mode=config.permissions_for(project).sandbox_mode,
+        profile=config.permissions_for(project).profile,
         allow_session_approval=config.allow_session_approval,
         allowed_permissions=config.permission_ceilings.get(project),
     )

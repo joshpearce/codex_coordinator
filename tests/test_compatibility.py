@@ -30,11 +30,15 @@ def _schema_fixture(root: Path):
         "definitions": {
             "ThreadStartParams": {"properties": {
                 key: {} for key in (
-                    "cwd", "runtimeWorkspaceRoots", "approvalPolicy", "approvalsReviewer", "sandbox",
+                    "cwd", "runtimeWorkspaceRoots", "approvalPolicy", "approvalsReviewer",
+                    "sandbox", "permissions",
                 )
             }},
             "TurnStartParams": {
-                "properties": {key: {} for key in ("threadId", "cwd", "input", "sandboxPolicy", "turnTrigger", "effort")},
+                "properties": {key: {} for key in (
+                    "threadId", "cwd", "input", "sandboxPolicy", "turnTrigger", "effort",
+                    "permissions",
+                )},
                 "required": ["threadId", "input"],
             },
             "TurnInterruptParams": {
@@ -119,7 +123,18 @@ def _schema_fixture(root: Path):
         "codex_app_server_protocol.schemas.json": {"definitions": {
             **definitions,
             "v2": {
-                "ThreadStartResponse": {"required": ["thread"]},
+                "ThreadStartResponse": {
+                    "required": ["thread"],
+                    "properties": {"activePermissionProfile": {}, "sandbox": {}},
+                },
+                "ActivePermissionProfile": {
+                    "properties": {"id": {}, "extends": {}}, "required": ["id"],
+                },
+                "NetworkRequirements": {"properties": {key: {} for key in (
+                    "allowLocalBinding", "domains", "enabled", "unixSockets",
+                )}},
+                "NetworkDomainPermission": {"enum": ["allow", "deny"]},
+                "NetworkUnixSocketPermission": {"enum": ["allow", "deny"]},
                 "Thread": {"required": ["id"]},
                 "TurnStartResponse": {"required": ["turn"]},
                 "Turn": {"required": ["id", "status"]},
@@ -252,4 +267,74 @@ def test_schema_gate_flags_a_removed_approval_policy(tmp_path: Path):
     ].remove("untrusted")
     (tmp_path / "ClientRequest.json").write_text(json.dumps(documents["ClientRequest.json"]))
     with pytest.raises(CodexCompatibilityError, match="approval policies changed"):
+        check_protocol_schema(tmp_path)
+
+
+def _rewrite(root: Path, documents: dict, name: str) -> None:
+    (root / name).write_text(json.dumps(documents[name]))
+
+
+def test_schema_gate_flags_a_lost_permissions_field(tmp_path: Path):
+    """The boundary this project sends has to stay selectable by profile id.
+
+    Issue #0021: `permissions` is the only field that attaches a thread to the
+    profile system, and the alternative is the legacy sandbox literal the
+    runtime reports no provenance for. A CLI that drops it fails startup here
+    rather than silently returning this project to the shape it migrated off.
+    """
+    for params in ("ThreadStartParams", "TurnStartParams"):
+        root = tmp_path / params
+        root.mkdir()
+        documents = _schema_fixture(root)
+        del documents["ClientRequest.json"]["definitions"][params]["properties"]["permissions"]
+        _rewrite(root, documents, "ClientRequest.json")
+        with pytest.raises(CodexCompatibilityError, match=f"{params} `permissions` field"):
+            check_protocol_schema(root)
+
+
+def test_schema_gate_flags_a_lost_profile_provenance(tmp_path: Path):
+    """Without the readback there is no way to verify the selected boundary."""
+    documents = _schema_fixture(tmp_path)
+    v2 = documents["codex_app_server_protocol.schemas.json"]["definitions"]["v2"]
+    del v2["ThreadStartResponse"]["properties"]["activePermissionProfile"]
+    _rewrite(tmp_path, documents, "codex_app_server_protocol.schemas.json")
+    with pytest.raises(CodexCompatibilityError, match="activePermissionProfile"):
+        check_protocol_schema(tmp_path)
+
+    identity = tmp_path / "identity"
+    identity.mkdir()
+    documents = _schema_fixture(identity)
+    v2 = documents["codex_app_server_protocol.schemas.json"]["definitions"]["v2"]
+    v2["ActivePermissionProfile"]["required"] = []
+    _rewrite(identity, documents, "codex_app_server_protocol.schemas.json")
+    with pytest.raises(CodexCompatibilityError, match="active permission profile"):
+        check_protocol_schema(identity)
+
+
+def test_schema_gate_flags_a_renamed_network_axis(tmp_path: Path):
+    """The live gate proves three network axes separately; each must survive.
+
+    A host-scoped ceiling lives in `domains`, the app-server control socket in
+    `unixSockets`, and the service's own loopback port in `allowLocalBinding`.
+    Collapsing any of them back into one bit is the change #0021 exists to
+    notice.
+    """
+    for axis in ("domains", "unixSockets", "allowLocalBinding"):
+        root = tmp_path / axis
+        root.mkdir()
+        documents = _schema_fixture(root)
+        v2 = documents["codex_app_server_protocol.schemas.json"]["definitions"]["v2"]
+        del v2["NetworkRequirements"]["properties"][axis]
+        _rewrite(root, documents, "codex_app_server_protocol.schemas.json")
+        with pytest.raises(CodexCompatibilityError, match="network permission axes changed"):
+            check_protocol_schema(root)
+
+
+def test_schema_gate_flags_a_changed_network_grant_value(tmp_path: Path):
+    """A third value would be a grant this project has never reasoned about."""
+    documents = _schema_fixture(tmp_path)
+    v2 = documents["codex_app_server_protocol.schemas.json"]["definitions"]["v2"]
+    v2["NetworkDomainPermission"]["enum"].append("prompt")
+    _rewrite(tmp_path, documents, "codex_app_server_protocol.schemas.json")
+    with pytest.raises(CodexCompatibilityError, match="network domain permission values changed"):
         check_protocol_schema(tmp_path)

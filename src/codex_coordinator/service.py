@@ -36,6 +36,7 @@ from .coordinator import (
     refuse_worker_project_rules,
     select_worker_permissions,
     mutable_evidence,
+    verify_active_profile,
 )
 from .config import OperatorConfig
 from .compatibility import check_codex_compatibility
@@ -164,7 +165,12 @@ class Session:
     state: str = "active"
     turn_id: str | None = None
     last_completed_turn_id: str | None = field(default=None, repr=False)
-    sandbox_policy: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    # The profile id this session's thread was started with, and the
+    # `activePermissionProfile` the server reported back for it. Both are
+    # carried so a reader can see that the boundary asked for is the boundary
+    # the runtime selected (#0021).
+    permission_profile: str = ""
+    active_permission_profile: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def json(self) -> dict[str, Any]:
         return {
@@ -173,6 +179,8 @@ class Session:
             "project": self.project,
             "state": self.state,
             "turnId": self.turn_id,
+            "permissionProfile": self.permission_profile,
+            "activePermissionProfile": dict(self.active_permission_profile),
         }
 
 
@@ -591,7 +599,7 @@ class CoordinatorService:
         permissions = self.permissions_for(project)
         policy = ApprovalPolicy(
             project,
-            sandbox_mode=permissions.sandbox_mode,
+            profile=permissions.profile,
             allow_session_approval=self.allow_session_approval,
             allowed_permissions=self.permission_ceilings.get(project),
             exec_policy=permissions.exec_policy,
@@ -605,11 +613,16 @@ class CoordinatorService:
             # and because the pinned CLI rejects "untrusted" as a config value.
             "approvalPolicy": permissions.approval_policy,
             "approvalsReviewer": permissions.approvals_reviewer,
-            "sandbox": permissions.sandbox_mode,
+            # A profile id, never the legacy `sandbox` literal. The two are
+            # mutually exclusive on the wire, and the literal detaches the
+            # thread from the profile system so nothing reports what boundary
+            # it actually got.
+            "permissions": permissions.permission_profile,
         }
         if self.worker_model:
             start_params["model"] = self.worker_model
         result = await self.client.call("thread/start", start_params)
+        active = verify_active_profile(result or {}, permissions.permission_profile)
         thread = (result or {}).get("thread", result or {})
         thread_id = thread.get("id") or thread.get("threadId")
         if not isinstance(thread_id, str) or not thread_id.strip():
@@ -617,12 +630,11 @@ class CoordinatorService:
         if thread_id in self.thread_sessions:
             raise RuntimeError(f"thread/start returned an already registered thread ID: {thread_id}")
         session_id = uuid.uuid4().hex
-        raw_sandbox_policy = permissions.enforced_sandbox(project)
-        sandbox_policy = MappingProxyType({
-            key: tuple(value) if isinstance(value, list) else value
-            for key, value in raw_sandbox_policy.items()
-        })
-        session = Session(session_id, thread_id, str(project), sandbox_policy=sandbox_policy)
+        session = Session(
+            session_id, thread_id, str(project),
+            permission_profile=permissions.permission_profile,
+            active_permission_profile=MappingProxyType(dict(active)),
+        )
         self.approvals.register(SessionRegistration(session_id, thread_id, str(project), policy))
         self.sessions[session_id] = session
         self.thread_sessions[thread_id] = session_id
@@ -638,7 +650,8 @@ class CoordinatorService:
                 "input": [{"type": "text", "text": prompt}],
                 "turnTrigger": "coordinator-api",
                 "effort": self.worker_reasoning_effort,
-                "sandboxPolicy": dict(sandbox_policy),
+                # No boundary field: the thread's profile is sticky, and
+                # re-sending one would only reassert state that never lapsed.
             })
         except Exception:
             session.state = "failed"
@@ -679,7 +692,6 @@ class CoordinatorService:
                 "input": [{"type": "text", "text": prompt}],
                 "turnTrigger": "coordinator-api",
                 "effort": self.worker_reasoning_effort,
-                "sandboxPolicy": dict(session.sandbox_policy),
             })
         except Exception:
             session.state = "failed"
@@ -1057,6 +1069,7 @@ async def run(args: argparse.Namespace) -> None:
     await asyncio.to_thread(check_codex_compatibility, config.codex_command)
     await ensure_daemon(
         socket_path=config.socket_path, codex_command=config.codex_command,
+        codex_home=None if config.codex_home is None else config.codex_home.path,
     )
     events = EventLog(
         capacity=config.event_capacity, max_bytes=config.event_max_bytes,
@@ -1070,6 +1083,7 @@ async def run(args: argparse.Namespace) -> None:
                 codex_exec_json_runner,
                 codex_command=config.codex_command,
                 timeout_seconds=config.judge_timeout_seconds,
+                codex_home=None if config.codex_home is None else config.codex_home.path,
             ),
             constitution=config.constitution,
         )

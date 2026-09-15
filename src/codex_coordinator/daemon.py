@@ -7,8 +7,24 @@ import stat
 from pathlib import Path
 
 
-def default_daemon_socket() -> Path:
-    return Path.home() / ".codex/app-server-control/app-server-control.sock"
+#: Where a Codex app-server daemon puts its control socket, relative to the home
+#: it was started with, so the default follows the operator's configured Codex
+#: home rather than ``Path.home()`` (#0021).
+#:
+#: The daemon is not a way to isolate an arbitrary home: ``codex app-server
+#: daemon start`` refuses unless the managed standalone install exists under the
+#: home it is given. A deployment whose home is not the managed one runs its own
+#: listener and names it in ``socket_path``, which is what the live harness does.
+DAEMON_SOCKET = "app-server-control/app-server-control.sock"
+
+
+def default_codex_home() -> Path:
+    return Path.home() / ".codex"
+
+
+def default_daemon_socket(codex_home: Path | None = None) -> Path:
+    home = default_codex_home() if codex_home is None else Path(codex_home)
+    return home / DAEMON_SOCKET
 
 
 def validate_local_socket(socket_path: Path) -> None:
@@ -45,10 +61,11 @@ async def ensure_daemon(
     *,
     socket_path: Path,
     codex_command: str = "codex",
+    codex_home: Path | None = None,
     command_timeout: float = 30,
     connect_timeout: float = 10,
 ) -> None:
-    if socket_path != default_daemon_socket():
+    if socket_path != default_daemon_socket(codex_home):
         if not socket_path.exists() and not socket_path.is_symlink():
             raise RuntimeError(
                 f"custom Codex socket is unavailable: {socket_path}; start an app-server listener there first"
@@ -57,11 +74,18 @@ async def ensure_daemon(
         return
     if socket_path.exists() or socket_path.is_symlink():
         validate_local_socket(socket_path)
+    # The daemon reads its whole configuration — permission profiles included —
+    # from this home, so it is the same home the coordinator resolved profiles
+    # against and never whichever one the developer's other sessions use.
+    environment = None if codex_home is None else {
+        **os.environ, "CODEX_HOME": str(codex_home),
+    }
     process = await asyncio.create_subprocess_exec(
         codex_command,
         "app-server",
         "daemon",
         "start",
+        env=environment,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

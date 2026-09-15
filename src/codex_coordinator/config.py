@@ -21,6 +21,9 @@ from .coordinator import (
     select_worker_permissions,
 )
 from .daemon import default_daemon_socket
+from .profiles import (
+    CodexHome, PermissionProfileError, resolve_profile, verify_home,
+)
 from .execpolicy import ExecPolicy, ExecPolicyError
 
 
@@ -31,7 +34,7 @@ _FIELDS = frozenset({
     "approval_timeout_seconds", "judge_policy", "judge_timeout_seconds",
     "event_capacity", "event_max_bytes", "item_capacity", "item_max_bytes",
     "approval_mode", "constitution_path", "coordinator_root",
-    "project_constitutions", "worker_permissions",
+    "project_constitutions", "worker_permissions", "codex_home",
 })
 _ENV_FIELDS = {
     "CODEX_COORDINATOR_ALLOWED_ROOTS": "allowed_roots",
@@ -54,6 +57,7 @@ _ENV_FIELDS = {
     "CODEX_COORDINATOR_COORDINATOR_ROOT": "coordinator_root",
     "CODEX_COORDINATOR_PROJECT_CONSTITUTIONS": "project_constitutions",
     "CODEX_COORDINATOR_WORKER_PERMISSIONS": "worker_permissions",
+    "CODEX_COORDINATOR_CODEX_HOME": "codex_home",
 }
 
 
@@ -179,6 +183,7 @@ class OperatorConfig:
     worker_permissions: Mapping[Path, WorkerPermissions]
     worker_permission_paths: Mapping[Path, Path]
     default_worker_permissions: WorkerPermissions
+    codex_home: CodexHome | None
 
     def permissions_for(self, project: Path | str) -> WorkerPermissions:
         """The operator-declared boundary for one project, else the wide default."""
@@ -201,7 +206,7 @@ class OperatorConfig:
             "allowed_roots": [],
             "permission_ceilings": {},
             "codex_command": "codex",
-            "socket_path": str(default_daemon_socket()),
+            "socket_path": None,
             "worker_model": None,
             "worker_reasoning_effort": "low",
             "worker_approval_policy": None,
@@ -218,6 +223,7 @@ class OperatorConfig:
             "project_constitutions": {},
             "worker_permissions": {},
             "coordinator_root": None,
+            "codex_home": None,
         }
         if config_path is not None:
             config_path = Path(config_path).expanduser()
@@ -360,10 +366,45 @@ class OperatorConfig:
                 "worker_approval_policy must be one of "
                 f"{sorted(WorkerPermissions.WIRE_APPROVAL_POLICIES)}"
             )
-        default_worker_permissions = WorkerPermissions(
+        # The Codex home is where every permission profile this coordinator
+        # selects is defined. It is operator-owned like operator.toml, and it is
+        # read here so that an id naming nothing, a boundary wider than the one
+        # this project used to enforce, or a network ceiling the runtime would
+        # silently not enforce, all fail startup rather than a worker session.
+        raw_codex_home = values["codex_home"]
+        codex_home = None
+        if raw_codex_home is not None:
+            try:
+                codex_home = verify_home(
+                    CodexHome.load(_absolute_path(raw_codex_home, "codex_home"))
+                )
+            except PermissionProfileError as exc:
+                raise ValueError(str(exc)) from exc
+            if any(
+                codex_home.path == root or root in codex_home.path.parents
+                for root in (
+                    *canonical_roots,
+                    *(() if coordinator_root is None else (coordinator_root,)),
+                )
+            ):
+                raise ValueError(
+                    "codex_home must be outside coordinator- and worker-writable "
+                    "roots; a session that can write its own permission profiles "
+                    "has no boundary"
+                )
+
+        def _resolved(permissions: WorkerPermissions) -> WorkerPermissions:
+            """Attach the boundary an id means, or refuse to start."""
+            try:
+                profile = resolve_profile(permissions.permission_profile, codex_home)
+            except PermissionProfileError as exc:
+                raise ValueError(f"{permissions.source}: {exc}") from exc
+            return replace(permissions, profile=profile)
+
+        default_worker_permissions = _resolved(WorkerPermissions(
             approval_policy=worker_approval_policy or WorkerPermissions().approval_policy,
             source="operator-wide default",
-        )
+        ))
         raw_worker_permissions = values["worker_permissions"]
         if not isinstance(raw_worker_permissions, Mapping):
             raise ValueError("worker_permissions must be a project-to-permissions-file mapping")
@@ -411,7 +452,16 @@ class OperatorConfig:
                 except ExecPolicyError as exc:
                     raise ValueError(str(exc)) from exc
                 permissions = replace(permissions, exec_policy=exec_policy)
-            worker_permissions[project] = permissions
+            worker_permissions[project] = _resolved(permissions)
+
+        # An unset socket follows the configured home, so isolating the home
+        # isolates the daemon with it rather than leaving the run on the shared
+        # one under the developer's own ~/.codex.
+        socket_path = (
+            default_daemon_socket(None if codex_home is None else codex_home.path)
+            if values["socket_path"] is None
+            else _socket_path(values["socket_path"])
+        )
 
         raw_ceilings = values["permission_ceilings"]
         if not isinstance(raw_ceilings, Mapping):
@@ -440,7 +490,7 @@ class OperatorConfig:
             allowed_roots=tuple(canonical_roots),
             permission_ceilings=MappingProxyType(ceilings),
             codex_command=values["codex_command"],
-            socket_path=_socket_path(values["socket_path"]),
+            socket_path=socket_path,
             worker_model=model,
             worker_reasoning_effort=values["worker_reasoning_effort"],
             worker_approval_policy=worker_approval_policy,
@@ -465,4 +515,5 @@ class OperatorConfig:
             worker_permissions=MappingProxyType(worker_permissions),
             worker_permission_paths=MappingProxyType(worker_permission_paths),
             default_worker_permissions=default_worker_permissions,
+            codex_home=codex_home,
         )

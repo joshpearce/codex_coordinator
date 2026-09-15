@@ -91,14 +91,36 @@ A worker project needs no Codex configuration of its own. Each worker's
 execution boundary is declared in an operator-owned file beside `operator.toml`,
 outside every worker-writable root, and the coordinator sends those values on
 `thread/start`. A file inside a worker's own project would be one that worker
-can rewrite, so nothing there is read:
+can rewrite, so nothing there is read.
+
+The boundary itself is a named permission profile, defined in a Codex home the
+operator owns. Create one outside every worker- and coordinator-writable root:
+
+```sh
+mkdir -p "$COORD_DIR/codex-home"
+cp examples/operator/codex-home/config.toml "$COORD_DIR/codex-home/config.toml"
+ln -s "$HOME/.codex/auth.json" "$COORD_DIR/codex-home/auth.json"
+```
+
+Authentication lives in the home, so a fresh one is not signed in until that
+symlink exists. The runtime also writes into whichever home it is given — a
+project trust record, several sqlite files, `skills/` and `tmp/` — so this is a
+directory for the coordinator to own, not one to share with a checkout.
+
+`worker_workspace` in that file is the boundary a worker gets: the project as
+its only writable root, no network, and neither `/tmp` nor `$TMPDIR` writable.
+The two `filesystem` entries are load-bearing — `:workspace` on its own leaves
+both temporary roots writable, and the coordinator refuses a writable profile
+that omits them.
+
+Then declare each worker's boundary by naming a profile from that home:
 
 ```sh
 for NAME in project-a project-b; do
   printf '%s\n' \
     'approval_policy = "untrusted"' \
     'approvals_reviewer = "user"' \
-    'sandbox_mode = "workspace-write"' > "$COORD_DIR/$NAME.permissions.toml"
+    'permission_profile = "worker_workspace"' > "$COORD_DIR/$NAME.permissions.toml"
 done
 ```
 
@@ -106,13 +128,18 @@ done
 runtime raise an approval request before anything it does not already trust;
 `on-request` leaves that decision to the worker, which means a worker that never
 asks is never judged. `never` is rejected, since it would execute unjudged.
-`sandbox_mode` is `workspace-write` or `read-only`, and `approvals_reviewer`
+`permission_profile` names one of the `[permissions.<id>]` profiles defined in
+the operator's Codex home, or a runtime built-in such as `:read-only`. The id is
+resolved before any session starts, so one that names nothing — or a profile
+wider than it reads — fails startup rather than a worker. `approvals_reviewer`
 must be `user`, the only reviewer that routes an approval to a judge.
 
 Each file is referenced from `operator.toml` under `[worker_permissions]`, shown
 with the rest of that file below. Any key may be omitted to take the
 operator-wide default: `worker_approval_policy` in `operator.toml`, else
-`on-request` and `workspace-write`. A declaration at a root governs every
+`on-request` and `:read-only`. The narrow default is deliberate: a write
+boundary has to be named by an operator, because only a profile they define can
+exclude the temporary roots. A declaration at a root governs every
 project beneath it, and a more specific one deeper in the tree overrides it.
 
 Do not tell a worker to stage approval requests. Configure the boundary and let
@@ -173,7 +200,7 @@ inspection-only workers.
 ## Inside its project a worker acts by right
 
 A worker edits its own project the way a developer edits a checkout. That
-authority is enforced twice before any judge is involved: the turn sandbox makes
+authority is enforced twice before any judge is involved: the permission profile makes
 the project the only writable root with no network, and every change path is
 resolved against the registered project and refused if it lands outside. So a
 `workspace-write` worker's file change whose every path stays inside its project
@@ -245,8 +272,8 @@ trusted policy:
 cp examples/operator/constitution.md "$COORD_DIR/constitution.md"
 cp examples/operator/inventory-app.constitution.md "$COORD_DIR/project-a.md"
 cp examples/operator/inventory-report.constitution.md "$COORD_DIR/project-b.md"
-printf 'approval_mode = "service"\nconstitution_path = "%s"\ncoordinator_root = "%s"\nallowed_roots = ["%s", "%s"]\n[worker_permissions]\n"%s" = "%s"\n"%s" = "%s"\n[project_constitutions]\n"%s" = "%s"\n"%s" = "%s"\n' \
-  "$COORD_DIR/constitution.md" "$COORDINATOR_PROJECT" \
+printf 'approval_mode = "service"\nconstitution_path = "%s"\ncoordinator_root = "%s"\ncodex_home = "%s"\nallowed_roots = ["%s", "%s"]\n[worker_permissions]\n"%s" = "%s"\n"%s" = "%s"\n[project_constitutions]\n"%s" = "%s"\n"%s" = "%s"\n' \
+  "$COORD_DIR/constitution.md" "$COORDINATOR_PROJECT" "$COORD_DIR/codex-home" \
   "$PROJECT_A" "$PROJECT_B" \
   "$PROJECT_A" "$COORD_DIR/project-a.permissions.toml" \
   "$PROJECT_B" "$COORD_DIR/project-b.permissions.toml" \
@@ -326,37 +353,35 @@ PROJECT_A="$WORKSPACE_DIR/project-a"
 PROJECT_B="$WORKSPACE_DIR/project-b"
 ```
 
-Give the coordinator project its role instructions, and declare its Codex
-permission profile on the command line rather than inside the project. Run this
-from the cloned repository. The profile lets the coordinating session call the
-loopback service and the default private app-server socket; it does **not** make
-either worker project writable. It does give the coordinator general outbound
-network access, so use it only in the trusted local environment described above.
+Give the coordinator project its role instructions, and select its Codex
+permission profile by id from the Codex home you created above. Run this from
+the cloned repository. `coordinator_session` lets the session call the loopback
+service and nothing else: it does **not** make either worker project writable,
+and with `network_proxy` on it reaches no external host at all. It is not given
+the app-server control socket either — the service owns that connection and is
+not sandboxed, and a session that could reach it could drive the runtime
+directly and bypass judging.
 
 ```sh
 if [ ! -e "$COORDINATOR_PROJECT/AGENTS.md" ] &&
    [ ! -L "$COORDINATOR_PROJECT/AGENTS.md" ]; then
   cp examples/coordinator/AGENTS.md "$COORDINATOR_PROJECT/AGENTS.md"
 fi
-COORDINATOR_SOCKET="$HOME/.codex/app-server-control/app-server-control.sock"
 set -- \
-  -c 'default_permissions="coordinator"' \
-  -c 'approval_policy="never"' \
-  -c 'permissions.coordinator.extends=":workspace"' \
-  -c 'permissions.coordinator.network.enabled=true' \
-  -c 'permissions.coordinator.network.mode="full"' \
-  -c "permissions.coordinator.network.unix_sockets={\"$COORDINATOR_SOCKET\"=\"allow\"}"
+  -c 'default_permissions="coordinator_session"' \
+  -c 'approval_policy="never"'
 ```
 
-Pass `"$@"` to `codex` below. The socket entry must match `socket_path` if you
-changed that operator setting. Do not write this profile into
-`$COORDINATOR_PROJECT/.codex/config.toml` instead. Under `codex exec`, Codex CLI
-0.154.0 ignores a `[permissions]` profile found there: the session keeps the
-default sandbox, which has no network, every call to the service is refused, and
-nothing reports that the file was discarded (`docs/security.md`). The command
-line is the form this project verifies, and it is also the rule this project
-applies to workers: the one root a session can write declares none of its own
-permissions. Now start an
+Pass `"$@"` to `codex` below. `codex exec` has no `--permission-profile` flag, so
+the id is chosen by overriding the home's pinned default; the profile body lives
+in the home and nowhere else. `approval_policy` is about approvals rather than
+permissions: nothing is watching this session to answer a request. Do not write
+the profile into `$COORDINATOR_PROJECT/.codex/config.toml` instead. Under
+`codex exec`, Codex CLI 0.154.0 ignores a `[permissions]` profile found there:
+the session keeps the default sandbox, which has no network, every call to the
+service is refused, and nothing reports that the file was discarded
+(`docs/security.md`). That is also the rule this project applies to workers: the
+one root a session can write declares none of its own permissions. Now start an
 **interactive Codex session in the coordinator project** with a cross-project
 goal. This example gives two initially empty projects compatible producer and
 consumer tasks; replace it with your own goal for existing projects.
@@ -526,8 +551,12 @@ command and not a supported way to run workers; use
 experiment using the checked-in inventory scaffolds, not the generic
 getting-started path. It creates a retained example workspace and reruns both
 child test suites and an integration scenario after the coordinating session.
-Read the [live E2E guide](docs/networked-orchestration-e2e.md) before running
-it. Development with `uv` is optional (`make sync`, `make test`,
+Both child projects restore declared dependencies into a `.venv` of their own,
+under an operator-set network ceiling that allows PyPI and nothing else. A
+worker uses whatever `python3` is on PATH, and the run refuses to start if that
+interpreter cannot build a virtual environment, rather than reporting a failed
+restore that says nothing about the ceiling. Read the
+[live E2E guide](docs/networked-orchestration-e2e.md) before running it. Development with `uv` is optional (`make sync`, `make test`,
 `make build`); installed users do not need it.
 
 ## Compatibility and license

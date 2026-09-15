@@ -64,3 +64,6 @@ prefix_rule(
     match = [["python", "-m", "inventory_report", "--help"]],
     not_match = [["python", "-m", "inventory_report", "--file", "/tmp/x.json", "list"]],
 )
+# This project declares no dependencies and its operator grants it no reachable
+# host, so nothing here allows a restore. An install reaches a judge like any
+# other unmatched command, and the sandbox refuses it regardless of the verdict.

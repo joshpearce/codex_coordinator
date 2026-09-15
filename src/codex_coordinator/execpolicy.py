@@ -24,7 +24,7 @@ requires every argument to resolve inside the registered project, and refuses
 anything it cannot fully parse so that the request falls through to a judge.
 
 The same file carries the one opt-in that sends an in-project file change to a
-judge. A worker edits its own project by right — the turn sandbox makes that
+judge. A worker edits its own project by right — the permission profile makes that
 project the only writable root and ``normalize_path`` rejects any path outside
 it — so a file change whose every path stays inside the project is accepted by
 code. An operator who wants particular paths reviewed anyway, such as supplied

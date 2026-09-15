@@ -425,28 +425,28 @@ def test_worker_permissions_come_from_an_operator_owned_file(tmp_path: Path):
         "# The boundary for this worker.\n"
         'approval_policy = "untrusted"\n'
         'approvals_reviewer = "user"\n'
-        'sandbox_mode = "read-only"\n',
+        'permission_profile = ":read-only"\n',
     )
     config = OperatorConfig.load(path=config_path, environ={})
     worker = tmp_path / "worker"
     permissions = config.permissions_for(worker)
     assert permissions.approval_policy == "untrusted"
-    assert permissions.sandbox_mode == "read-only"
+    assert permissions.permission_profile == ":read-only"
     assert permissions.source == str(tmp_path / "worker.permissions.toml")
     assert config.worker_permission_paths == {worker: tmp_path / "worker.permissions.toml"}
     # A worker file inside the project is not an input, whatever it says.
     (worker / ".codex").mkdir()
-    (worker / ".codex/config.toml").write_text('sandbox_mode = "danger-full-access"\n')
+    (worker / ".codex/config.toml").write_text('permission_profile = ":danger-full-access"\n')
     assert OperatorConfig.load(
         path=config_path, environ={},
-    ).permissions_for(worker).sandbox_mode == "read-only"
+    ).permissions_for(worker).permission_profile == ":read-only"
     # An undeclared project falls back to the operator-wide default.
     assert config.permissions_for(tmp_path / "elsewhere").source == "operator-wide default"
 
 
 def test_worker_permissions_default_to_the_operator_wide_approval_policy(tmp_path: Path):
     config_path = _operator_with_permissions(
-        tmp_path, 'sandbox_mode = "read-only"\n',
+        tmp_path, 'permission_profile = ":read-only"\n',
         extra='worker_approval_policy = "untrusted"\n',
     )
     permissions = OperatorConfig.load(
@@ -454,14 +454,14 @@ def test_worker_permissions_default_to_the_operator_wide_approval_policy(tmp_pat
     ).permissions_for(tmp_path / "worker")
     assert permissions.approval_policy == "untrusted"
     assert permissions.approvals_reviewer == "user"
-    assert permissions.sandbox_mode == "read-only"
+    assert permissions.permission_profile == ":read-only"
 
 
 def test_worker_permissions_file_must_be_a_trusted_operator_file(tmp_path: Path):
     worker = tmp_path / "worker"
     worker.mkdir()
     inside = worker / "permissions.toml"
-    inside.write_text('sandbox_mode = "workspace-write"\n')
+    inside.write_text('permission_profile = "worker_workspace"\n')
     config_path = tmp_path / "operator.toml"
 
     def load(declared: Path) -> None:
@@ -479,12 +479,12 @@ def test_worker_permissions_file_must_be_a_trusted_operator_file(tmp_path: Path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     sibling = elsewhere / "permissions.toml"
-    sibling.write_text('sandbox_mode = "workspace-write"\n')
+    sibling.write_text('permission_profile = "worker_workspace"\n')
     with pytest.raises(ValueError, match="must be alongside operator.toml"):
         load(sibling)
 
     writable = tmp_path / "writable.permissions.toml"
-    writable.write_text('sandbox_mode = "workspace-write"\n')
+    writable.write_text('permission_profile = "worker_workspace"\n')
     writable.chmod(0o666)
     with pytest.raises(ValueError, match="owner-controlled regular file"):
         load(writable)
@@ -504,7 +504,7 @@ def test_worker_permissions_project_must_be_inside_allowed_roots(tmp_path: Path)
     outside = tmp_path / "outside"
     for directory in (worker, outside):
         directory.mkdir()
-    (tmp_path / "worker.permissions.toml").write_text('sandbox_mode = "read-only"\n')
+    (tmp_path / "worker.permissions.toml").write_text('permission_profile = ":read-only"\n')
     config_path = tmp_path / "operator.toml"
     config_path.write_text(
         f'allowed_roots = ["{worker}"]\n'
@@ -518,7 +518,7 @@ def test_worker_permissions_project_must_be_inside_allowed_roots(tmp_path: Path)
 def test_worker_permissions_require_an_operator_configuration_file(tmp_path: Path):
     worker = tmp_path / "worker"
     worker.mkdir()
-    (tmp_path / "worker.permissions.toml").write_text('sandbox_mode = "read-only"\n')
+    (tmp_path / "worker.permissions.toml").write_text('permission_profile = ":read-only"\n')
     with pytest.raises(ValueError, match="requires an operator configuration file"):
         OperatorConfig.load(environ={}, overrides={
             "allowed_roots": [str(worker)],
@@ -646,3 +646,118 @@ def test_exec_policy_must_be_a_trusted_operator_file(tmp_path: Path):
     policy = config.permissions_for(worker).exec_policy
     assert policy is not None
     assert [rule.pattern[0] for rule in policy.rules] == [("sed",)]
+
+
+def test_codex_home_defines_the_profiles_and_is_resolved_at_startup(tmp_path: Path):
+    """An id that names nothing fails startup, not a worker session (#0021)."""
+    worker = tmp_path / "worker"
+    worker.mkdir()
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        'default_permissions = ":read-only"\n'
+        "\n"
+        "[permissions.worker_workspace]\n"
+        'extends = ":workspace"\n'
+        'filesystem = { ":tmpdir" = "read", ":slash_tmp" = "read" }\n'
+    )
+    (tmp_path / "worker.permissions.toml").write_text(
+        'permission_profile = "worker_workspace"\n'
+    )
+    config_path = tmp_path / "operator.toml"
+
+    def write(profile: str, codex_home: Path | None = home) -> None:
+        (tmp_path / "worker.permissions.toml").write_text(
+            f'permission_profile = "{profile}"\n'
+        )
+        config_path.write_text(
+            f'allowed_roots = ["{worker}"]\n'
+            + (f'codex_home = "{codex_home}"\n' if codex_home is not None else "")
+            + "[worker_permissions]\n"
+            f'"{worker}" = "{tmp_path / "worker.permissions.toml"}"\n'
+        )
+
+    write("worker_workspace")
+    config = OperatorConfig.load(path=config_path, environ={})
+    permissions = config.permissions_for(worker)
+    assert config.codex_home is not None and config.codex_home.path == home
+    assert permissions.profile is not None
+    assert permissions.profile.chain == ("worker_workspace", ":workspace")
+    assert permissions.writable
+    # An unset socket follows the home, so isolating one isolates the daemon.
+    assert config.socket_path.parent.parent == home
+
+    write("absent_profile")
+    with pytest.raises(ValueError, match="is not defined in"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    # Without a home only the built-ins resolve, and none of them is quietly
+    # taken from the developer's own ~/.codex.
+    write("worker_workspace", codex_home=None)
+    with pytest.raises(ValueError, match="no codex_home is configured"):
+        OperatorConfig.load(path=config_path, environ={})
+    write(":read-only", codex_home=None)
+    assert OperatorConfig.load(path=config_path, environ={}).codex_home is None
+
+
+def test_codex_home_must_be_outside_every_writable_root(tmp_path: Path):
+    """A session that can write its own permission profile has no boundary."""
+    worker = tmp_path / "worker"
+    inside = worker / "codex-home"
+    inside.mkdir(parents=True)
+    (inside / "config.toml").write_text('default_permissions = ":read-only"\n')
+    config_path = tmp_path / "operator.toml"
+    config_path.write_text(
+        f'allowed_roots = ["{worker}"]\n'
+        f'codex_home = "{inside}"\n'
+    )
+
+    with pytest.raises(ValueError, match="codex_home must be outside"):
+        OperatorConfig.load(path=config_path, environ={})
+
+
+def test_a_home_with_an_inert_network_ceiling_fails_startup(tmp_path: Path):
+    """The live gate's own home would fail this if the feature were turned off.
+
+    The worker profile a project selects declares no network grants at all, so
+    scoping this to the selected profile would let a home full of inert ceilings
+    start cleanly. It is the home that is misconfigured.
+    """
+    worker = tmp_path / "worker"
+    worker.mkdir()
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    profiles = (
+        "[permissions.worker_workspace]\n"
+        'extends = ":workspace"\n'
+        'filesystem = { ":tmpdir" = "read", ":slash_tmp" = "read" }\n'
+        "\n"
+        "[permissions.worker_pypi]\n"
+        'extends = ":workspace"\n'
+        'filesystem = { ":tmpdir" = "read", ":slash_tmp" = "read" }\n'
+        "\n"
+        "[permissions.worker_pypi.network]\n"
+        "enabled = true\n"
+        'mode = "limited"\n'
+        'domains = { "example.com" = "allow" }\n'
+    )
+    (tmp_path / "worker.permissions.toml").write_text(
+        'permission_profile = "worker_workspace"\n'
+    )
+    config_path = tmp_path / "operator.toml"
+    config_path.write_text(
+        f'allowed_roots = ["{worker}"]\n'
+        f'codex_home = "{home}"\n'
+        "[worker_permissions]\n"
+        f'"{worker}" = "{tmp_path / "worker.permissions.toml"}"\n'
+    )
+
+    (home / "config.toml").write_text('default_permissions = ":read-only"\n\n' + profiles)
+    with pytest.raises(ValueError, match="network_proxy"):
+        OperatorConfig.load(path=config_path, environ={})
+
+    (home / "config.toml").write_text(
+        'default_permissions = ":read-only"\n\n[features]\nnetwork_proxy = true\n\n' + profiles
+    )
+    config = OperatorConfig.load(path=config_path, environ={})
+    assert config.codex_home is not None and config.codex_home.network_proxy

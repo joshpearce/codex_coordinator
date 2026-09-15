@@ -1,0 +1,111 @@
+# The operator's Codex home: where every permission profile this coordinator
+# selects by id is defined.
+#
+# This is a SOURCE file, never a live CODEX_HOME. The runtime writes into a home
+# it is pointed at — a `[projects."<cwd>"] trust_level` record, `goals_*.sqlite`,
+# `logs_*.sqlite`, `memories_*.sqlite`, `queue_*.sqlite`, `state_*.sqlite`, a
+# `skills/` directory and a `tmp/` directory — so pointing CODEX_HOME at a
+# checked-in directory would have the run rewrite the repository. `live_e2e.py`
+# renders this file into a temporary home per run and symlinks `~/.codex/auth.json`
+# into it, because auth lives in the home too: a fresh one reports "Not logged in".
+#
+# Kept outside every worker- and coordinator-writable root, for the same reason
+# `operator.toml` and the constitutions are: a session that can write its own
+# permission profile has no boundary. The coordinator refuses a codex_home that
+# sits inside one of those roots.
+#
+# Doubled-brace markers below are resolved by the live harness. An operator
+# writing this file for real use writes literal paths.
+
+# Pinned deliberately. With no `default_permissions` the runtime refuses to load
+# a home that has a [permissions] table at all, and an unpinned implicit default
+# follows project trust records: the same unconfigured thread resolved to
+# :read-only before a trust record existed for its cwd and to :workspace after.
+default_permissions = ":read-only"
+
+# Required for any `domains` or `unix_sockets` grant below to be enforced. With
+# this off the grants load in full and enforce nothing — every host reachable,
+# unix sockets no grant names reachable, loopback open — so the coordinator
+# refuses to start against a home that declares them without it (#0021).
+[features]
+network_proxy = true
+
+# The default worker boundary: the project is the only writable root, and the
+# network is unavailable. This is the exact boundary this project enforced with
+# a sandbox literal before it migrated to profiles, and it is what a project
+# gets when its permissions file names no profile of its own. The two example
+# projects restore packages, so they select `worker_pypi` below instead.
+#
+# The two `filesystem` entries are not optional. `:workspace` leaves `/tmp` and
+# `$TMPDIR` writable; the literal excluded both. `:tmpdir` and `:slash_tmp` are
+# the profile spellings of `excludeTmpdirEnvVar` and `excludeSlashTmp`, and
+# "read" demotes the write grant while keeping the reads the literal allowed.
+# Naming the paths instead of the tokens does not work: `"/tmp" = "read"` leaves
+# /tmp writable. The coordinator refuses a writable profile that omits them.
+[permissions.worker_workspace]
+description = "Worker: project writable, no network, temporary roots read-only"
+extends = ":workspace"
+filesystem = { ":tmpdir" = "read", ":slash_tmp" = "read" }
+
+[permissions.worker_workspace.network]
+enabled = false
+
+# The boundary the two example workers actually run under: the project as the
+# only writable root, and package restore from PyPI and nowhere else.
+#
+# This is a host-scoped ceiling, which only a profile can express — the wire
+# grant type carries a single bit. Both hosts are needed for a restore to work
+# at all: `pypi.org` serves the index and `files.pythonhosted.org` serves the
+# wheels, and allowing only the first gets an index hit followed by a refused
+# download. Nothing else is reachable: a requirement pointing at a tarball on
+# `github.com` is refused by the proxy with `403 Forbidden`, which is the E2E's
+# blocked case and the reason `inventory-report` declares one.
+#
+# Neither loopback path into this system is open. `allow_local_binding = false`
+# keeps the coordination service's own port closed, and no `unix_sockets` grant
+# names the app-server control socket. A worker reaching either would be
+# bypassing the judging path entirely, so the live gate asserts both as sandbox
+# denials rather than approval denials.
+[permissions.worker_pypi]
+description = "Worker: project writable, package restore from PyPI only, no loopback"
+extends = ":workspace"
+filesystem = { ":tmpdir" = "read", ":slash_tmp" = "read" }
+
+[permissions.worker_pypi.network]
+enabled = true
+mode = "limited"
+allow_local_binding = false
+domains = { "pypi.org" = "allow", "files.pythonhosted.org" = "allow" }
+
+# The coordinating session talks to the coordination service over loopback, and
+# to nothing else. `allow_local_binding` is the whole grant.
+#
+# It is deliberately not given the app-server control socket. The service owns
+# that connection and is not sandboxed; the coordinating session never touches
+# it. An earlier version granted it anyway, carried over from the command-line
+# flags this file replaced, where the proxy was off and the grant was inert — so
+# nothing ever established that it was unnecessary. A session that can reach the
+# control socket can drive the runtime directly and bypass judging entirely,
+# which is the one thing this profile should not permit.
+#
+# `mode` grants nothing on its own. Probed with the proxy on: `full` and
+# `limited` behave identically on all three axes, and each axis is governed only
+# by its own grant. In particular `mode = "full"` with no `domains` map reaches
+# no external host at all — every request comes back 403 from the proxy — so it
+# reads far wider than it enforces. This profile names no external host: the
+# coordinating session talks to this machine, not to the internet.
+[permissions.coordinator_session]
+description = "Coordinating session: app-server socket and loopback service port"
+extends = ":workspace"
+# Deliberately not demoting the temporary roots, unlike the worker profiles
+# above. The coordinating session runs verification commands of its own, and a
+# live run found that `tempfile.TemporaryDirectory()` fails outright under the
+# demotion with "no usable temporary directory". The demotion exists to match
+# the boundary a *worker* used to get; this session is the trusted one, and
+# narrowing it here buys nothing and breaks its ordinary work. The coordinator
+# refuses a tmp-writable profile only where it resolves one — for a worker.
+
+[permissions.coordinator_session.network]
+enabled = true
+mode = "full"
+allow_local_binding = true

@@ -171,6 +171,61 @@ def test_cwd_inside_the_project_scopes_relative_paths(app_policy, project):
     assert app_policy.evaluate(wrap("sed -n 1p ../../inventory-report/README.md"), cwd=str(nested), project=project) is None
 
 
+def test_editing_the_declared_dependency_set_reaches_a_judge(app_policy, project):
+    """A manifest the project can edit is not a declaration on its own.
+
+    Restoring what a project already declares is ordinary work, so a worker able
+    to append a line silently could declare anything and then restore it as
+    though the operator had asked for it. In-project changes are otherwise
+    decided by containment without a judge, which is exactly why these two paths
+    are named.
+    """
+    def changed(*names: str) -> tuple[str, ...]:
+        return tuple(str(project / name) for name in names)
+
+    escalations = app_policy.file_change_escalations(
+        changed("requirements.txt", "requirements-dev.txt"), project,
+    )
+
+    assert {item.justification for item in escalations} == {
+        "the declared dependency set is reviewed before it changes",
+    }
+    # The assigned module is not escalated: a worker edits it by right.
+    assert app_policy.file_change_escalations(
+        changed("inventory_app/domain.py"), project,
+    ) == ()
+
+
+def test_a_venv_is_allowed_by_rule_but_the_install_inside_it_is_judged(app_policy, project):
+    """A rules file may not name a program by path, and that is load-bearing.
+
+    The restore runs as `.venv/bin/python -m pip install -r requirements.txt`.
+    A worker can write `.venv/bin/python` inside its own project, so allowing a
+    path-based program would let it supply the program it is allowed to run
+    unjudged. Creating the environment is bounded and allowed; the install
+    reaches a judge, and what it can contact is settled by the network ceiling
+    either way.
+    """
+    (project / "requirements.txt").write_text("tabulate==0.9.0\n")
+
+    created = app_policy.evaluate(
+        wrap("python3 -m venv .venv"), cwd=str(project), project=project,
+    )
+    assert created is not None
+    assert created.json()["justifications"] == [
+        "the project-local environment its dependencies restore into",
+    ]
+
+    for judged in (
+        ".venv/bin/python -m pip install -r requirements.txt",
+        "python3 -m venv /tmp/elsewhere",
+        "python -m pip install tabulate",
+    ):
+        assert app_policy.evaluate(
+            wrap(judged), cwd=str(project), project=project,
+        ) is None, judged
+
+
 def test_match_records_which_rule_decided_each_command(app_policy, project):
     match = app_policy.evaluate(
         wrap("python -m unittest -q && python -m inventory_app --help"),
@@ -185,8 +240,10 @@ def test_match_records_which_rule_decided_each_command(app_policy, project):
         ],
     }
     assert app_policy.provenance() == {
-        "source": app_policy.source, "digest": app_policy.digest, "rules": 4,
-        "escalations": 0,
+        "source": app_policy.source, "digest": app_policy.digest, "rules": 5,
+        # The declared dependency set is the one in-project path this project
+        # sends to a judge before it changes.
+        "escalations": 1,
     }
 
 

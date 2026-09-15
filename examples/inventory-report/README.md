@@ -15,3 +15,9 @@ python -m inventory_report inventory.json --sku SKU-100
 python -m inventory_report inventory.json --name coffee
 python -m unittest -q
 ```
+
+## Dependencies
+
+None. This project is standard-library-only, and its operator grants it no
+reachable host at all — an attempt to install a package fails against the
+sandbox, whoever asked for it.

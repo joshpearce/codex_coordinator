@@ -24,7 +24,7 @@ def test_preflight_checks_operator_project_and_codex(monkeypatch, tmp_path: Path
     )
     monkeypatch.setattr("codex_coordinator.preflight.check_codex_compatibility", lambda _command: "0.154.0")
     monkeypatch.setattr("codex_coordinator.preflight.shutil.which", lambda _command: "/bin/codex")
-    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda: config.socket_path)
+    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda _home=None: config.socket_path)
 
     class Result:
         returncode = 0
@@ -36,7 +36,13 @@ def test_preflight_checks_operator_project_and_codex(monkeypatch, tmp_path: Path
     # and preflight names it, so the boundary is visible before any session runs.
     assert report["projects"] == [{
         "project": str(worker),
-        "sandboxMode": "workspace-write",
+        # The boundary is named and resolved before any session runs, so a
+        # profile that does not exist fails here rather than at the first turn.
+        "permissionProfile": {
+            "id": ":read-only", "extends": None, "chain": [":read-only"],
+            "builtin": ":read-only", "writable": False, "network": False,
+            "source": "runtime built-in",
+        },
         "approvalPolicy": "on-request",
         "permissionsSource": "operator-wide default",
         "permissionsDigest": config.default_worker_permissions.digest,
@@ -47,7 +53,7 @@ def test_preflight_checks_operator_project_and_codex(monkeypatch, tmp_path: Path
         check(config, [outside])
     with pytest.raises(ValueError, match="socket is unavailable"):
         check(config, [worker], require_socket=True)
-    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda: tmp_path / "default.sock")
+    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda _home=None: tmp_path / "default.sock")
     with pytest.raises(ValueError, match="custom Codex socket is unavailable"):
         check(config, [worker])
 
@@ -114,7 +120,7 @@ def test_preflight_reports_two_tier_constitution_coverage(monkeypatch, tmp_path:
     config = OperatorConfig.load(path=config_path, environ={})
     monkeypatch.setattr("codex_coordinator.preflight.check_codex_compatibility", lambda _command: "0.154.0")
     monkeypatch.setattr("codex_coordinator.preflight.shutil.which", lambda _command: "/bin/codex")
-    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda: config.socket_path)
+    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda _home=None: config.socket_path)
 
     class Result:
         returncode = 0
@@ -147,7 +153,7 @@ def test_preflight_reports_the_rules_decided_without_a_judge(monkeypatch, tmp_pa
     config = OperatorConfig.load(path=config_path, environ={})
     monkeypatch.setattr("codex_coordinator.preflight.check_codex_compatibility", lambda _command: "0.154.0")
     monkeypatch.setattr("codex_coordinator.preflight.shutil.which", lambda _command: "/bin/codex")
-    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda: config.socket_path)
+    monkeypatch.setattr("codex_coordinator.preflight.default_daemon_socket", lambda _home=None: config.socket_path)
 
     class Result:
         returncode = 0

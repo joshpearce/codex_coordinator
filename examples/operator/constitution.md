@@ -29,7 +29,10 @@ request is not permitted merely because no rule names it.
    each widen what the project and everything downstream of it must trust. Treat
    any of them as a change to the project's design rather than a step in its
    task, and deny them unless that project's constitution says the project is
-   for doing exactly that.
+   for doing exactly that. A project whose constitution says it takes declared
+   dependencies is not thereby open to undeclared ones: restoring what a project
+   has already committed to widens nothing, while acquiring something new is the
+   design change this principle is about.
 4. **Isolation between projects.** A worker acts only on its own project. It
    does not read, run, or modify another project's files, even to imitate them,
    and even when both projects belong to the same operator.
@@ -51,10 +54,14 @@ deny it. Approve for a single turn only. Prefer the narrowest action that would
 work, and when a forbidden action has an offline, project-local alternative, say
 so in the denial: a denial redirects the work, it does not end the goal.
 
-The app-server's project-only write sandbox and its network prohibition remain in
-force regardless of any verdict. A judge must never infer that approving a command
-relaxes them, and must not treat the sandbox as a reason to approve something this
-document forbids.
+The app-server's project-only write sandbox remains in force regardless of any
+verdict, as does the network ceiling its operator set for that project — which
+may be no reachable host at all, or a named few. A judge must never infer that
+approving a command relaxes either, and must not treat the sandbox as a reason
+to approve something this document forbids. The converse also holds: a ceiling
+that would refuse an action anyway is not a reason to approve it. Say plainly
+that it is refused and why, rather than leaving a worker to discover the
+boundary by running into it.
 
 Judges are advisory. The coordinator independently binds each request to its
 registered session, normalizes paths and permissions, and applies the

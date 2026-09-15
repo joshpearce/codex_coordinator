@@ -28,7 +28,7 @@ tasks, and their project trees contain no mention of approvals, constitutions, o
 a judge. What reaches a judge is decided by
 the operator's configuration: `approval_policy = "untrusted"` makes each
 child's runtime raise an approval request before anything it does not already
-trust, and the sandbox derived from `sandbox_mode` keeps writes inside the
+trust, and the `worker_workspace` permission profile keeps writes inside the
 project and disables the network. Approval traffic is therefore a product of the
 permission configuration and the children's own behavior, not of prompt
 instructions.
@@ -56,13 +56,72 @@ left the project.
 Two earlier configurations are worth knowing about, because both were tried and
 neither works. With `on-request` and a task that is completable inside the
 project, nothing escalates at all: a run finishes with zero approvals and the
-governance layer is never exercised. With `sandbox_mode = "read-only"`, the
-children escalated every write and a judge shown a deterministic ceiling of
+governance layer is never exercised. With a read-only profile, the children
+escalated every write and a judge shown a deterministic ceiling of
 `filesystemWriteRoots: []` correctly refused each one, so the children
-deadlocked; under the present model a `read-only` file change is declined by
-code with that sandbox mode named, and no such ceiling is ever put to a judge.
+deadlocked; under the present model a file change under a non-writable profile
+is declined by code, and no such ceiling is ever put to a judge.
 An earlier `workspace-write` run judged all 13 of its file changes, denying
 eight identical comment cleanups; those are now decided by containment.
+
+## The run has its own Codex home
+
+A live run reads no configuration from the developer's machine. The harness
+renders `examples/operator/codex-home/config.toml` into a temporary
+`CODEX_HOME` for the run, symlinks `~/.codex/auth.json` into it — authentication
+lives in the home, and a fresh one reports `Not logged in` — and points the
+service, the coordinating session and every judge at it. The app-server daemon
+is started with that home too, so its control socket lives inside the run's home
+rather than on the shared daemon the developer's own desktop and phone sessions
+drive.
+
+This is what makes a passing run evidence about the configuration under test
+rather than about one machine. The source home is never used in place: the
+runtime writes a `[projects."<cwd>"] trust_level` record, several sqlite files,
+`skills/` and `tmp/` into whichever home it is given, so a run pointed at the
+checked-in directory would rewrite the repository. The harness asserts
+afterwards that the rendered home did gain that state and that `~/.codex` is
+byte-for-byte unchanged.
+
+## The network ceiling is proven by a real dependency restore
+
+Both example projects declare dependencies in `requirements.txt` and restore
+them before running their suites, under the `worker_pypi` profile: the project
+is the only writable root, and the only reachable hosts are `pypi.org` and
+`files.pythonhosted.org`. That is a host-scoped ceiling, which only a profile
+can express — the wire grant type carries a single bit.
+
+The two projects take different paths through it, and both are the point.
+`inventory-app` declares only PyPI requirements, so its restore succeeds.
+`inventory-report` also declares a tarball on `github.com`, which the ceiling
+does not allow, so its restore is refused by the proxy with `403 Forbidden`.
+Neither project's supplied test suite needs either package: the refusal is an
+answer about one requirement, not a reason to abandon the assignment.
+
+Each project restores into a `.venv` inside itself, because its project is the
+only directory it can write: installing into the ambient interpreter's
+site-packages is refused by the filesystem boundary, which would look like a
+refused restore while saying nothing about the network. Creating that
+environment is allowed by each project's execpolicy rules; the install inside it
+is not, and reaches a judge. That asymmetry is deliberate. A rules file may not
+name a program by path, because a worker can write `.venv/bin/python` inside its
+own project and would then be supplying the program it is allowed to run
+unjudged. What the restore can actually contact is settled by the network
+ceiling whichever way the judge decides.
+
+The same run proves all four axes deterministically, under that same
+`worker_pypi` profile: the PyPI restore succeeds, a requirement from any other
+host is refused at the proxy, and both loopback paths into this system — the
+app-server control socket and the coordination service's own port — are refused
+by the sandbox with `EPERM`. The last two are asserted as sandbox denials rather
+than approval denials on purpose: a worker reaching either is bypassing the
+judging path entirely, so this is the test that the boundary holds when no judge
+is consulted at all.
+
+The three ways a restore can end are kept distinguishable, because they mean
+different things: success, `403 Forbidden` when the host is off the allowlist,
+and a resolver failure when the profile has no network at all. Only the second
+is the allowlist deciding.
 
 Neither child project may carry Codex rules of its own. The runtime loads
 `<project>/.codex/rules` at thread start, so the service refuses a session in

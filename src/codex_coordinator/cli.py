@@ -71,6 +71,7 @@ async def run(args: argparse.Namespace) -> dict:
     await asyncio.to_thread(check_codex_compatibility, config.codex_command)
     await ensure_daemon(
         socket_path=config.socket_path, codex_command=config.codex_command,
+        codex_home=None if config.codex_home is None else config.codex_home.path,
     )
 
     events: list[dict] = []
@@ -94,6 +95,7 @@ async def run(args: argparse.Namespace) -> dict:
             codex_exec_json_runner,
             codex_command=config.codex_command,
             timeout_seconds=config.judge_timeout_seconds,
+            codex_home=None if config.codex_home is None else config.codex_home.path,
         ),
         constitution=config.constitution or Constitution.single(
             config.judge_policy, source="judge_policy"
@@ -102,7 +104,7 @@ async def run(args: argparse.Namespace) -> dict:
     worker_permissions = config.permissions_for(project)
     policy = ApprovalPolicy(
         project,
-        sandbox_mode=worker_permissions.sandbox_mode,
+        profile=worker_permissions.profile,
         allow_session_approval=config.allow_session_approval,
         allowed_permissions=config.permission_ceilings.get(project),
         exec_policy=worker_permissions.exec_policy,
