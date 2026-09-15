@@ -3,6 +3,7 @@
 **Found:** 2026-09-13, multi-capability workspace assessment, code review of the
 three-worker (mail/self-modifying/web) configuration
 **Affects:** codex_coordinator, approval policy, `src/codex_coordinator/coordinator.py`
+**Depends on:** #0021
 
 ## What happens
 
