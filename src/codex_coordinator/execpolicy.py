@@ -513,25 +513,34 @@ def _split(script: str) -> list[list[str]]:
     lexer.commenters = ""
     commands: list[list[str]] = []
     current: list[str] = []
+    assignments: list[str] = []
     for token in lexer:
         if token in SEPARATORS or token in CONTROL_WORDS:
             if current:
-                commands.append(current)
+                commands.append((["env", *assignments, *current]) if assignments else current)
                 current = []
+                assignments = []
             continue
         if token == "!" or all(char in PUNCTUATION for char in token) or any(
             char in REFUSED_CHARACTERS for char in token
         ):
             raise ValueError("shell construct outside the evaluated grammar")
-        if not current and ("=" in token or "/" in token):
-            # A leading assignment changes the command's environment, and a
-            # path in command position is not a bare program a rule can name.
+        if not current and "=" in token:
+            name, _, value = token.partition("=")
+            if not name.isidentifier() or not name.isascii():
+                raise ValueError("unsupported environment assignment")
+            assignments.append(token)
+            continue
+        if not current and "/" in token:
+            # A path in command position is not a bare program a rule can name.
             raise ValueError("unsupported command position")
         if token.startswith("~") or token.startswith("="):
             raise ValueError("shell expansion")
         current.append(token)
     if current:
-        commands.append(current)
+        commands.append((["env", *assignments, *current]) if assignments else current)
+    elif assignments:
+        raise ValueError("environment assignment without a command")
     return commands
 
 

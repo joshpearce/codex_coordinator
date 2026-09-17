@@ -164,6 +164,32 @@ def test_wrapper_variants_and_bare_argv_are_evaluated_alike(app_policy, project)
         assert app_policy.evaluate(command, cwd=str(project), project=project) is None, command
 
 
+def test_declared_leading_environment_assignments_match_env_rules(project):
+    policy = ExecPolicy.from_text(
+        'prefix_rule(pattern=["env", "TMPDIR=.tmp", "dotnet", ["run", "test"]], '
+        'decision="allow", justification="confined dotnet environment")\n',
+        source="test.rules",
+    )
+
+    match = policy.evaluate(
+        wrap("TMPDIR=.tmp dotnet run --project src/App"),
+        cwd=str(project), project=project,
+    )
+
+    assert match is not None
+    assert match.json() == {
+        "commands": [["env", "TMPDIR=.tmp", "dotnet", "run", "--project", "src/App"]],
+        "justifications": ["confined dotnet environment"],
+    }
+    for judged in (
+        "TMPDIR=.tmp OTHER=1 dotnet run --project src/App",
+        "PATH=.tmp dotnet run --project src/App",
+        "TMPDIR=$HOME dotnet run --project src/App",
+        "TMPDIR=.tmp",
+    ):
+        assert policy.evaluate(wrap(judged), cwd=str(project), project=project) is None
+
+
 def test_cwd_inside_the_project_scopes_relative_paths(app_policy, project):
     nested = project / "inventory_app"
     assert app_policy.evaluate(wrap("sed -n 1p domain.py"), cwd=str(nested), project=project) is not None
