@@ -22,6 +22,7 @@ coordinator_root = "{{COORDINATOR_PATH}}"
 worker_approval_policy = "untrusted"
 worker_model = "gpt-5.6-luna"
 worker_reasoning_effort = "low"
+worker_allowed_reasoning_efforts = ["low"]
 
 # Each worker's execution boundary, kept here rather than in the project it
 # governs: a file inside a worker's writable root is a file that worker can

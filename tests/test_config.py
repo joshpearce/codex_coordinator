@@ -19,6 +19,7 @@ def test_operator_config_precedence_and_sealed_permission_ceiling(tmp_path: Path
         f'allowed_roots = ["{file_root}"]\n'
         'codex_command = "from-file"\n'
         'worker_reasoning_effort = "medium"\n'
+        'worker_allowed_reasoning_efforts = ["low", "medium"]\n'
         'approval_timeout_seconds = 10\n'
     )
     config = OperatorConfig.load(
@@ -42,6 +43,7 @@ def test_operator_config_precedence_and_sealed_permission_ceiling(tmp_path: Path
     assert config.allowed_roots == (cli_root.resolve(),)
     assert config.codex_command == "from-cli"
     assert config.worker_reasoning_effort == "medium"
+    assert config.worker_allowed_reasoning_efforts == ("low", "medium")
     assert config.approval_timeout_seconds == 20
     assert config.event_capacity == 32
     assert config.item_capacity == 8

@@ -29,7 +29,8 @@ from .execpolicy import ExecPolicy, ExecPolicyError
 
 _FIELDS = frozenset({
     "allowed_roots", "permission_ceilings", "codex_command", "socket_path",
-    "worker_model", "worker_reasoning_effort", "worker_approval_policy",
+    "worker_model", "worker_reasoning_effort", "worker_allowed_reasoning_efforts",
+    "worker_approval_policy",
     "allow_session_approval",
     "approval_timeout_seconds", "judge_policy", "judge_timeout_seconds",
     "event_capacity", "event_max_bytes", "item_capacity", "item_max_bytes",
@@ -43,6 +44,7 @@ _ENV_FIELDS = {
     "CODEX_COORDINATOR_SOCKET_PATH": "socket_path",
     "CODEX_COORDINATOR_WORKER_MODEL": "worker_model",
     "CODEX_COORDINATOR_WORKER_REASONING_EFFORT": "worker_reasoning_effort",
+    "CODEX_COORDINATOR_WORKER_ALLOWED_REASONING_EFFORTS": "worker_allowed_reasoning_efforts",
     "CODEX_COORDINATOR_WORKER_APPROVAL_POLICY": "worker_approval_policy",
     "CODEX_COORDINATOR_ALLOW_SESSION_APPROVAL": "allow_session_approval",
     "CODEX_COORDINATOR_APPROVAL_TIMEOUT_SECONDS": "approval_timeout_seconds",
@@ -165,6 +167,7 @@ class OperatorConfig:
     socket_path: Path
     worker_model: str | None
     worker_reasoning_effort: str
+    worker_allowed_reasoning_efforts: tuple[str, ...]
     worker_approval_policy: str | None
     allow_session_approval: bool
     approval_timeout_seconds: float
@@ -209,6 +212,7 @@ class OperatorConfig:
             "socket_path": None,
             "worker_model": None,
             "worker_reasoning_effort": "low",
+            "worker_allowed_reasoning_efforts": None,
             "worker_approval_policy": None,
             "allow_session_approval": False,
             "approval_timeout_seconds": 300,
@@ -239,7 +243,7 @@ class OperatorConfig:
             raw: Any = env[env_name]
             if field_name in {
                 "allowed_roots", "permission_ceilings", "project_constitutions",
-                "worker_permissions",
+                "worker_permissions", "worker_allowed_reasoning_efforts",
             }:
                 try:
                     raw = json.loads(raw)
@@ -486,6 +490,27 @@ class OperatorConfig:
             raise ValueError("worker_model must be a nonempty string or omitted")
         if not isinstance(values["allow_session_approval"], bool):
             raise ValueError("allow_session_approval must be a boolean")
+        raw_efforts = values["worker_allowed_reasoning_efforts"]
+        if raw_efforts is None:
+            worker_allowed_reasoning_efforts = (values["worker_reasoning_effort"],)
+        else:
+            if (
+                not isinstance(raw_efforts, (list, tuple))
+                or not raw_efforts
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in raw_efforts
+                )
+            ):
+                raise ValueError(
+                    "worker_allowed_reasoning_efforts must be a nonempty list of strings"
+                )
+            worker_allowed_reasoning_efforts = tuple(dict.fromkeys(raw_efforts))
+            if values["worker_reasoning_effort"] not in worker_allowed_reasoning_efforts:
+                raise ValueError(
+                    "worker_reasoning_effort must be included in "
+                    "worker_allowed_reasoning_efforts"
+                )
         return cls(
             allowed_roots=tuple(canonical_roots),
             permission_ceilings=MappingProxyType(ceilings),
@@ -493,6 +518,7 @@ class OperatorConfig:
             socket_path=socket_path,
             worker_model=model,
             worker_reasoning_effort=values["worker_reasoning_effort"],
+            worker_allowed_reasoning_efforts=worker_allowed_reasoning_efforts,
             worker_approval_policy=worker_approval_policy,
             allow_session_approval=values["allow_session_approval"],
             approval_timeout_seconds=_positive_seconds(

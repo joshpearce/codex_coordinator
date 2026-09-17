@@ -2,6 +2,8 @@ import asyncio
 import json
 import shutil
 import socket
+import stat
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +20,7 @@ from codex_coordinator.coordinator import (
 )
 from codex_coordinator.config import OperatorConfig
 from codex_coordinator.protocol import ProtocolClient
-from codex_coordinator.service import ApprovalBroker, CoordinatorService, EventCursorExpired, EventLog, HttpControlServer, RequestTooLarge, Session, run
+from codex_coordinator.service import ApprovalBroker, CoordinatorService, EventCursorAhead, EventCursorExpired, EventLog, HttpControlServer, RequestTooLarge, Session, control_listener, run
 
 
 class QueueSocket:
@@ -109,6 +111,67 @@ async def test_http_control_listener_serves_loopback_health():
         assert b"200 OK" in await reader.readline()
         writer.close()
         await writer.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_http_control_listener_serves_owner_controlled_unix_socket():
+    # macOS limits AF_UNIX paths to roughly 104 bytes; pytest's nested temp
+    # directory can exceed that before the socket filename is appended.
+    run_root = Path(tempfile.mkdtemp(prefix="cc-control-", dir="/tmp"))
+    try:
+        run_root.chmod(0o700)
+        socket_path = run_root / "coordinator.sock"
+        events = EventLog()
+        service = CoordinatorService(object(), ApprovalBroker(events), events)
+
+        async with control_listener(
+            HttpControlServer(service).handle,
+            host="127.0.0.1",
+            port=8765,
+            unix_socket=socket_path,
+        ) as (_listener, details):
+            info = socket_path.lstat()
+            assert stat.S_ISSOCK(info.st_mode)
+            assert stat.S_IMODE(info.st_mode) == 0o600
+            assert details == {"socketPath": str(socket_path.resolve())}
+            reader, writer = await asyncio.open_unix_connection(socket_path)
+            writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            await writer.drain()
+            assert b"200 OK" in await reader.readline()
+            writer.close()
+            await writer.wait_closed()
+
+        assert not socket_path.exists()
+    finally:
+        shutil.rmtree(run_root)
+
+
+@pytest.mark.asyncio
+async def test_unix_control_socket_refuses_existing_or_worker_writable_path(tmp_path: Path):
+    worker = tmp_path / "worker"
+    worker.mkdir(mode=0o700)
+    existing = tmp_path / "occupied"
+    existing.write_text("keep")
+
+    with pytest.raises(ValueError, match="refusing to replace"):
+        async with control_listener(
+            lambda _reader, _writer: None,
+            host="127.0.0.1",
+            port=8765,
+            unix_socket=existing,
+        ):
+            pass
+    assert existing.read_text() == "keep"
+
+    with pytest.raises(ValueError, match="outside coordinator- and worker-writable"):
+        async with control_listener(
+            lambda _reader, _writer: None,
+            host="127.0.0.1",
+            port=8765,
+            unix_socket=worker / "coordinator.sock",
+            forbidden_roots=(worker,),
+        ):
+            pass
 
 
 @pytest.mark.asyncio
@@ -719,6 +782,54 @@ async def test_http_starts_session_with_immutable_registration_and_a_named_bound
 
 
 @pytest.mark.asyncio
+async def test_http_selects_only_operator_allowed_effort_per_turn(tmp_path: Path, capsys):
+    class FakeClient:
+        def __init__(self): self.calls = []
+        async def call(self, method, params):
+            self.calls.append((method, params))
+            return (
+                started_thread(params, "thread-1") if method == "thread/start"
+                else {"turn": {"id": f"turn-{len(self.calls)}"}}
+            )
+
+    client = FakeClient()
+    events = EventLog()
+    service = CoordinatorService(
+        client, ApprovalBroker(events), events,
+        worker_reasoning_effort="low",
+        worker_allowed_reasoning_efforts=("low", "medium"),
+        allowed_roots=(tmp_path,),
+    )
+    server = HttpControlServer(service)
+
+    status, session = await http_json(server, "POST", "/sessions", {
+        "project": str(tmp_path), "prompt": "Orient", "effort": "low",
+    })
+    assert status == 201
+    assert session["reasoningEffort"] == "low"
+    assert client.calls[-1][1]["effort"] == "low"
+
+    service.sessions[session["id"]].state = "completed"
+    status, continued = await http_json(
+        server, "POST", f'/sessions/{session["id"]}/messages',
+        {"prompt": "Implement", "effort": "medium"},
+    )
+    assert status == 201
+    assert continued["reasoningEffort"] == "medium"
+    assert client.calls[-1][1]["effort"] == "medium"
+
+    service.sessions[session["id"]].state = "completed"
+    status, error = await http_json(
+        server, "POST", f'/sessions/{session["id"]}/messages',
+        {"prompt": "Overspend", "effort": "high"},
+    )
+    assert status == 400
+    assert "not allowed" in error["error"]
+    assert service.sessions[session["id"]].state == "completed"
+    capsys.readouterr()
+
+
+@pytest.mark.asyncio
 async def test_approval_events_record_what_the_judge_was_told_the_task_was(tmp_path: Path, capsys):
     """Every judged request carries the descriptor's provenance for audit (#0002)."""
 
@@ -1052,6 +1163,10 @@ def test_event_retention_preserves_sequence_and_rejects_evicted_cursor(capsys):
     with pytest.raises(EventCursorExpired) as exc:
         events.after(2)
     assert exc.value.oldest_sequence == 4
+    with pytest.raises(EventCursorAhead) as exc:
+        events.after(6)
+    assert exc.value.latest_sequence == 5
+    assert exc.value.service_id == events.service_id
     capsys.readouterr()
 
 
@@ -1617,8 +1732,24 @@ async def test_http_request_limits_and_expired_cursor(tmp_path: Path):
     server = HttpControlServer(service)
     status, result = await server.route("GET", "/events?after=1", {})
     assert status == 200 and result["events"][0]["sequence"] == 2
+    assert result["serviceId"] == events.service_id
     with pytest.raises(EventCursorExpired):
         await server.route("GET", "/events?after=0", {})
+    with pytest.raises(EventCursorAhead):
+        await server.route("GET", "/events?after=3", {})
+    status, ahead = await http_json(server, "GET", "/events?after=3")
+    assert status == 409
+    assert ahead == {
+        "error": "event cursor is ahead of this service generation; latest sequence is 2",
+        "latestSequence": 2,
+        "serviceId": events.service_id,
+    }
+    status, health = await server.route("GET", "/health", {})
+    assert status == 200 and health == {"ok": True, "serviceId": events.service_id}
+    status, sessions = await server.route("GET", "/sessions", {})
+    assert status == 200 and sessions == {
+        "serviceId": events.service_id, "sessions": [],
+    }
     reader = asyncio.StreamReader()
     reader.feed_data(b"POST /sessions HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1048577\r\n\r\n")
     reader.feed_eof()
@@ -1787,7 +1918,7 @@ async def test_internal_error_event_names_the_request(tmp_path: Path, capsys):
             self.events = events
             self.sessions = {}
 
-        async def start_session(self, _project, _prompt):
+        async def start_session(self, _project, _prompt, _effort=None):
             raise RuntimeError("thread/start rejected by app-server")
 
     service = ExplodingService()

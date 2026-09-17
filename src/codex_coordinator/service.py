@@ -7,8 +7,10 @@ import asyncio
 import json
 import math
 import os
+import stat
 import sys
 import uuid
+from contextlib import asynccontextmanager
 from functools import partial
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
@@ -52,6 +54,7 @@ class EventLog:
     max_bytes: int = 8 * 1024 * 1024
     max_event_bytes: int = 1024 * 1024
     verbose_output: bool = False
+    service_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     next_sequence: int = 1
     _changed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     _sizes: list[int] = field(default_factory=list, repr=False)
@@ -110,7 +113,11 @@ class EventLog:
             summary["sessionId"] = session.get("id")
             summary["state"] = session.get("state")
         if event["type"] == "service.started":
-            summary.update({key: event[key] for key in ("host", "port", "pid") if key in event})
+            summary.update({
+                key: event[key]
+                for key in ("host", "port", "socketPath", "pid")
+                if key in event
+            })
         return {
             key: value[:self.MAX_STDOUT_FIELD_CHARS] + "…"
             if isinstance(value, str) and len(value) > self.MAX_STDOUT_FIELD_CHARS
@@ -137,6 +144,9 @@ class EventLog:
     def after(self, sequence: int) -> list[dict[str, Any]]:
         if sequence < 0:
             raise ValueError("event cursor must be nonnegative")
+        latest = self.next_sequence - 1
+        if sequence > latest:
+            raise EventCursorAhead(latest, self.service_id)
         oldest = self.events[0]["sequence"] if self.events else self.next_sequence
         if sequence < oldest - 1:
             raise EventCursorExpired(oldest)
@@ -157,6 +167,16 @@ class EventCursorExpired(ValueError):
         super().__init__(f"event cursor expired; oldest available sequence is {oldest_sequence}")
 
 
+class EventCursorAhead(ValueError):
+    def __init__(self, latest_sequence: int, service_id: str) -> None:
+        self.latest_sequence = latest_sequence
+        self.service_id = service_id
+        super().__init__(
+            "event cursor is ahead of this service generation; "
+            f"latest sequence is {latest_sequence}"
+        )
+
+
 @dataclass
 class Session:
     id: str
@@ -171,6 +191,7 @@ class Session:
     # the runtime selected (#0021).
     permission_profile: str = ""
     active_permission_profile: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    reasoning_effort: str = ""
 
     def json(self) -> dict[str, Any]:
         return {
@@ -181,6 +202,7 @@ class Session:
             "turnId": self.turn_id,
             "permissionProfile": self.permission_profile,
             "activePermissionProfile": dict(self.active_permission_profile),
+            "reasoningEffort": self.reasoning_effort,
         }
 
 
@@ -482,6 +504,7 @@ class CoordinatorService:
         *,
         worker_model: str | None = None,
         worker_reasoning_effort: str = "low",
+        worker_allowed_reasoning_efforts: Sequence[str] | None = None,
         worker_approval_policy: str | None = None,
         worker_permissions: Mapping[Path, WorkerPermissions] | None = None,
         allow_session_approval: bool = False,
@@ -498,6 +521,11 @@ class CoordinatorService:
         self._connection_lost = False
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
+        self.worker_allowed_reasoning_efforts = frozenset(
+            worker_allowed_reasoning_efforts or (worker_reasoning_effort,)
+        )
+        if worker_reasoning_effort not in self.worker_allowed_reasoning_efforts:
+            raise ValueError("default worker reasoning effort must be allowed")
         if worker_approval_policy is not None and (
             worker_approval_policy not in WorkerPermissions.WIRE_APPROVAL_POLICIES
         ):
@@ -573,7 +601,18 @@ class CoordinatorService:
             )
             raise
 
-    async def start_session(self, project_value: str, prompt: str) -> dict[str, Any]:
+    def _selected_effort(self, requested: str | None) -> str:
+        effort = self.worker_reasoning_effort if requested is None else requested
+        if not isinstance(effort, str) or effort not in self.worker_allowed_reasoning_efforts:
+            raise ValueError(
+                "worker reasoning effort is not allowed; choose one of "
+                f"{sorted(self.worker_allowed_reasoning_efforts)}"
+            )
+        return effort
+
+    async def start_session(
+        self, project_value: str, prompt: str, effort: str | None = None,
+    ) -> dict[str, Any]:
         if self.stopping.is_set() or self.approvals.closed:
             raise RuntimeError("service is stopping or disconnected")
         if len(self.sessions) >= 1024:
@@ -582,6 +621,7 @@ class CoordinatorService:
             raise ValueError("prompt must be nonempty text no larger than 1 MiB")
         if not isinstance(project_value, str) or not project_value.strip():
             raise ValueError("project must be a nonempty path")
+        selected_effort = self._selected_effort(effort)
         try:
             project = Path(project_value).expanduser().resolve(strict=True)
         except (OSError, RuntimeError) as exc:
@@ -634,6 +674,7 @@ class CoordinatorService:
             session_id, thread_id, str(project),
             permission_profile=permissions.permission_profile,
             active_permission_profile=MappingProxyType(dict(active)),
+            reasoning_effort=selected_effort,
         )
         self.approvals.register(SessionRegistration(session_id, thread_id, str(project), policy))
         self.sessions[session_id] = session
@@ -649,7 +690,7 @@ class CoordinatorService:
                 "cwd": str(project),
                 "input": [{"type": "text", "text": prompt}],
                 "turnTrigger": "coordinator-api",
-                "effort": self.worker_reasoning_effort,
+                "effort": selected_effort,
                 # No boundary field: the thread's profile is sticky, and
                 # re-sending one would only reassert state that never lapsed.
             })
@@ -667,7 +708,9 @@ class CoordinatorService:
         )
         return session.json()
 
-    async def send_message(self, session_id: str, prompt: str) -> dict[str, Any]:
+    async def send_message(
+        self, session_id: str, prompt: str, effort: str | None = None,
+    ) -> dict[str, Any]:
         if self.stopping.is_set() or self.approvals.closed:
             raise RuntimeError("service is stopping or disconnected")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 1024 * 1024:
@@ -677,11 +720,13 @@ class CoordinatorService:
             raise ValueError("session already has an active turn")
         if session.state != "completed":
             raise ValueError("follow-up requires a completed turn")
+        selected_effort = self._selected_effort(effort)
         # Defense in depth: rules were observed to load only at thread start,
         # but a project that acquires one mid-session gets no further turn.
         self._refuse_project_rules(Path(session.project), session_id)
         session.state = "active"
         session.turn_id = None
+        session.reasoning_effort = selected_effort
         assignment = self.approvals.assignments.record(
             session.thread_id, prompt, source="coordinator-api"
         )
@@ -691,7 +736,7 @@ class CoordinatorService:
                 "cwd": session.project,
                 "input": [{"type": "text", "text": prompt}],
                 "turnTrigger": "coordinator-api",
-                "effort": self.worker_reasoning_effort,
+                "effort": selected_effort,
             })
         except Exception:
             session.state = "failed"
@@ -908,6 +953,12 @@ class HttpControlServer:
             except EventCursorExpired as exc:
                 status, result = 410, {
                     "error": str(exc), "oldestSequence": exc.oldest_sequence,
+                    "serviceId": self.service.events.service_id,
+                }
+            except EventCursorAhead as exc:
+                status, result = 409, {
+                    "error": str(exc), "latestSequence": exc.latest_sequence,
+                    "serviceId": exc.service_id,
                 }
             except (KeyError, ValueError, json.JSONDecodeError) as exc:
                 status, result = 400, {"error": str(exc)}
@@ -921,7 +972,7 @@ class HttpControlServer:
                     error=f"{type(exc).__name__}: {exc}",
                 )
             payload = json.dumps(result, sort_keys=True).encode()
-            reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 410: "Gone", 413: "Payload Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(status, "OK")
+            reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 409: "Conflict", 410: "Gone", 413: "Payload Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(status, "OK")
             writer.write(
                 f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
                 + payload
@@ -982,16 +1033,30 @@ class HttpControlServer:
         parsed = urlsplit(target)
         parts = [part for part in parsed.path.split("/") if part]
         if method == "GET" and parts == ["health"]:
-            return 200, {"ok": True}
+            return 200, {"ok": True, "serviceId": self.service.events.service_id}
         if method == "GET" and parts == ["events"]:
             after = int(parse_qs(parsed.query).get("after", ["0"])[0])
-            return 200, {"events": self.service.events.after(after)}
+            return 200, {
+                "serviceId": self.service.events.service_id,
+                "events": self.service.events.after(after),
+            }
         if method == "GET" and parts == ["sessions"]:
-            return 200, {"sessions": [item.json() for item in self.service.sessions.values()]}
+            return 200, {
+                "serviceId": self.service.events.service_id,
+                "sessions": [item.json() for item in self.service.sessions.values()],
+            }
         if method == "POST" and parts == ["sessions"]:
-            return 201, await self.service.start_session(body["project"], body["prompt"])
+            if set(body) - {"project", "prompt", "effort"}:
+                raise ValueError("unsupported session fields")
+            return 201, await self.service.start_session(
+                body["project"], body["prompt"], body.get("effort"),
+            )
         if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "messages":
-            return 201, await self.service.send_message(parts[1], body["prompt"])
+            if set(body) - {"prompt", "effort"}:
+                raise ValueError("unsupported session message fields")
+            return 201, await self.service.send_message(
+                parts[1], body["prompt"], body.get("effort"),
+            )
         if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "cancel":
             return 202, await self.service.cancel_session(parts[1])
         if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
@@ -1016,10 +1081,84 @@ class RequestTooLarge(ValueError):
         super().__init__(reason)
 
 
+def _operator_control_socket(
+    raw_path: Path,
+    *,
+    forbidden_roots: Sequence[Path],
+) -> Path:
+    if not raw_path.is_absolute():
+        raise ValueError("control socket path must be absolute")
+    try:
+        parent = raw_path.parent.resolve(strict=True)
+        parent_info = parent.lstat()
+    except OSError as exc:
+        raise ValueError("control socket parent must exist") from exc
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != os.getuid()
+        or parent_info.st_mode & 0o022
+    ):
+        raise ValueError("control socket parent must be an owner-controlled directory")
+    path = parent / raw_path.name
+    if path.exists() or path.is_symlink():
+        raise ValueError(f"refusing to replace existing control socket path: {path}")
+    if any(path == root or root in path.parents for root in forbidden_roots):
+        raise ValueError("control socket must be outside coordinator- and worker-writable roots")
+    return path
+
+
+def _remove_control_socket(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(info.st_mode) or (info.st_dev, info.st_ino) != identity:
+        raise RuntimeError(f"control socket changed while the service was running: {path}")
+    path.unlink()
+
+
+@asynccontextmanager
+async def control_listener(
+    handler: Any,
+    *,
+    host: str,
+    port: int,
+    unix_socket: Path | None = None,
+    forbidden_roots: Sequence[Path] = (),
+):
+    socket_path: Path | None = None
+    socket_identity: tuple[int, int] | None = None
+    if unix_socket is None:
+        if host != "127.0.0.1":
+            raise ValueError("the unauthenticated service is restricted to 127.0.0.1")
+        server = await asyncio.start_server(handler, host, port)
+        details = {"host": host, "port": server.sockets[0].getsockname()[1]}
+    else:
+        socket_path = _operator_control_socket(
+            unix_socket, forbidden_roots=forbidden_roots,
+        )
+        server = await asyncio.start_unix_server(handler, path=socket_path)
+        os.chmod(socket_path, 0o600)
+        info = socket_path.lstat()
+        socket_identity = (info.st_dev, info.st_ino)
+        details = {"socketPath": str(socket_path)}
+    try:
+        yield server, details
+    finally:
+        server.close()
+        await server.wait_closed()
+        if socket_path is not None and socket_identity is not None:
+            _remove_control_socket(socket_path, socket_identity)
+
+
 def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--unix-socket", type=Path,
+        help="serve the HTTP control plane on an owner-controlled Unix socket instead of TCP",
+    )
     parser.add_argument("--config", type=Path, help="trusted operator TOML configuration")
     parser.add_argument(
         "--allowed-root", type=Path, action="append",
@@ -1064,8 +1203,6 @@ async def run(args: argparse.Namespace) -> None:
         raise ValueError("configure at least one allowed root before starting the service")
     if config.approval_mode is None:
         raise ValueError("configure approval_mode = 'service' or 'external' before starting the service")
-    if args.host != "127.0.0.1":
-        raise ValueError("the unauthenticated service is restricted to 127.0.0.1")
     await asyncio.to_thread(check_codex_compatibility, config.codex_command)
     await ensure_daemon(
         socket_path=config.socket_path, codex_command=config.codex_command,
@@ -1117,6 +1254,7 @@ async def run(args: argparse.Namespace) -> None:
             events,
             worker_model=config.worker_model,
             worker_reasoning_effort=config.worker_reasoning_effort,
+            worker_allowed_reasoning_efforts=config.worker_allowed_reasoning_efforts,
             worker_approval_policy=config.worker_approval_policy,
             worker_permissions=config.worker_permissions,
             allow_session_approval=config.allow_session_approval,
@@ -1127,10 +1265,20 @@ async def run(args: argparse.Namespace) -> None:
         client.disconnect_handler = service_ref.connection_lost
         try:
             await client.initialize()
-            server = await asyncio.start_server(HttpControlServer(service_ref).handle, args.host, args.port)
-            actual_port = server.sockets[0].getsockname()[1]
-            events.emit("service.started", host=args.host, port=actual_port, pid=os.getpid())
-            async with server:
+            forbidden_roots = (*config.allowed_roots,)
+            if config.coordinator_root is not None:
+                forbidden_roots += (config.coordinator_root,)
+            async with control_listener(
+                HttpControlServer(service_ref).handle,
+                host=args.host,
+                port=args.port,
+                unix_socket=getattr(args, "unix_socket", None),
+                forbidden_roots=forbidden_roots,
+            ) as (_server, listener_details):
+                events.emit(
+                    "service.started", serviceId=events.service_id,
+                    **listener_details, pid=os.getpid(),
+                )
                 stop_task = asyncio.create_task(service_ref.stopping.wait())
                 disconnect_task = asyncio.create_task(client.disconnected.wait())
                 done, pending = await asyncio.wait(

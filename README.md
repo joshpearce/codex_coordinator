@@ -370,6 +370,22 @@ codex-coordinator-preflight --config "$COORD_DIR/operator.toml" \
 codex-coordinator-service --config "$COORD_DIR/operator.toml" --port 8765
 ```
 
+For a local deployment whose workers require loopback networking, keep the
+worker away from the control plane by serving it only on an operator-owned Unix
+socket outside every worker- and coordinator-writable root:
+
+```sh
+codex-coordinator-service \
+  --config "$COORD_DIR/operator.toml" \
+  --unix-socket "$COORD_DIR/run/coordinator.sock"
+```
+
+The parent directory must already exist, be owned by the current user, and not
+be group- or world-writable. The service creates the socket with mode `0600`,
+refuses to replace any existing path, and removes only the socket it created.
+The coordinating Codex permission profile must allow that exact Unix socket;
+worker profiles must not.
+
 Preflight checks the CLI version and schema, sign-in, allowed roots, worker
 settings including each project's loaded rules file, and socket safety. `"socketReady": false` is normal if the default
 Codex app-server daemon has not started; the service starts it as needed.
@@ -465,7 +481,11 @@ codex "$@" -C "$COORDINATOR_PROJECT" \
 
 The coordinating Codex session calls `POST /sessions` for each project and
 `POST /sessions/{id}/messages` for corrections after a worker turn ends. The
-service receives worker events and independently judges valid permission
+optional `effort` field on either request selects one of the operator-declared
+`worker_allowed_reasoning_efforts`; omitting it uses
+`worker_reasoning_effort`. The selected value is returned as
+`reasoningEffort` in session state and sent on that turn's `turn/start` call.
+The service receives worker events and independently judges valid permission
 requests, but it does **not** push events to the coordinating Codex session.
 That session must keep its turn active and poll until it has verified the
 outcomes; once it stops, nothing wakes it for a later event. If events were
@@ -480,7 +500,10 @@ curl -sS -X POST http://127.0.0.1:8765/shutdown
 The service also supports `POST /sessions/{id}/cancel` and `GET /health`. It
 does not persist sessions or event cursors across restarts. `GET /events?after=N`
 uses an in-memory cursor; an evicted cursor returns `410 Gone` with
-`oldestSequence`. Connection loss and interrupted turns are reported explicitly,
+`oldestSequence`, while a cursor ahead of the current process returns
+`409 Conflict`. Health, session, and event reads include a per-process
+`serviceId`; persistent pollers must reconcile and reset when it changes.
+Connection loss and interrupted turns are reported explicitly,
 not as successful completion. Keep this unauthenticated service on `127.0.0.1`;
 it refuses non-loopback binding.
 
@@ -534,7 +557,8 @@ entry in `[project_constitutions]` maps a project directory inside
 `allowed_roots` to a policy file beside `operator.toml`; it must not reuse
 `constitution_path`, and the most specific entry at or above a project wins.
 Optional settings include `codex_command`, `socket_path`,
-`worker_model`, `worker_reasoning_effort`, `permission_ceilings`,
+`worker_model`, `worker_reasoning_effort`,
+`worker_allowed_reasoning_efforts`, `permission_ceilings`,
 `worker_approval_policy`, `worker_permissions`, `allow_session_approval`,
 approval/judge timeouts, and
 event/item retention

@@ -69,8 +69,11 @@ silently discarded.
 
 The event cursor is the last sequence number already consumed. `/events?after=N`
 and `Coordinator.events(after=N)` return later events; numbers never repeat in
-one process. `Coordinator.event_cursor` exposes the latest emitted sequence
-for catch-up waits. The in-memory event window retains at most 2,048 records and 8
+one process. HTTP health, session, and event reads carry a per-process
+`serviceId`; persisted clients must reset or partition their cursor when that
+identifier changes. A cursor ahead of the current generation fails with HTTP
+`409 Conflict` rather than appearing idle. `Coordinator.event_cursor` exposes
+the latest emitted sequence for catch-up waits. The in-memory event window retains at most 2,048 records and 8
 MiB, with a 1 MiB limit per record. A stale cursor yields HTTP `410 Gone` with
 `oldestSequence`, or raises `EventCursorExpired` in Python. Oversized approval
 evidence is denied instead of being silently reduced for the judge. Item and

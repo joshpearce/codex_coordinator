@@ -7,13 +7,17 @@ and model verdicts are not. The deterministic approval policy validates
 requests and prevents judge output from widening the original request or the
 operator's permission ceiling.
 
-The HTTP control plane is bound to `127.0.0.1` only, rejects browser `Origin`
-headers and non-local `Host` headers, and has request limits. It has **no
-authentication**. Any other local process running as the operator can call it;
-malicious local processes are outside this threat model. Remote clients,
-browser clients, and multiple users are unsupported. No flag enables remote
-binding. Authentication, transport protection, and per-user authorization
-would be required before supporting those modes.
+The HTTP control protocol rejects browser `Origin` headers and non-local `Host`
+headers and has request limits. Its TCP listener is bound to `127.0.0.1` only.
+Alternatively, the service can listen only on an operator-owned Unix socket
+outside every coordinator- and worker-writable root. That form is required when
+a worker must have loopback networking: the coordinating profile allowlists the
+exact control socket and worker profiles do not. The control protocol has **no
+authentication**. Any other unsandboxed local process running as the operator
+can call it; malicious local processes are outside this threat model. Remote
+clients, browser clients, and multiple users are unsupported. No flag enables
+remote binding. Authentication, transport protection, and per-user
+authorization would be required before supporting those modes.
 
 Projects must be under startup-configured canonical allowed roots before any
 session is started for them. Existing symlinks that escape those roots are

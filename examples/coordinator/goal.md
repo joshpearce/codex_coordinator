@@ -62,8 +62,10 @@ are mirrored in `{{COORDINATOR_PATH}}/service.jsonl` for inspection.
 
 The API operations are:
 
-- `POST /sessions` with JSON `{"project": PATH, "prompt": TEXT}`;
-- `POST /sessions/SESSION_ID/messages` with JSON `{"prompt": TEXT}` after the
+- `POST /sessions` with JSON `{"project": PATH, "prompt": TEXT}` and an
+  optional operator-allowed `"effort"`;
+- `POST /sessions/SESSION_ID/messages` with JSON `{"prompt": TEXT}` and an
+  optional operator-allowed `"effort"` after the
   session's active turn completes;
 - `GET /sessions` for current session state;
 - `GET /events?after=N` for events after sequence `N`;
