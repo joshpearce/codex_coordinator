@@ -251,7 +251,9 @@ every later session of that project.
 and reports the first `.codex/rules` entry, `*.rules` file under a `.codex`
 directory, or symlinked `.codex` the scan cannot see through. The contents are
 never read: presence is the finding, and an unfinishable scan is refused rather
-than passed. `CoordinatorService.start_session` and the harness's
+than passed. The walk retains a finite one-million-entry ceiling so generated-
+code-heavy repositories remain usable without making pathological traversal
+unbounded. `CoordinatorService.start_session` and the harness's
 `JudgedSessionSupervisor.start` call it before `thread/start`, both callers call
 it again before every `turn/start` on an existing thread, and
 `codex-coordinator-preflight` calls it when validating a project. The service

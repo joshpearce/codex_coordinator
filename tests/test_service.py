@@ -2218,6 +2218,14 @@ async def test_a_file_change_never_carries_the_judge_a_grant_root(tmp_path: Path
 # --- #0017: a project carrying Codex rules of its own gets no session -------
 
 
+def test_rules_scan_bound_covers_large_generated_source_trees():
+    from codex_coordinator.coordinator import RULES_SCAN_LIMIT
+
+    # Regression for #0022: the first real managed project contains roughly
+    # 350,000 entries, mostly generated/external source and test artifacts.
+    assert RULES_SCAN_LIMIT >= 1_000_000
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("planted", "named"),

@@ -525,8 +525,10 @@ def verify_active_profile(result: Mapping[str, Any], requested: str) -> dict[str
 #: project carrying such a file is refused a session instead.
 CODEX_DIRECTORY = ".codex"
 RULES_SUFFIX = ".rules"
-#: Bound on the refusal scan so a pathological tree cannot stall a start.
-RULES_SCAN_LIMIT = 200_000
+#: Bound on the refusal scan so a pathological tree cannot stall a start. The
+#: supported ``sharp_sast`` worker is a generated-code-heavy repository with
+#: roughly 350,000 entries, so retain a finite ceiling with practical headroom.
+RULES_SCAN_LIMIT = 1_000_000
 
 
 class WorkerProjectRules(ValueError):
