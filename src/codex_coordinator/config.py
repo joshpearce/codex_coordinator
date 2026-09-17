@@ -400,7 +400,11 @@ class OperatorConfig:
         def _resolved(permissions: WorkerPermissions) -> WorkerPermissions:
             """Attach the boundary an id means, or refuse to start."""
             try:
-                profile = resolve_profile(permissions.permission_profile, codex_home)
+                profile = resolve_profile(
+                    permissions.permission_profile,
+                    codex_home,
+                    writable_temp_roots=frozenset(permissions.writable_temp_roots),
+                )
             except PermissionProfileError as exc:
                 raise ValueError(f"{permissions.source}: {exc}") from exc
             return replace(permissions, profile=profile)

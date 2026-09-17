@@ -352,6 +352,7 @@ class WorkerPermissions:
     # only way these values are applied.
     WIRE_APPROVAL_POLICIES = frozenset({"on-request", "untrusted"})
     FIELDS = ("approval_policy", "approvals_reviewer", "permission_profile")
+    WRITABLE_TEMP_ROOTS_FIELD = "writable_temp_roots"
     # Declares an operator-owned rules file, evaluated by the coordinator and
     # never handed to the runtime; see ``execpolicy.py`` for why.
     EXEC_POLICY_FIELD = "exec_policy"
@@ -361,8 +362,14 @@ class WorkerPermissions:
     # A profile id, resolved against the operator's Codex home. The default is
     # the narrowest built-in rather than the widest: a write boundary has to be
     # named by an operator, because only a profile they define can exclude the
-    # temporary roots the sandbox literal used to exclude (#0021).
+    # temporary roots the sandbox literal used to exclude or pair a required
+    # writable root with an explicit project-scoped acknowledgement (#0021).
     permission_profile: str = profiles.READ_ONLY
+    # Explicit exceptions to the coordinator's default requirement that a
+    # writable worker demote both inherited temporary roots. This declaration
+    # lives in the project-scoped, operator-owned permissions file rather than
+    # in worker-writable configuration.
+    writable_temp_roots: tuple[str, ...] = ()
     source: str = "built-in default"
     # The path the permissions file declared, as written, and the rules loaded
     # from it. A declared path with no loaded policy is an unfinished
@@ -403,13 +410,35 @@ class WorkerPermissions:
                 f"{profiles.DANGER_FULL_ACCESS}; a worker session is never given a "
                 "boundary that enforces nothing"
             )
+        if not isinstance(self.writable_temp_roots, tuple) or any(
+            not isinstance(root, str) for root in self.writable_temp_roots
+        ):
+            raise ValueError(
+                f"{self.source}: writable_temp_roots must be a list of temporary-root tokens"
+            )
+        if len(set(self.writable_temp_roots)) != len(self.writable_temp_roots):
+            raise ValueError(f"{self.source}: writable_temp_roots must not contain duplicates")
+        unknown_temp_roots = sorted(
+            set(self.writable_temp_roots) - profiles.TEMP_ROOT_TOKENS
+        )
+        if unknown_temp_roots:
+            raise ValueError(
+                f"{self.source}: writable_temp_roots names unsupported tokens "
+                f"{unknown_temp_roots}; supported: {sorted(profiles.TEMP_ROOT_TOKENS)}"
+            )
         if self.profile is None and self.permission_profile in profiles.BUILTIN_PROFILES:
             # A built-in means the same boundary in every Codex home, so it
             # needs no operator definition to be resolved — and resolving it
             # here still applies the refusals, which is why a bare ":workspace"
             # is rejected for leaving the temporary roots writable.
             object.__setattr__(
-                self, "profile", profiles.resolve_profile(self.permission_profile, None),
+                self,
+                "profile",
+                profiles.resolve_profile(
+                    self.permission_profile,
+                    None,
+                    writable_temp_roots=frozenset(self.writable_temp_roots),
+                ),
             )
         if self.profile is not None and not isinstance(self.profile, profiles.PermissionProfile):
             raise ValueError(f"{self.source}: profile must be a resolved PermissionProfile")
@@ -435,7 +464,11 @@ class WorkerPermissions:
             values = tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"{source}: invalid TOML: {exc}") from exc
-        unknown = sorted(set(values) - set(cls.FIELDS) - {cls.EXEC_POLICY_FIELD})
+        unknown = sorted(
+            set(values)
+            - set(cls.FIELDS)
+            - {cls.EXEC_POLICY_FIELD, cls.WRITABLE_TEMP_ROOTS_FIELD}
+        )
         if unknown:
             raise ValueError(f"{source}: unsupported worker permission fields: {unknown}")
         base = default if default is not None else cls()
@@ -448,9 +481,22 @@ class WorkerPermissions:
         exec_policy_path = values.get(cls.EXEC_POLICY_FIELD)
         if exec_policy_path is not None and not isinstance(exec_policy_path, str):
             raise ValueError(f"{source}: exec_policy must be a string path")
+        writable_temp_roots = values.get(cls.WRITABLE_TEMP_ROOTS_FIELD, [])
+        if not isinstance(writable_temp_roots, list) or any(
+            not isinstance(root, str) for root in writable_temp_roots
+        ):
+            raise ValueError(
+                f"{source}: writable_temp_roots must be a list of temporary-root tokens"
+            )
         # Deliberately not inherited from the operator-wide default: an allow
-        # list is scoped to the project whose file names it.
-        return cls(source=source, exec_policy_path=exec_policy_path, **declared)
+        # list or temporary-root widening is scoped to the project whose file
+        # names it.
+        return cls(
+            source=source,
+            exec_policy_path=exec_policy_path,
+            writable_temp_roots=tuple(writable_temp_roots),
+            **declared,
+        )
 
     @property
     def exec_policy_loaded(self) -> bool:
@@ -468,6 +514,7 @@ class WorkerPermissions:
         payload = json.dumps(
             {
                 **{name: getattr(self, name) for name in self.FIELDS},
+                "writable_temp_roots": list(self.writable_temp_roots),
                 # An operator editing a parent profile changes this boundary
                 # without changing any file this project owns, so the resolved
                 # chain is part of what an audit compares.
@@ -483,6 +530,7 @@ class WorkerPermissions:
             "digest": self.digest,
             "approvalPolicy": self.approval_policy,
             "approvalsReviewer": self.approvals_reviewer,
+            "writableTempRoots": list(self.writable_temp_roots),
             "permissionProfile": (
                 {"id": self.permission_profile, "resolved": False}
                 if self.profile is None else self.profile.provenance()

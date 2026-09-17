@@ -51,6 +51,7 @@ def check(config: OperatorConfig, projects: list[Path], *, require_socket: bool 
             "project": str(project),
             "permissionProfile": worker.provenance()["permissionProfile"],
             "approvalPolicy": worker.approval_policy,
+            "writableTempRoots": list(worker.writable_temp_roots),
             "permissionsSource": worker.source,
             "permissionsDigest": worker.digest,
             # Rules the coordinator decides without a judge, or null when every

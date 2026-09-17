@@ -418,6 +418,12 @@ def test_rejects_unsupported_worker_permission_values():
         # :workspace is a built-in, so it resolves — and is refused for leaving
         # /tmp and $TMPDIR writable, which the old sandbox literal did not.
         ('permission_profile = ":workspace"', "without demoting"),
+        ('writable_temp_roots = ":slash_tmp"', "must be a list"),
+        ('writable_temp_roots = [":unknown"]', "unsupported tokens"),
+        (
+            'writable_temp_roots = [":slash_tmp", ":slash_tmp"]',
+            "must not contain duplicates",
+        ),
         ('writable_roots = ["/"]', "unsupported worker permission fields"),
         ('permission_profile = ', "invalid TOML"),
     ):
@@ -451,6 +457,7 @@ def test_worker_permission_keys_fall_back_to_the_operator_wide_default():
         "digest": permissions.digest,
         "approvalPolicy": "untrusted",
         "approvalsReviewer": "user",
+        "writableTempRoots": [],
         # The chain, not just the id: an operator editing a parent changes this
         # boundary without changing any file this project owns.
         "permissionProfile": {

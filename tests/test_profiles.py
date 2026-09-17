@@ -121,6 +121,28 @@ def test_a_writable_profile_that_leaves_the_temporary_roots_writable_is_refused(
     ).resolve("worker").writable
 
 
+def test_a_project_may_explicitly_acknowledge_one_writable_temporary_root(tmp_path: Path):
+    """A required temp widening is visible instead of bypassing the safeguard."""
+    configured = home(
+        tmp_path,
+        '[permissions.worker]\nextends = ":workspace"\n'
+        'filesystem = { ":tmpdir" = "read", ":slash_tmp" = "write" }\n',
+    )
+    with pytest.raises(PermissionProfileError, match="without demoting.*:slash_tmp"):
+        configured.resolve("worker")
+
+    resolved = configured.resolve(
+        "worker", writable_temp_roots=frozenset({":slash_tmp"}),
+    )
+    assert resolved.filesystem[":tmpdir"] == "read"
+    assert resolved.filesystem[":slash_tmp"] == "write"
+
+    with pytest.raises(PermissionProfileError, match="unsupported tokens"):
+        configured.resolve(
+            "worker", writable_temp_roots=frozenset({":not-a-temp-root"}),
+        )
+
+
 def test_a_network_ceiling_the_runtime_would_not_enforce_is_refused(tmp_path: Path):
     """A ceiling that is written but not enforced is an error, not a default.
 

@@ -459,6 +459,38 @@ def test_worker_permissions_default_to_the_operator_wide_approval_policy(tmp_pat
     assert permissions.permission_profile == ":read-only"
 
 
+def test_writable_temp_roots_are_explicit_and_project_scoped(tmp_path: Path):
+    """A project may opt into only the writable temp roots its profile retains."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        'default_permissions = ":read-only"\n\n'
+        '[permissions.worker]\n'
+        'extends = ":workspace"\n'
+        'filesystem = { ":tmpdir" = "read", ":slash_tmp" = "write" }\n'
+    )
+    config_path = _operator_with_permissions(
+        tmp_path,
+        'permission_profile = "worker"\n'
+        'writable_temp_roots = [":slash_tmp"]\n',
+        extra=f'codex_home = "{home}"\n',
+    )
+
+    config = OperatorConfig.load(path=config_path, environ={})
+    permissions = config.permissions_for(tmp_path / "worker")
+    assert permissions.writable_temp_roots == (":slash_tmp",)
+    assert permissions.profile is not None
+    assert permissions.profile.filesystem[":slash_tmp"] == "write"
+    assert permissions.provenance()["writableTempRoots"] == [":slash_tmp"]
+    assert config.default_worker_permissions.writable_temp_roots == ()
+
+    (tmp_path / "worker.permissions.toml").write_text(
+        'permission_profile = "worker"\n'
+    )
+    with pytest.raises(ValueError, match="without demoting.*:slash_tmp"):
+        OperatorConfig.load(path=config_path, environ={})
+
+
 def test_worker_permissions_file_must_be_a_trusted_operator_file(tmp_path: Path):
     worker = tmp_path / "worker"
     worker.mkdir()

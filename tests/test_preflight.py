@@ -44,6 +44,7 @@ def test_preflight_checks_operator_project_and_codex(monkeypatch, tmp_path: Path
             "source": "runtime built-in",
         },
         "approvalPolicy": "on-request",
+        "writableTempRoots": [],
         "permissionsSource": "operator-wide default",
         "permissionsDigest": config.default_worker_permissions.digest,
         "execPolicy": None,

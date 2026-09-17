@@ -400,12 +400,15 @@ they read as enforcing, so the coordinator refuses each at startup rather than
 discovering it through a worker: an unrecognized key or `filesystem` token,
 which is ignored rather than rejected; a writable profile that does not demote
 `:tmpdir` and `:slash_tmp`, which leaves `/tmp` and `$TMPDIR` writable where the
-previous boundary did not; and a `domains` or `unix_sockets` grant declared
-while `[features] network_proxy` is off, which enforces nothing at all while
-reading as a ceiling. The first two are rules about a profile a worker is given,
-so they are applied where one is selected. The third is a rule about the home:
-it is applied to every profile defined there, because a home carrying an inert
-ceiling misleads its reader whichever profile is selected today.
+previous boundary did not unless the project's trusted permissions descriptor
+explicitly lists each required token in `writable_temp_roots`; and a `domains`
+or `unix_sockets` grant declared while `[features] network_proxy` is off, which
+enforces nothing at all while reading as a ceiling. The first two are rules
+about a profile a worker is given, so they are applied where one is selected.
+The temporary-root exception is project-scoped, audited, and not inherited.
+The third is a rule about the home: it is applied to every profile defined
+there, because a home carrying an inert ceiling misleads its reader whichever
+profile is selected today.
 
 A fourth trap is not refusable, only documented: `network.mode` grants nothing.
 Probed with the proxy on, `mode = "full"` and `mode = "limited"` behave

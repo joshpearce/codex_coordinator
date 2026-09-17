@@ -21,6 +21,16 @@ An exact Unix-socket allowlist probe established a narrower local transport:
 the worker was denied an operator-owned Unix socket while a coordinating
 profile explicitly allowed that same socket.
 
+The same live diagnosis found a second IPC shape: multiprocess MSBuild creates
+dynamic `/tmp/MSBuild<PID>` Unix sockets even when its diagnostic and cache
+paths use a project-local `TMPDIR`. Codex CLI 0.154.0 permits an AF_UNIX root,
+but does not permit a wildcard filesystem write for those dynamic filenames.
+The minimum working profile therefore retains writable `/tmp` and grants the
+`/tmp` Unix-socket root. Such a widening must be explicitly acknowledged as
+`:slash_tmp` in that project's operator-owned `writable_temp_roots`; omission
+continues to fail startup, and preflight plus session provenance report the
+exception.
+
 ## Why it matters
 
 This is a governance-integrity conflict. A project cannot be given a runtime

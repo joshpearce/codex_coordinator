@@ -171,7 +171,8 @@ directory for the coordinator to own, not one to share with a checkout.
 its only writable root, no network, and neither `/tmp` nor `$TMPDIR` writable.
 The two `filesystem` entries are load-bearing — `:workspace` on its own leaves
 both temporary roots writable, and the coordinator refuses a writable profile
-that omits them.
+that omits them unless the affected project explicitly acknowledges the
+required root in its operator-owned permissions file.
 
 Then declare each worker's boundary by naming a profile from that home:
 
@@ -193,6 +194,11 @@ the operator's Codex home, or a runtime built-in such as `:read-only`. The id is
 resolved before any session starts, so one that names nothing — or a profile
 wider than it reads — fails startup rather than a worker. `approvals_reviewer`
 must be `user`, the only reviewer that routes an approval to a judge.
+`writable_temp_roots` is an optional list containing `:tmpdir`, `:slash_tmp`,
+or both. It is an explicit widening for tools that cannot keep temporary IPC or
+artifacts inside the project; it is never inherited from the operator-wide
+default, and preflight reports it. Keep the list absent when redirection to a
+project-local temporary directory is sufficient.
 
 Each file is referenced from `operator.toml` under `[worker_permissions]`, shown
 with the rest of that file below. Any key may be omitted to take the

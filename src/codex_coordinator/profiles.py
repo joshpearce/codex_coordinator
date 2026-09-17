@@ -21,7 +21,8 @@ discovered only by a worker escaping:
   in full, accepted in full, and enforce nothing.
 * ``:workspace`` leaves ``/tmp`` and ``$TMPDIR`` writable, which the sandbox
   literal excluded. A profile that does not demote them widens every worker
-  boundary this project used to enforce.
+  boundary this project used to enforce unless the project's trusted
+  permissions descriptor explicitly acknowledges the required roots.
 * A ``domains`` or ``unix_sockets`` grant does nothing at all unless the
   ``network_proxy`` feature is on, and that feature is off by default. That one
   is a property of the home rather than of a selection, so it is checked across
@@ -69,6 +70,9 @@ FILESYSTEM_TOKENS = frozenset({
 FILESYSTEM_ACCESS = frozenset({"read", "write", "deny", "none"})
 #: Access values that leave no write grant behind.
 NON_WRITE_ACCESS = frozenset({"read", "deny", "none"})
+#: Temporary-root tokens whose inherited write grants require an explicit,
+#: project-scoped operator acknowledgement before a worker may receive them.
+TEMP_ROOT_TOKENS = frozenset({":tmpdir", ":slash_tmp"})
 
 PROFILE_KEYS = frozenset({"extends", "description", "filesystem", "network"})
 NETWORK_KEYS = frozenset({
@@ -196,7 +200,12 @@ class CodexHome:
     def profile_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self.definitions))
 
-    def resolve(self, profile_id: str) -> PermissionProfile:
+    def resolve(
+        self,
+        profile_id: str,
+        *,
+        writable_temp_roots: frozenset[str] = frozenset(),
+    ) -> PermissionProfile:
         """Resolve one id to its boundary, or refuse to start.
 
         Every refusal here is a configuration the runtime would accept and
@@ -209,7 +218,11 @@ class CodexHome:
             resolved = builtin_profile(profile_id)
         else:
             resolved = self._resolve_defined(profile_id, config)
-        verify_profile(resolved, str(config))
+        verify_profile(
+            resolved,
+            str(config),
+            writable_temp_roots=writable_temp_roots,
+        )
         return resolved
 
     def _resolve_defined(self, profile_id: str, config: Path) -> PermissionProfile:
@@ -356,7 +369,12 @@ def verify_home(home: "CodexHome") -> "CodexHome":
     return home
 
 
-def verify_profile(profile: PermissionProfile, source: str) -> PermissionProfile:
+def verify_profile(
+    profile: PermissionProfile,
+    source: str,
+    *,
+    writable_temp_roots: frozenset[str] = frozenset(),
+) -> PermissionProfile:
     """Refuse a boundary a worker must never be given.
 
     These are the rules about what a selected profile may mean. The separate
@@ -369,13 +387,21 @@ def verify_profile(profile: PermissionProfile, source: str) -> PermissionProfile
             f"(chain: {' -> '.join(profile.chain)}). A worker session is never given "
             "a boundary that enforces nothing."
         )
-    # A writable profile must exclude the temporary roots, as the sandbox
-    # literal did. ``:workspace`` leaves both writable, so a profile that omits
-    # these is not a re-spelling of the old boundary but a widening of it.
+    unknown_temp_roots = sorted(writable_temp_roots - TEMP_ROOT_TOKENS)
+    if unknown_temp_roots:
+        raise PermissionProfileError(
+            f"{source}: writable_temp_roots names unsupported tokens "
+            f"{unknown_temp_roots}; supported: {sorted(TEMP_ROOT_TOKENS)}"
+        )
+    # A writable profile excludes the temporary roots by default, as the
+    # sandbox literal did. ``:workspace`` leaves both writable, so each root
+    # intentionally retained as writable must be acknowledged in the trusted,
+    # project-scoped permissions descriptor.
     if profile.writable:
         missing = [
-            token for token in (":tmpdir", ":slash_tmp")
+            token for token in sorted(TEMP_ROOT_TOKENS)
             if profile.filesystem.get(token) not in NON_WRITE_ACCESS
+            and token not in writable_temp_roots
         ]
         if missing:
             raise PermissionProfileError(
@@ -384,12 +410,19 @@ def verify_profile(profile: PermissionProfile, source: str) -> PermissionProfile
                 "and /tmp writable, which the boundary this project enforced before "
                 "permission profiles did not. Add "
                 '`filesystem = { ":tmpdir" = "read", ":slash_tmp" = "read" }` '
-                "to the profile, or deny them outright."
+                "to the profile, deny them outright, or explicitly acknowledge only "
+                "the required roots with `writable_temp_roots` in the project's "
+                "operator-owned permissions file."
             )
     return profile
 
 
-def resolve_profile(profile_id: str, home: "CodexHome | None") -> PermissionProfile:
+def resolve_profile(
+    profile_id: str,
+    home: "CodexHome | None",
+    *,
+    writable_temp_roots: frozenset[str] = frozenset(),
+) -> PermissionProfile:
     """Resolve an id against the operator's Codex home, if one is configured.
 
     A home is required exactly when the operator names a profile of their own.
@@ -399,7 +432,10 @@ def resolve_profile(profile_id: str, home: "CodexHome | None") -> PermissionProf
     isolation half of #0021.
     """
     if home is not None:
-        return home.resolve(profile_id)
+        return home.resolve(
+            profile_id,
+            writable_temp_roots=writable_temp_roots,
+        )
     if profile_id not in BUILTIN_PROFILES:
         raise PermissionProfileError(
             f"permission profile {profile_id!r} is not one of the built-ins "
@@ -407,4 +443,8 @@ def resolve_profile(profile_id: str, home: "CodexHome | None") -> PermissionProf
             "Set codex_home in the operator configuration to the home that holds "
             "the [permissions.<id>] tables."
         )
-    return verify_profile(builtin_profile(profile_id), "runtime built-in")
+    return verify_profile(
+        builtin_profile(profile_id),
+        "runtime built-in",
+        writable_temp_roots=writable_temp_roots,
+    )

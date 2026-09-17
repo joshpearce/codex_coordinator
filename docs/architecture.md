@@ -52,8 +52,11 @@ exists, because the runtime accepts several configurations it does not enforce:
   map, is ignored rather than refused. `:tmp`, `:temp` and `:system_tmp` all
   parse and do nothing where `:tmpdir` and `:slash_tmp` take effect.
 - `:workspace` leaves `/tmp` and `$TMPDIR` writable, which the sandbox literal
-  excluded. A writable profile that does not demote both is refused, because it
-  is a widening of the old boundary rather than a re-spelling of it.
+  excluded. A writable profile that does not demote both is refused unless the
+  project's operator-owned permissions descriptor names each intentionally
+  writable token in `writable_temp_roots`. The exception is project-scoped,
+  appears in provenance and preflight, and is never inherited by another
+  project.
 - A `domains` or `unix_sockets` grant enforces nothing unless
   `[features] network_proxy = true`, and that feature is off by default. A
   declared-but-inert ceiling fails startup on the same principle as a declared
@@ -105,15 +108,18 @@ per-turn re-imposition, so re-sending a boundary would only reassert state that
 never lapsed. Startup fails if the server reports a different profile than the
 one requested, or reports none.
 
-A worker profile gives the project as the only writable root, no network, and
-neither temporary root writable — `filesystem = { ":tmpdir" = "read",
+A worker profile defaults to the project as its only writable root, no network,
+and neither temporary root writable — `filesystem = { ":tmpdir" = "read",
 ":slash_tmp" = "read" }` is the profile spelling of the literal's
 `excludeTmpdirEnvVar` and `excludeSlashTmp`, keeping the reads the literal also
-allowed. The app-server's OS sandbox is the execution-time boundary, so the
-restriction also applies to subprocesses, standard temporary-file APIs,
-symlinks, and other indirect effects; `tests/test_runtime_boundary.py` runs one
-escape probe under both shapes and compares them axis by axis. No worker-authored
-file feeds this boundary.
+allowed. When an external tool requires one of those roots, the project's
+trusted descriptor must acknowledge that exact token with
+`writable_temp_roots`; omission still fails startup. The app-server's OS
+sandbox is the execution-time boundary, so the restriction also applies to
+subprocesses, standard temporary-file APIs, symlinks, and other indirect
+effects; `tests/test_runtime_boundary.py` runs one escape probe under both
+shapes and compares them axis by axis. No worker-authored file feeds this
+boundary.
 
 ## Unified approval boundary
 
