@@ -221,6 +221,39 @@ async def test_managed_approval_is_resolved_through_session_bound_http(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_denial_reason_is_steered_to_same_worker_turn_after_wire_response(tmp_path: Path):
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        async def call(self, method, params):
+            self.calls.append((method, params))
+            return {}
+
+    events = EventLog()
+    broker = ApprovalBroker(events)
+    register(broker, tmp_path)
+    client = Client()
+    CoordinatorService(client, broker, events, allowed_roots=[tmp_path])
+    waiting = asyncio.create_task(broker(command_request()))
+    await asyncio.sleep(0)
+    approval_id = next(iter(broker.pending))
+    broker.resolve(approval_id, "session-1", "deny", "source digest does not match built input")
+    response = await waiting
+
+    await broker.response_sent(command_request(), response)
+
+    assert client.calls == [("turn/steer", {
+        "threadId": "worker-1", "expectedTurnId": "turn-1",
+        "input": [{"type": "text", "text": (
+            "The requested command was not executed. Reason: source digest does not match built input\n"
+            "Address this concrete issue before retrying the action."
+        )}],
+    })]
+    assert any(event["type"] == "approval.feedback_delivered" for event in events.events)
+
+
+@pytest.mark.asyncio
 async def test_service_owned_judge_handles_concurrent_workers_without_http_bypass(tmp_path: Path):
     entered = asyncio.Event()
     release = asyncio.Event()

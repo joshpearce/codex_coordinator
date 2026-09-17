@@ -778,6 +778,67 @@ async def test_nullable_command_uses_only_same_turn_item_evidence(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_command_review_gets_bounded_current_project_and_import_evidence(tmp_path: Path):
+    driver = tmp_path / "driver"
+    driver.mkdir()
+    source = driver / "Program.cs"
+    source.write_text("class Program { static void Main() {} }\n")
+    targets = tmp_path / "probe.targets"
+    targets.write_text('<Project><ItemGroup><Compile Include="driver/Program.cs" /></ItemGroup></Project>')
+    project = driver / "Driver.csproj"
+    project.write_text('<Project><Import Project="../probe.targets" /></Project>')
+    judge = StaticJudge()
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
+    handler.register_worker("worker-1")
+
+    await handler(command_request(command=f"dotnet test {project} --results-directory {tmp_path / 'results'}"))
+
+    evidence = mutable_evidence(judge.cases[0].action_evidence)
+    by_path = {item["path"]: item for item in evidence["files"]}
+    assert {"driver/Driver.csproj", "probe.targets", "driver/Program.cs"} <= set(by_path)
+    assert by_path["driver/Program.cs"]["content"] == source.read_text()
+    assert by_path["driver/Program.cs"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert evidence["outputDestinations"] == [str(tmp_path / "results")]
+
+
+@pytest.mark.asyncio
+async def test_command_review_evidence_is_snapshot_and_exposes_later_mismatch(tmp_path: Path):
+    project = tmp_path / "Driver.csproj"
+    project.write_text("<Project />")
+    judge = StaticJudge()
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
+    handler.register_worker("worker-1")
+    await handler(command_request(command=f"dotnet build {project}"))
+    captured = mutable_evidence(judge.cases[0].action_evidence)["files"][0]
+
+    project.write_text("<Project><PropertyGroup /></Project>")
+
+    assert captured["sha256"] != hashlib.sha256(project.read_bytes()).hexdigest()
+    assert captured["content"] == "<Project />"
+
+
+@pytest.mark.asyncio
+async def test_command_review_resolves_task_local_shell_variable_paths(tmp_path: Path):
+    source = tmp_path / "Program.cs"
+    source.write_text("class Program {}\n")
+    targets = tmp_path / "probe.targets"
+    targets.write_text('<Project><Compile Include="Program.cs" /></Project>')
+    judge = StaticJudge()
+    handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)
+    handler.register_worker("worker-1")
+
+    await handler(command_request(command=(
+        f"probe_root={tmp_path} dotnet test tests.csproj "
+        "--results-directory $probe_root/results "
+        "-p:CustomAfterMicrosoftCommonTargets=$probe_root/probe.targets"
+    )))
+
+    evidence = mutable_evidence(judge.cases[0].action_evidence)
+    assert {item["path"] for item in evidence["files"]} == {"probe.targets", "Program.cs"}
+    assert evidence["outputDestinations"] == [str(tmp_path / "results")]
+
+
+@pytest.mark.asyncio
 async def test_file_approval_cannot_reuse_prior_turn_item_evidence(tmp_path: Path):
     judge = StaticJudge()
     handler = JudgedApprovalHandler(tmp_path, ApprovalPolicy(tmp_path), judge)

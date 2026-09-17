@@ -13,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from functools import partial
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -238,6 +238,8 @@ class ApprovalBroker:
         self.assignments = AssignmentLedger()
         self.items: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
         self.pending: dict[str, PendingApproval] = {}
+        self.denial_feedback: dict[int | str, tuple[str, str, str]] = {}
+        self.feedback_handler: Callable[[str, str, str, int | str], Awaitable[None]] | None = None
         self.unmanaged_request_count = 0
         self.closed = False
 
@@ -341,6 +343,7 @@ class ApprovalBroker:
             project=registration.project,
             request=mutable_evidence(case.request),
             declaredIntent=mutable_evidence(case.declared_intent),
+            actionEvidence=mutable_evidence(case.action_evidence),
             enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
             # What the judge was told the task was. The text itself is recorded
             # once by the event that started the turn; the digest joins them.
@@ -466,10 +469,17 @@ class ApprovalBroker:
             reason=decision.reason,
             response=response,
             declaredIntent=mutable_evidence(pending.case.declared_intent),
+            actionEvidence=mutable_evidence(pending.case.action_evidence),
             enforcedCapabilities=mutable_evidence(pending.case.enforced_capabilities),
             assignment=pending.case.assignment_provenance,
             policy=self._policy_provenance(pending.registration.project),
         )
+        if decision.verdict == "deny" and pending.rpc_request_id is not None:
+            turn_id = pending.case.request.get("turnId")
+            if isinstance(turn_id, str):
+                self.denial_feedback[pending.rpc_request_id] = (
+                    pending.case.thread_id, turn_id, decision.reason,
+                )
         return response
 
     @staticmethod
@@ -493,6 +503,9 @@ class ApprovalBroker:
             method=message.get("method"),
             response=mutable_evidence(response),
         )
+        feedback = self.denial_feedback.pop(rpc_id, None)
+        if feedback is not None and self.feedback_handler is not None:
+            await self.feedback_handler(*feedback, rpc_id)
 
 
 class CoordinatorService:
@@ -539,6 +552,7 @@ class CoordinatorService:
             source="operator-wide default",
         )
         self.allow_session_approval = allow_session_approval
+        self.approvals.feedback_handler = self.deliver_denial_feedback
         self.constitution = constitution
         roots: list[Path] = []
         for root in allowed_roots:
@@ -571,6 +585,30 @@ class CoordinatorService:
                 )
             declarations[canonical] = permissions
         self.worker_permissions = MappingProxyType(declarations)
+
+    async def deliver_denial_feedback(
+        self, thread_id: str, turn_id: str, reason: str, rpc_request_id: int | str,
+    ) -> None:
+        text = (
+            "The requested command was not executed. Reason: " + reason
+            + "\nAddress this concrete issue before retrying the action."
+        )
+        try:
+            await self.client.call("turn/steer", {
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{"type": "text", "text": text}],
+            })
+        except Exception as exc:
+            self.events.emit(
+                "approval.feedback_failed", threadId=thread_id, turnId=turn_id,
+                rpcRequestId=rpc_request_id, reason=str(exc),
+            )
+            return
+        self.events.emit(
+            "approval.feedback_delivered", threadId=thread_id, turnId=turn_id,
+            rpcRequestId=rpc_request_id, reason=reason,
+        )
 
     def permissions_for(self, project: Path) -> WorkerPermissions:
         return select_worker_permissions(
