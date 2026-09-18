@@ -5,45 +5,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 import os
 import stat
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from functools import partial
-from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import websockets
 
-from .coordinator import (
-    ApprovalCase,
-    ApprovalPolicy,
-    AssignmentLedger,
-    Constitution,
-    JudgeDecision,
-    Judge,
-    JudgedApprovalHandler,
-    OneShotCodexJudge,
-    SessionRegistration,
-    WorkerPermissions,
-    WorkerProjectRules,
-    codex_exec_json_runner,
-    refuse_worker_project_rules,
-    select_worker_permissions,
-    mutable_evidence,
-    verify_active_profile,
-)
 from .config import OperatorConfig
 from .compatibility import check_codex_compatibility
-from .daemon import ensure_daemon
-from .protocol import ProtocolClient
+from .daemon import validate_local_socket
+from .protocol import ProtocolClient, ProtocolError
 
 
 @dataclass
@@ -182,295 +160,109 @@ class Session:
     id: str
     thread_id: str
     project: str
+    project_path: str
     state: str = "active"
     turn_id: str | None = None
     last_completed_turn_id: str | None = field(default=None, repr=False)
-    # The profile id this session's thread was started with, and the
-    # `activePermissionProfile` the server reported back for it. Both are
-    # carried so a reader can see that the boundary asked for is the boundary
-    # the runtime selected (#0021).
-    permission_profile: str = ""
-    active_permission_profile: Mapping[str, Any] = field(default_factory=dict, repr=False)
-    reasoning_effort: str = ""
+    model: str | None = None
+    reasoning_effort: str | None = None
+    effective_model: str | None = None
+    effective_reasoning_effort: str | None = None
 
     def json(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "threadId": self.thread_id,
             "project": self.project,
+            "projectPath": self.project_path,
             "state": self.state,
             "turnId": self.turn_id,
-            "permissionProfile": self.permission_profile,
-            "activePermissionProfile": dict(self.active_permission_profile),
+            "model": self.model,
             "reasoningEffort": self.reasoning_effort,
+            "effectiveModel": self.effective_model,
+            "effectiveReasoningEffort": self.effective_reasoning_effort,
         }
 
 
-@dataclass(frozen=True)
-class PendingApproval:
-    registration: SessionRegistration
-    case: ApprovalCase
-    future: asyncio.Future[dict[str, Any]]
-    rpc_request_id: int | str | None
-
-
-class ApprovalBroker:
-    """Live adapter for the same deterministic boundary used by one-shot flows."""
+class AutomaticApprovalHandler:
+    """Approve well-formed requests from registered child threads."""
 
     def __init__(
-        self, events: EventLog, *, approval_timeout_seconds: float = 300,
-        judge: Judge | None = None,
-        constitution: Constitution | None = None,
-        item_capacity: int = 256,
+        self, events: EventLog, *, item_capacity: int = 256,
         item_max_bytes: int = 64 * 1024,
     ) -> None:
-        if not math.isfinite(approval_timeout_seconds) or approval_timeout_seconds <= 0:
-            raise ValueError("approval timeout must be positive and finite")
         self.events = events
-        self.approval_timeout_seconds = approval_timeout_seconds
-        self.judge = judge
-        self.constitution = constitution
         if item_capacity < 1 or item_max_bytes < 256:
             raise ValueError("item retention limits must be positive")
         self.item_capacity = item_capacity
         self.item_max_bytes = item_max_bytes
-        self.registrations: dict[str, SessionRegistration] = {}
-        self.assignments = AssignmentLedger()
-        self.items: OrderedDict[tuple[str, str, str], dict[str, Any]] = OrderedDict()
-        self.pending: dict[str, PendingApproval] = {}
-        self.unmanaged_request_count = 0
+        self.registrations: dict[str, tuple[str, str, str]] = {}
         self.closed = False
 
-    def _policy_provenance(self, project: str) -> dict[str, Any] | None:
-        """Record which policy tiers a judge for ``project`` was given, if any."""
-        if self.constitution is None:
-            return None
-        return self.constitution.provenance(project)
-
-    def register(self, registration: SessionRegistration) -> None:
+    def register(self, thread_id: str, session_id: str, project: str, project_path: str) -> None:
         if self.closed:
-            raise RuntimeError("approval broker is closed")
-        existing = self.registrations.get(registration.thread_id)
+            raise RuntimeError("approval handler is closed")
+        registration = (session_id, project, project_path)
+        existing = self.registrations.get(thread_id)
         if existing is not None and existing != registration:
             raise ValueError("thread is already bound to a different session")
-        self.registrations[registration.thread_id] = registration
+        self.registrations[thread_id] = registration
 
     async def __call__(self, message: dict[str, Any]) -> dict[str, Any]:
-        method = message.get("method") if isinstance(message, dict) else ""
         if self.closed:
-            return JudgedApprovalHandler._deny(method)
+            raise ProtocolError("approval handler is closed")
+        if not isinstance(message, dict):
+            raise ProtocolError("malformed app-server request")
+        method = message.get("method")
         params = message.get("params") if isinstance(message, dict) else None
-        thread_id = params.get("threadId") if isinstance(params, dict) else None
+        if not isinstance(method, str) or not isinstance(params, Mapping):
+            return self._fail(message, "malformed app-server request")
+        thread_id = params.get("threadId")
         registration = self.registrations.get(thread_id) if isinstance(thread_id, str) else None
         if registration is None:
-            self.unmanaged_request_count += 1
-            return JudgedApprovalHandler._deny(method)
-        item_id = params.get("itemId")
-        turn_id = params.get("turnId")
-        item = self.items.get((thread_id, turn_id, item_id)) if isinstance(item_id, str) and isinstance(turn_id, str) else None
-        try:
-            case = registration.policy.normalize(
-                message,
-                session_id=registration.session_id,
-                thread_id=registration.thread_id,
-                item=item,
-                assignment=self.assignments.current(registration.thread_id),
-            )
-        except ValueError as exc:
-            self.events.emit(
-                "approval.rejected",
-                sessionId=registration.session_id,
-                threadId=registration.thread_id,
-                method=method,
-                reason=str(exc),
-            )
-            return JudgedApprovalHandler._deny(method)
-        code = registration.policy.decide_by_code(case)
-        if code is not None and code.verdict != "judge":
-            # Decided by the trusted boundary, not by a judge: no pending
-            # approval is created, no model is called, and an acceptance is a
-            # single-turn accept. The event carries the same evidence an
-            # approval would, plus the rule that decided it, so the audit
-            # trail stays complete whether the answer was yes or no.
-            decision = code.decision
-            response = JudgedApprovalHandler._encode(case, decision)
-            exec_policy = registration.policy.exec_policy
-            extra: dict[str, Any] = {}
-            if code.exec_policy is not None:
-                extra["execPolicy"] = {
-                    **(exec_policy.provenance() if exec_policy is not None else {}),
-                    **code.exec_policy.json(),
-                }
-            if code.paths:
-                extra["containment"] = code.json()
-            self.events.emit(
-                code.event,
-                rpcRequestId=self._rpc_request_id(message),
-                sessionId=registration.session_id,
-                threadId=registration.thread_id,
-                method=case.method,
-                project=registration.project,
-                reason=decision.reason,
-                request=mutable_evidence(case.request),
-                declaredIntent=mutable_evidence(case.declared_intent),
-                enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
-                assignment=case.assignment_provenance,
-                response=response,
-                **extra,
-            )
-            return response
-        approval_id = uuid.uuid4().hex
-        if len(self.pending) >= 128:
-            self.events.emit(
-                "approval.rejected", sessionId=registration.session_id,
-                threadId=registration.thread_id, method=method,
-                reason="pending approval limit reached",
-            )
-            return JudgedApprovalHandler._deny(method)
-        future = asyncio.get_running_loop().create_future()
-        self.pending[approval_id] = PendingApproval(
-            registration, case, future, self._rpc_request_id(message)
-        )
-        recorded = self.events.emit(
-            "approval.requested",
-            approvalId=approval_id,
-            rpcRequestId=self._rpc_request_id(message),
-            sessionId=registration.session_id,
-            threadId=registration.thread_id,
-            method=case.method,
-            project=registration.project,
-            request=mutable_evidence(case.request),
-            declaredIntent=mutable_evidence(case.declared_intent),
-            enforcedCapabilities=mutable_evidence(case.enforced_capabilities),
-            # What the judge was told the task was. The text itself is recorded
-            # once by the event that started the turn; the digest joins them.
-            assignment=case.assignment_provenance,
-            policy=self._policy_provenance(registration.project),
-            # Present only when an operator rule sent a case a containment rule
-            # would otherwise have decided, so an audit can tell an escalated
-            # in-project change from one judging was always going to see.
-            **({"containment": code.json()} if code is not None else {}),
-        )
-        if recorded.get("truncated"):
-            self.pending.pop(approval_id, None)
-            self.events.emit(
-                "approval.rejected", sessionId=case.session_id,
-                threadId=case.thread_id, approvalId=approval_id,
-                reason="approval evidence exceeds event limit",
-            )
-            return JudgedApprovalHandler._deny(case.method)
-        judge_task = (
-            asyncio.create_task(self._judge(approval_id, case))
-            if self.judge is not None else None
-        )
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(future), self.approval_timeout_seconds
-            )
-        except asyncio.TimeoutError:
-            if future.done():
-                return future.result()
-            response = JudgedApprovalHandler._deny(case.method)
-            future.set_result(response)
-            self.events.emit(
-                "approval.expired", approvalId=approval_id,
-                sessionId=registration.session_id, threadId=registration.thread_id,
-                response=response,
-            )
-            return response
-        finally:
-            if judge_task is not None:
-                judge_task.cancel()
-                await asyncio.gather(judge_task, return_exceptions=True)
-            self.pending.pop(approval_id, None)
-
-    async def _judge(self, approval_id: str, case: ApprovalCase) -> None:
-        assert self.judge is not None
-        try:
-            decision = await self.judge.decide(case)
-            if not isinstance(decision, JudgeDecision):
-                raise ValueError("judge returned no valid decision")
-            self.resolve(
-                approval_id, case.session_id, decision.verdict,
-                decision.reason, mutable_evidence(decision.permissions)
-                if decision.permissions is not None else None,
-            )
-        except (KeyError, asyncio.CancelledError):
-            return
-        except Exception:
-            try:
-                self.resolve(approval_id, case.session_id, "deny", "judge failed")
-            except KeyError:
-                pass
-
-    def close(self, reason: str = "service shutdown") -> None:
-        """Deny unresolved approvals before the transport is closed."""
-        self.closed = True
-        for approval_id, pending in tuple(self.pending.items()):
-            if pending.future.done():
-                continue
-            response = JudgedApprovalHandler._deny(pending.case.method)
-            pending.future.set_result(response)
-            self.events.emit(
-                "approval.cancelled", approvalId=approval_id,
-                sessionId=pending.registration.session_id,
-                threadId=pending.registration.thread_id,
-                reason=reason, response=response,
-            )
-
-    def cancel_session(self, session_id: str, reason: str = "session cancelled") -> None:
-        for approval_id, pending in tuple(self.pending.items()):
-            if pending.registration.session_id != session_id or pending.future.done():
-                continue
-            response = JudgedApprovalHandler._deny(pending.case.method)
-            pending.future.set_result(response)
-            self.events.emit(
-                "approval.cancelled", approvalId=approval_id,
-                sessionId=session_id, threadId=pending.registration.thread_id,
-                reason=reason, response=response,
-            )
-
-    def resolve(
-        self,
-        approval_id: str,
-        session_id: str,
-        verdict: str,
-        reason: str = "",
-        permissions: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        if verdict not in {"approve_once", "approve_session", "deny"}:
-            raise ValueError(
-                "verdict must be approve_once, approve_session, or deny"
-            )
-        pending = self.pending.get(approval_id)
-        if pending is None or pending.future.done():
-            raise KeyError("unknown or already resolved approval")
-        if not isinstance(session_id, str) or session_id != pending.registration.session_id:
-            raise ValueError("approval does not belong to this session")
-        if not isinstance(reason, str):
-            raise ValueError("reason must be a string")
-        if not reason.strip():
-            raise ValueError("reason must not be empty")
-        decision = pending.registration.policy.constrain(
-            pending.case, JudgeDecision(verdict, reason, permissions)
-        )
-        response = JudgedApprovalHandler._encode(pending.case, decision)
-        pending.future.set_result(response)
+            return self._fail(message, "approval request is not for a managed thread")
+        for field_name in ("turnId", "itemId"):
+            if not isinstance(params.get(field_name), str) or not params[field_name]:
+                return self._fail(message, f"approval request has no valid {field_name}")
+        if isinstance(params.get("startedAtMs"), bool) or not isinstance(params.get("startedAtMs"), (int, float)):
+            return self._fail(message, "approval request has no valid startedAtMs")
+        if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+            offered = params.get("availableDecisions", [])
+            if offered is not None and not isinstance(offered, list):
+                return self._fail(message, "availableDecisions must be a list")
+            decision = "acceptForSession" if "acceptForSession" in (offered or []) else "accept"
+            response = {"decision": decision}
+        elif method == "item/permissions/requestApproval":
+            permissions = params.get("permissions")
+            if not isinstance(permissions, Mapping):
+                return self._fail(message, "permission approval has no permissions payload")
+            response = {"permissions": dict(permissions), "scope": "session", "strictAutoReview": True}
+        else:
+            return self._fail(message, f"unsupported app-server request method: {method}")
+        session_id, project, project_path = registration
         self.events.emit(
-            "approval.resolved",
-            approvalId=approval_id,
-            rpcRequestId=pending.rpc_request_id,
-            sessionId=pending.registration.session_id,
-            threadId=pending.registration.thread_id,
-            verdict=decision.verdict,
-            reason=decision.reason,
-            response=response,
-            declaredIntent=mutable_evidence(pending.case.declared_intent),
-            enforcedCapabilities=mutable_evidence(pending.case.enforced_capabilities),
-            assignment=pending.case.assignment_provenance,
-            policy=self._policy_provenance(pending.registration.project),
+            "approval.auto_approved", rpcRequestId=self._rpc_request_id(message),
+            sessionId=session_id, threadId=thread_id, method=method,
+            project=project, projectPath=project_path, response=response,
         )
         return response
+
+    def _fail(self, message: dict[str, Any], reason: str) -> dict[str, Any]:
+        params = message.get("params")
+        thread_id = params.get("threadId") if isinstance(params, Mapping) else None
+        registration = self.registrations.get(thread_id) if isinstance(thread_id, str) else None
+        self.events.emit(
+            "approval.protocol_error", rpcRequestId=self._rpc_request_id(message),
+            threadId=thread_id, method=message.get("method"), reason=reason,
+            **({"sessionId": registration[0]} if registration else {}),
+        )
+        raise ProtocolError(reason)
+
+    def close(self, reason: str = "service shutdown") -> None:
+        self.closed = True
+
+    def cancel_session(self, session_id: str, reason: str = "session cancelled") -> None:
+        return None
 
     @staticmethod
     def _rpc_request_id(message: dict[str, Any]) -> int | str | None:
@@ -488,10 +280,10 @@ class ApprovalBroker:
         self.events.emit(
             "approval.wire_sent",
             rpcRequestId=rpc_id,
-            sessionId=registration.session_id,
-            threadId=registration.thread_id,
+            sessionId=registration[0],
+            threadId=thread_id,
             method=message.get("method"),
-            response=mutable_evidence(response),
+            response=response,
         )
 
 
@@ -499,18 +291,12 @@ class CoordinatorService:
     def __init__(
         self,
         client: ProtocolClient,
-        approvals: ApprovalBroker,
+        approvals: AutomaticApprovalHandler,
         events: EventLog,
         *,
         worker_model: str | None = None,
-        worker_reasoning_effort: str = "low",
-        worker_allowed_reasoning_efforts: Sequence[str] | None = None,
-        worker_approval_policy: str | None = None,
-        worker_permissions: Mapping[Path, WorkerPermissions] | None = None,
-        allow_session_approval: bool = False,
-        allowed_roots: Sequence[Path] = (),
-        permission_ceilings: Mapping[Path, Mapping[str, Any]] | None = None,
-        constitution: Constitution | None = None,
+        worker_reasoning_effort: str | None = None,
+        projects: Mapping[str, Path] | None = None,
     ) -> None:
         self.client = client
         self.approvals = approvals
@@ -521,97 +307,17 @@ class CoordinatorService:
         self._connection_lost = False
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
-        self.worker_allowed_reasoning_efforts = frozenset(
-            worker_allowed_reasoning_efforts or (worker_reasoning_effort,)
-        )
-        if worker_reasoning_effort not in self.worker_allowed_reasoning_efforts:
-            raise ValueError("default worker reasoning effort must be allowed")
-        if worker_approval_policy is not None and (
-            worker_approval_policy not in WorkerPermissions.WIRE_APPROVAL_POLICIES
-        ):
-            raise ValueError("unsupported worker approval policy")
-        self.worker_approval_policy = worker_approval_policy
-        # The boundary a project runs under is operator-owned: it is declared
-        # outside every worker-writable root and sent explicitly on the wire.
-        # Nothing inside a worker project is consulted.
-        self.default_worker_permissions = WorkerPermissions(
-            approval_policy=worker_approval_policy or WorkerPermissions().approval_policy,
-            source="operator-wide default",
-        )
-        self.allow_session_approval = allow_session_approval
-        self.constitution = constitution
-        roots: list[Path] = []
-        for root in allowed_roots:
-            canonical = Path(root).expanduser().resolve(strict=True)
-            if not canonical.is_dir():
-                raise ValueError(f"allowed root is not a directory: {canonical}")
-            roots.append(canonical)
-        self.allowed_roots = tuple(roots)
-        ceilings: dict[Path, dict[str, Any]] = {}
-        for project, ceiling in (permission_ceilings or {}).items():
-            canonical = Path(project).expanduser().resolve(strict=True)
-            if not self._within_allowed_roots(canonical):
-                raise ValueError(f"permission ceiling project is outside allowed roots: {canonical}")
-            if not isinstance(ceiling, Mapping):
-                raise ValueError("permission ceiling must be a mapping")
-            copied = mutable_evidence(ceiling)
-            ApprovalPolicy(canonical, allowed_permissions=copied)
-            ceilings[canonical] = copied
-        self.permission_ceilings = MappingProxyType(ceilings)
-        declarations: dict[Path, WorkerPermissions] = {}
-        for project, permissions in (worker_permissions or {}).items():
-            canonical = Path(project).expanduser().resolve(strict=True)
-            if not self._within_allowed_roots(canonical):
-                raise ValueError(f"worker permissions project is outside allowed roots: {canonical}")
-            if not isinstance(permissions, WorkerPermissions):
-                raise ValueError("worker permissions must be a WorkerPermissions value")
-            if not permissions.exec_policy_loaded:
-                raise ValueError(
-                    f"{permissions.source}: exec_policy is declared but no rules were loaded"
-                )
-            declarations[canonical] = permissions
-        self.worker_permissions = MappingProxyType(declarations)
+        self.projects = dict(projects or {})
 
-    def permissions_for(self, project: Path) -> WorkerPermissions:
-        return select_worker_permissions(
-            project, self.worker_permissions, self.default_worker_permissions,
-        )
-
-    def _within_allowed_roots(self, project: Path) -> bool:
-        return any(project == root or root in project.parents for root in self.allowed_roots)
-
-    def _refuse_project_rules(self, project: Path, session_id: str | None = None) -> None:
-        """Refuse a worker project that carries Codex rules of its own (#0017).
-
-        The runtime reads ``<cwd>/.codex/rules`` at thread start, and an
-        ``allow`` rule found there suppresses the approval request before
-        anything reaches this service. The check runs before every
-        ``thread/start`` and before every ``turn/start`` on an existing thread,
-        because a project can acquire such a file mid-session.
-        """
-        try:
-            refuse_worker_project_rules(project)
-        except ValueError as exc:
-            self.events.emit(
-                "session.project_rules_refused",
-                **({"sessionId": session_id} if session_id else {}),
-                project=str(project),
-                rulesPath=str(getattr(exc, "path", "")) or None,
-                reason=str(exc),
-            )
-            raise
-
-    def _selected_effort(self, requested: str | None) -> str:
+    def _selected_effort(self, requested: str | None) -> str | None:
         effort = self.worker_reasoning_effort if requested is None else requested
-        if not isinstance(effort, str) or effort not in self.worker_allowed_reasoning_efforts:
-            raise ValueError(
-                "worker reasoning effort is not allowed; choose one of "
-                f"{sorted(self.worker_allowed_reasoning_efforts)}"
-            )
+        if effort is not None and (not isinstance(effort, str) or not effort.strip()):
+            raise ValueError("reasoning effort must be nonempty text when set")
         return effort
 
     async def start_session(
         self, project_value: str, prompt: str, effort: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         if self.stopping.is_set() or self.approvals.closed:
             raise RuntimeError("service is stopping or disconnected")
@@ -620,49 +326,18 @@ class CoordinatorService:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 1024 * 1024:
             raise ValueError("prompt must be nonempty text no larger than 1 MiB")
         if not isinstance(project_value, str) or not project_value.strip():
-            raise ValueError("project must be a nonempty path")
+            raise ValueError("project must be a configured project name")
         selected_effort = self._selected_effort(effort)
-        try:
-            project = Path(project_value).expanduser().resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise ValueError(f"project path is unavailable: {project_value}") from exc
-        if not project.is_dir() or not self._within_allowed_roots(project):
-            raise ValueError("project is outside the configured allowed roots")
-        if self.constitution is not None and not self.constitution.covers(project):
-            raise ValueError(
-                "no project constitution governs this project; add one under "
-                "[project_constitutions] in the operator configuration"
-            )
-        # Refused before the thread exists: the runtime would load the
-        # project's own rules at thread start and decide approvals itself.
-        self._refuse_project_rules(project)
-        permissions = self.permissions_for(project)
-        policy = ApprovalPolicy(
-            project,
-            profile=permissions.profile,
-            allow_session_approval=self.allow_session_approval,
-            allowed_permissions=self.permission_ceilings.get(project),
-            exec_policy=permissions.exec_policy,
-        )
-        start_params = {
-            "cwd": str(project),
-            "runtimeWorkspaceRoots": [str(project)],
-            # Operator configuration decides how much reaches a judge. It is
-            # sent on the wire rather than left in the project, both because
-            # anything inside the project is writable by the worker it governs
-            # and because the pinned CLI rejects "untrusted" as a config value.
-            "approvalPolicy": permissions.approval_policy,
-            "approvalsReviewer": permissions.approvals_reviewer,
-            # A profile id, never the legacy `sandbox` literal. The two are
-            # mutually exclusive on the wire, and the literal detaches the
-            # thread from the profile system so nothing reports what boundary
-            # it actually got.
-            "permissions": permissions.permission_profile,
-        }
-        if self.worker_model:
-            start_params["model"] = self.worker_model
+        if project_value not in self.projects:
+            raise ValueError(f"unknown project: {project_value}")
+        project = self.projects[project_value]
+        selected_model = self.worker_model if model is None else model
+        if selected_model is not None and (not isinstance(selected_model, str) or not selected_model.strip()):
+            raise ValueError("model must be nonempty text when set")
+        start_params = {"cwd": str(project)}
+        if selected_model is not None:
+            start_params["model"] = selected_model
         result = await self.client.call("thread/start", start_params)
-        active = verify_active_profile(result or {}, permissions.permission_profile)
         thread = (result or {}).get("thread", result or {})
         thread_id = thread.get("id") or thread.get("threadId")
         if not isinstance(thread_id, str) or not thread_id.strip():
@@ -671,29 +346,25 @@ class CoordinatorService:
             raise RuntimeError(f"thread/start returned an already registered thread ID: {thread_id}")
         session_id = uuid.uuid4().hex
         session = Session(
-            session_id, thread_id, str(project),
-            permission_profile=permissions.permission_profile,
-            active_permission_profile=MappingProxyType(dict(active)),
-            reasoning_effort=selected_effort,
+            session_id, thread_id, project_value, str(project),
+            model=selected_model, reasoning_effort=selected_effort,
+            effective_model=thread.get("model") if isinstance(thread.get("model"), str) else None,
+            effective_reasoning_effort=(
+                thread.get("reasoningEffort")
+                if isinstance(thread.get("reasoningEffort"), str) else None
+            ),
         )
-        self.approvals.register(SessionRegistration(session_id, thread_id, str(project), policy))
+        self.approvals.register(thread_id, session_id, project_value, str(project))
         self.sessions[session_id] = session
         self.thread_sessions[thread_id] = session_id
-        # Before turn/start: an approval request from this turn must never
-        # reach a judge without the task it is meant to serve.
-        assignment = self.approvals.assignments.record(
-            thread_id, prompt, source="coordinator-api"
-        )
+        turn_params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt}],
+        }
+        if selected_effort is not None:
+            turn_params["effort"] = selected_effort
         try:
-            turn_result = await self.client.call("turn/start", {
-                "threadId": thread_id,
-                "cwd": str(project),
-                "input": [{"type": "text", "text": prompt}],
-                "turnTrigger": "coordinator-api",
-                "effort": selected_effort,
-                # No boundary field: the thread's profile is sticky, and
-                # re-sending one would only reassert state that never lapsed.
-            })
+            turn_result = await self.client.call("turn/start", turn_params)
         except Exception:
             session.state = "failed"
             self.events.emit("session.start_failed", session=session.json())
@@ -703,8 +374,6 @@ class CoordinatorService:
             session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
         self.events.emit(
             "session.started", session=session.json(), prompt=prompt,
-            assignment=assignment.provenance(),
-            workerPermissions=permissions.provenance(),
         )
         return session.json()
 
@@ -721,23 +390,17 @@ class CoordinatorService:
         if session.state != "completed":
             raise ValueError("follow-up requires a completed turn")
         selected_effort = self._selected_effort(effort)
-        # Defense in depth: rules were observed to load only at thread start,
-        # but a project that acquires one mid-session gets no further turn.
-        self._refuse_project_rules(Path(session.project), session_id)
         session.state = "active"
         session.turn_id = None
         session.reasoning_effort = selected_effort
-        assignment = self.approvals.assignments.record(
-            session.thread_id, prompt, source="coordinator-api"
-        )
+        turn_params: dict[str, Any] = {
+            "threadId": session.thread_id,
+            "input": [{"type": "text", "text": prompt}],
+        }
+        if selected_effort is not None:
+            turn_params["effort"] = selected_effort
         try:
-            result = await self.client.call("turn/start", {
-                "threadId": session.thread_id,
-                "cwd": session.project,
-                "input": [{"type": "text", "text": prompt}],
-                "turnTrigger": "coordinator-api",
-                "effort": selected_effort,
-            })
+            result = await self.client.call("turn/start", turn_params)
         except Exception:
             session.state = "failed"
             self.events.emit("session.turn_start_failed", session=session.json())
@@ -747,7 +410,6 @@ class CoordinatorService:
             session.turn_id = str(turn.get("id") or turn.get("turnId") or "") or None
         self.events.emit(
             "session.turn_started", session=session.json(), prompt=prompt,
-            assignment=assignment.provenance(),
         )
         return session.json()
 
@@ -834,15 +496,7 @@ class CoordinatorService:
         if session_id is None:
             return
         if method == "item/started":
-            item = params.get("item")
-            if not isinstance(item, Mapping):
-                item = {}
-            item_id = item.get("id")
-            turn_id = params.get("turnId")
-            if thread_id and isinstance(turn_id, str) and turn_id and isinstance(item_id, str) and item_id and len(json.dumps(item).encode()) <= self.approvals.item_max_bytes:
-                self.approvals.items[(thread_id, turn_id, item_id)] = dict(item)
-                if len(self.approvals.items) > self.approvals.item_capacity:
-                    self.approvals.items.popitem(last=False)
+            pass
         if method == "serverRequest/resolved":
             request_id = params.get("requestId")
             if isinstance(request_id, (int, str)) and not isinstance(request_id, bool):
@@ -852,10 +506,7 @@ class CoordinatorService:
                 )
         if method == "item/completed":
             item = params.get("item")
-            completed_item_id = item.get("id") if isinstance(item, Mapping) else None
             completed_turn_id = params.get("turnId")
-            if isinstance(completed_item_id, str) and isinstance(completed_turn_id, str):
-                self.approvals.items.pop((thread_id, completed_turn_id, completed_item_id), None)
             if isinstance(item, Mapping) and item.get("type") == "commandExecution":
                 item_id = item.get("id")
                 status = item.get("status")
@@ -882,11 +533,6 @@ class CoordinatorService:
                 )
             elif session.state in {"active", "cancelling", "cancel_unknown"}:
                 self.approvals.cancel_session(session_id, "turn completed")
-                for key in tuple(self.approvals.items):
-                    if key[0] == thread_id and (
-                        not isinstance(completed_turn_id, str) or key[1] == completed_turn_id
-                    ):
-                        self.approvals.items.pop(key, None)
                 session.state = (
                     status if isinstance(completed_turn_id, str) and completed_turn_id
                     and isinstance(status, str) and status in {"completed", "failed", "interrupted"}
@@ -1046,10 +692,10 @@ class HttpControlServer:
                 "sessions": [item.json() for item in self.service.sessions.values()],
             }
         if method == "POST" and parts == ["sessions"]:
-            if set(body) - {"project", "prompt", "effort"}:
+            if set(body) - {"project", "prompt", "effort", "model"}:
                 raise ValueError("unsupported session fields")
             return 201, await self.service.start_session(
-                body["project"], body["prompt"], body.get("effort"),
+                body["project"], body["prompt"], body.get("effort"), body.get("model"),
             )
         if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "messages":
             if set(body) - {"prompt", "effort"}:
@@ -1059,16 +705,6 @@ class HttpControlServer:
             )
         if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "cancel":
             return 202, await self.service.cancel_session(parts[1])
-        if method == "POST" and len(parts) == 2 and parts[0] == "approvals":
-            if self.service.approvals.judge is not None:
-                return 403, {"error": "service-owned judging does not accept HTTP verdicts"}
-            if set(body) - {"sessionId", "verdict", "reason", "permissions"}:
-                raise ValueError("unsupported approval resolution fields")
-            response = self.service.approvals.resolve(
-                parts[1], body["sessionId"], body["verdict"], body.get("reason", ""),
-                body.get("permissions"),
-            )
-            return 200, response
         if method == "POST" and parts == ["shutdown"]:
             await self.service.shutdown()
             return 202, {"stopping": True}
@@ -1160,23 +796,13 @@ def arguments() -> argparse.Namespace:
         help="serve the HTTP control plane on an owner-controlled Unix socket instead of TCP",
     )
     parser.add_argument("--config", type=Path, help="trusted operator TOML configuration")
-    parser.add_argument(
-        "--allowed-root", type=Path, action="append",
-        help="canonical parent directory for worker projects; repeat for multiple roots",
-    )
     parser.add_argument("--codex-command")
     parser.add_argument("--worker-model")
     parser.add_argument("--worker-reasoning-effort")
-    parser.add_argument("--approval-timeout-seconds", type=float)
     parser.add_argument("--event-capacity", type=int)
     parser.add_argument("--event-max-bytes", type=int)
     parser.add_argument("--item-capacity", type=int)
     parser.add_argument("--item-max-bytes", type=int)
-    parser.add_argument(
-        "--allow-session-approval",
-        action="store_true", default=None,
-        help="allow session-scoped decisions when a request explicitly offers them",
-    )
     parser.add_argument("--socket", type=Path)
     parser.add_argument(
         "--verbose-events", action="store_true",
@@ -1187,46 +813,31 @@ def arguments() -> argparse.Namespace:
 
 async def run(args: argparse.Namespace) -> None:
     config = OperatorConfig.load(path=args.config, overrides={
-        "allowed_roots": args.allowed_root,
         "codex_command": args.codex_command,
         "socket_path": args.socket,
         "worker_model": args.worker_model,
         "worker_reasoning_effort": args.worker_reasoning_effort,
-        "allow_session_approval": args.allow_session_approval,
-        "approval_timeout_seconds": args.approval_timeout_seconds,
         "event_capacity": args.event_capacity,
         "event_max_bytes": args.event_max_bytes,
         "item_capacity": args.item_capacity,
         "item_max_bytes": args.item_max_bytes,
     })
-    if not config.allowed_roots:
-        raise ValueError("configure at least one allowed root before starting the service")
-    if config.approval_mode is None:
-        raise ValueError("configure approval_mode = 'service' or 'external' before starting the service")
+    if not config.projects:
+        raise ValueError("configure at least one named project before starting the service")
     await asyncio.to_thread(check_codex_compatibility, config.codex_command)
-    await ensure_daemon(
-        socket_path=config.socket_path, codex_command=config.codex_command,
-        codex_home=None if config.codex_home is None else config.codex_home.path,
-    )
+    try:
+        validate_local_socket(config.socket_path)
+    except (OSError, ValueError) as exc:
+        raise ConnectionError(
+            f"host Codex app-server socket is unavailable or invalid: {config.socket_path}; "
+            "start the host app-server before starting codex-coordinator"
+        ) from exc
     events = EventLog(
         capacity=config.event_capacity, max_bytes=config.event_max_bytes,
         verbose_output=args.verbose_events,
     )
-    judge = None
-    if config.approval_mode == "service":
-        assert config.constitution is not None
-        judge = OneShotCodexJudge(
-            partial(
-                codex_exec_json_runner,
-                codex_command=config.codex_command,
-                timeout_seconds=config.judge_timeout_seconds,
-                codex_home=None if config.codex_home is None else config.codex_home.path,
-            ),
-            constitution=config.constitution,
-        )
-    approvals = ApprovalBroker(
-        events, approval_timeout_seconds=config.approval_timeout_seconds,
-        judge=judge, constitution=config.constitution,
+    approvals = AutomaticApprovalHandler(
+        events,
         item_capacity=config.item_capacity, item_max_bytes=config.item_max_bytes,
     )
     try:
@@ -1254,26 +865,17 @@ async def run(args: argparse.Namespace) -> None:
             events,
             worker_model=config.worker_model,
             worker_reasoning_effort=config.worker_reasoning_effort,
-            worker_allowed_reasoning_efforts=config.worker_allowed_reasoning_efforts,
-            worker_approval_policy=config.worker_approval_policy,
-            worker_permissions=config.worker_permissions,
-            allow_session_approval=config.allow_session_approval,
-            allowed_roots=config.allowed_roots,
-            permission_ceilings=config.permission_ceilings,
-            constitution=config.constitution,
+            projects=config.projects,
         )
         client.disconnect_handler = service_ref.connection_lost
         try:
             await client.initialize()
-            forbidden_roots = (*config.allowed_roots,)
-            if config.coordinator_root is not None:
-                forbidden_roots += (config.coordinator_root,)
             async with control_listener(
                 HttpControlServer(service_ref).handle,
                 host=args.host,
                 port=args.port,
                 unix_socket=getattr(args, "unix_socket", None),
-                forbidden_roots=forbidden_roots,
+                forbidden_roots=(),
             ) as (_server, listener_details):
                 events.emit(
                     "service.started", serviceId=events.service_id,

@@ -1,30 +1,15 @@
-"""Exercise the installed coordinator without test or checkout imports."""
+"""Exercise the installed transparent coordinator without checkout imports."""
 
-import asyncio
 import argparse
+import asyncio
 import tempfile
 from pathlib import Path
 
-from codex_coordinator import ApprovalRequest, CoordinationEvent, Coordinator, JudgeDecision
-from codex_coordinator.coordinator import ApprovalPolicy, WorkerPermissions
-from codex_coordinator.profiles import PermissionProfile
-from codex_coordinator.service import ApprovalBroker, CoordinatorService, EventLog
-
-
-#: The boundary shape an operator writes for a worker: a named profile
-#: extending :workspace that gives back the temporary roots the runtime would
-#: otherwise leave writable. The fixture states it explicitly rather than
-#: loading a Codex home, because nothing here starts a real thread.
-FIXTURE_PROFILE = PermissionProfile(
-    id="installed_worker", extends=":workspace",
-    chain=("installed_worker", ":workspace"), builtin=":workspace", writable=True,
-    filesystem={":tmpdir": "read", ":slash_tmp": "read"}, network={},
-    source="installed fixture",
-)
+from codex_coordinator import Coordinator
+from codex_coordinator.service import AutomaticApprovalHandler, CoordinatorService, EventLog
 
 
 def require(condition: bool, message: str) -> None:
-    """Keep release-gate checks active even under ``python -O``."""
     if not condition:
         raise RuntimeError(f"installed fixture: {message}")
 
@@ -38,15 +23,7 @@ class FixtureClient:
     async def call(self, method, params):
         self.calls.append((method, params))
         if method == "thread/start":
-            require("historyMode" not in params, "paginated thread creation is unsupported")
-            return {
-                "thread": {"id": f"thread-{len(self.calls)}"},
-                # The runtime reports the profile it selected, and the
-                # coordinator refuses a session that gets any other one.
-                "activePermissionProfile": {
-                    "id": params["permissions"], "extends": FIXTURE_PROFILE.extends,
-                },
-            }
+            return {"thread": {"id": f"thread-{len(self.calls)}"}}
         if method == "turn/start":
             return {"turn": {"id": f"turn-{len(self.calls)}"}}
         return {}
@@ -55,99 +32,35 @@ class FixtureClient:
         self.disconnected.set()
 
 
-class FixtureJudge:
-    async def decide(self, case):
-        if case.request.get("command") == "git status --short":
-            return JudgeDecision("approve_once", "fixture permits exact status command")
-        return JudgeDecision("deny", "fixture denies other commands")
-
-
-def project(root: Path, name: str) -> Path:
-    """A worker project holds no Codex configuration; the operator owns it."""
-    path = root / name
-    path.mkdir(parents=True)
-    return path
-
-
-def approval(thread_id: str, command: str) -> dict:
-    return {
-        "method": ApprovalPolicy.COMMAND,
-        "params": {
-            "threadId": thread_id, "turnId": "turn-1", "itemId": "item-1",
-            "startedAtMs": 1, "command": command, "cwd": ".",
-            "availableDecisions": ["accept", "decline"],
-        },
-    }
+def approval(thread_id: str) -> dict:
+    return {"id": 1, "method": "item/commandExecution/requestApproval", "params": {
+        "threadId": thread_id, "turnId": "turn-1", "itemId": "item-1",
+        "startedAtMs": 1, "availableDecisions": ["accept", "acceptForSession", "decline"],
+    }}
 
 
 async def run(first: Path, second: Path) -> None:
-    first = first.expanduser().resolve(strict=True)
-    second = second.expanduser().resolve(strict=True)
-    if not first.is_dir() or not second.is_dir() or first == second or first in second.parents or second in first.parents:
-        raise ValueError("installed fixture needs two unrelated project directories")
-    events = EventLog()
-    broker = ApprovalBroker(events, judge=FixtureJudge())
-    client = FixtureClient()
-    service = CoordinatorService(
-        client, broker, events, allowed_roots=(first, second),
-        worker_permissions={
-            first: WorkerPermissions(
-                permission_profile=FIXTURE_PROFILE.id, source="installed fixture",
-                profile=FIXTURE_PROFILE,
-            ),
-            second: WorkerPermissions(
-                permission_profile=FIXTURE_PROFILE.id, source="installed fixture",
-                profile=FIXTURE_PROFILE,
-            ),
-        },
-    )
-    coordinator = Coordinator(service, broker, events, client)
+    projects = {"alpha": first.resolve(strict=True), "beta": second.resolve(strict=True)}
+    events, client = EventLog(), FixtureClient()
+    approvals = AutomaticApprovalHandler(events)
+    service = CoordinatorService(client, approvals, events, projects=projects)
+    coordinator = Coordinator(service, approvals, events, client)
     try:
         alpha, beta = await asyncio.gather(
-            coordinator.start(str(first), "generic alpha task"),
-            coordinator.start(str(second), "generic beta task"),
+            coordinator.start("alpha", "alpha task"), coordinator.start("beta", "beta task")
         )
-        require(alpha.id != beta.id, "worker session IDs are not distinct")
-        responses = await asyncio.gather(
-            broker(approval(alpha.thread_id, "git status --short")),
-            broker(approval(beta.thread_id, "risky command")),
-        )
-        require(
-            responses == [{"decision": "accept"}, {"decision": "decline"}],
-            "approval and denial were not both enforced",
-        )
-        typed_approvals = [
-            CoordinationEvent.from_record(event).approval
-            for event in events.events if event["type"] == "approval.requested"
-        ]
-        require(len(typed_approvals) == 2, "two approval events were not recorded")
-        require(
-            all(isinstance(item, ApprovalRequest) for item in typed_approvals),
-            "approval events are not typed",
-        )
-        require(
-            {item.session_id for item in typed_approvals} == {alpha.id, beta.id},
-            "approval events are not correlated to both sessions",
-        )
+        require(alpha.project_path == str(projects["alpha"]), "project path was not exposed")
+        response = await approvals(approval(alpha.thread_id))
+        require(response == {"decision": "acceptForSession"}, "request was not auto-approved")
+        thread_params = [params for method, params in client.calls if method == "thread/start"]
+        require(all(set(params) == {"cwd"} for params in thread_params), "thread/start leaked security settings")
         for handle in (alpha, beta):
-            await service.notification({
-                "method": "turn/completed", "params": {
-                    "threadId": handle.thread_id, "turn": {"id": service.sessions[handle.id].turn_id, "status": "completed"},
-                },
-            })
-        require((await alpha.wait(timeout=1)).state == "completed", "first turn did not complete")
-        require((await beta.wait(timeout=1)).state == "completed", "second turn did not complete")
-        await alpha.follow_up("generic follow-up")
-        require(
-            client.calls[-1][1]["threadId"] == alpha.thread_id,
-            "follow-up targeted the wrong worker",
-        )
-        await service.notification({
-            "method": "turn/completed", "params": {
-                "threadId": alpha.thread_id, "turn": {"id": service.sessions[alpha.id].turn_id, "status": "completed"},
-            },
-        })
-        require((await alpha.wait(timeout=1)).state == "completed", "follow-up did not complete")
+            await service.notification({"method": "turn/completed", "params": {
+                "threadId": handle.thread_id,
+                "turn": {"id": service.sessions[handle.id].turn_id, "status": "completed"},
+            }})
+        await alpha.follow_up("follow-up", effort="high")
+        require(client.calls[-1][1]["threadId"] == alpha.thread_id, "follow-up targeted wrong child")
     finally:
         await coordinator.close()
     print("installed two-project fixture passed")
@@ -165,7 +78,9 @@ def main() -> None:
     else:
         with tempfile.TemporaryDirectory(prefix="coordinator-installed-") as directory:
             root = Path(directory)
-            asyncio.run(run(project(root, "alpha"), project(root, "beta")))
+            first, second = root / "alpha", root / "beta"
+            first.mkdir(); second.mkdir()
+            asyncio.run(run(first, second))
 
 
 if __name__ == "__main__":

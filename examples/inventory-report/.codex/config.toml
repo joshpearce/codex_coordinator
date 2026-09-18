@@ -1,0 +1,5 @@
+# Live-compatibility fixture: intentionally unrestricted. The coordinator must
+# inherit this project choice without narrowing it.
+model_reasoning_effort = "high"
+sandbox_mode = "danger-full-access"
+approval_policy = "never"

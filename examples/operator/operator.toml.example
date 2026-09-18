@@ -1,0 +1,8 @@
+# Copy this file and replace the paths with absolute paths on this host.
+codex_command = "codex"
+# socket_path is optional; the host user's standard Codex socket is the default.
+# worker_model and worker_reasoning_effort are optional overrides.
+
+[projects]
+inventory-app = "/absolute/path/to/inventory-app"
+inventory-report = "/absolute/path/to/inventory-report"

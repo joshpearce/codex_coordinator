@@ -8,7 +8,7 @@
 ## What happens
 
 Any client that can reach the listener can create sessions, send prompts, read
-events, resolve approvals, and stop the service. Loopback limits remote
+events, and stop the service. Loopback limits remote
 reachability but does not protect against other local processes,
 browser-to-localhost attacks, or accidental non-loopback binding.
 
@@ -20,7 +20,7 @@ are the loopback binding and browser-origin/Host rejection described in #0008.
 ## Why it matters
 
 Scope and isolation, and the gating control for the whole deployment model. An
-unauthenticated approval-resolution route is a governance bypass the moment the
+an unauthenticated local client can fully control orchestration the moment the
 listener is reachable by anything other than the operator.
 
 ## What would close this

@@ -1,7 +1,7 @@
 UV ?= uv
 LIVE_E2E_ARGS ?=
 
-.PHONY: help sync test check build install live-e2e judge-gate installed-gate release-gate clean
+.PHONY: help sync test check build install live-e2e installed-gate release-gate clean
 
 help:
 	@echo "make sync     Install locked development dependencies"
@@ -9,8 +9,7 @@ help:
 	@echo "make check    Check syntax and packaging metadata"
 	@echo "make build    Build wheel and source distribution"
 	@echo "make install  Install the codex-coordinator command"
-	@echo "make live-e2e Run the real recursive Codex orchestration experiment"
-	@echo "make judge-gate Judge the example scenario catalogue with real Codex calls"
+	@echo "make live-e2e Run the live host app-server compatibility exercise"
 	@echo "make installed-gate Build and smoke-test the wheel outside the checkout"
 	@echo "make release-gate Run installed checks and the required live generic workflow"
 	@echo "make clean    Remove generated build and test artifacts"
@@ -33,9 +32,6 @@ install:
 
 live-e2e:
 	$(UV) run python -m codex_coordinator.live_e2e $(LIVE_E2E_ARGS)
-
-judge-gate:
-	$(UV) run python scripts/judge_live_gate.py
 
 installed-gate:
 	sh scripts/release_gate.sh --installed-only

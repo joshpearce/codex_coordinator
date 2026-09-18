@@ -38,13 +38,6 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --no-cache-dir -r requirements-dev.txt
 ```
 
-`requirements.txt` names only PyPI packages, which this project's
-operator-declared network ceiling allows, so it restores. `requirements-dev.txt`
-names a tarball on a host that ceiling does not allow, so it is refused at the
-proxy. That is survivable: the supplied test suite needs nothing from either
-manifest.
-
-The manifests are not what grants the access. The operator records that in a
-permission profile outside every directory this project can write, and the
-sandbox enforces it; a change to either manifest is reviewed before it takes
-effect.
+The dependency manifests are ordinary project inputs. Any access they require is
+determined by the Codex configuration that naturally applies to this project;
+the coordinator does not replace or narrow it.

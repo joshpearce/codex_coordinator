@@ -13,7 +13,7 @@ fi
 gate_dir=$(mktemp -d)
 trap 'rm -rf "$gate_dir"' EXIT HUP INT TERM
 
-python3 -m build "$repo_root" --outdir "$gate_dir/dist"
+uv build "$repo_root" --out-dir "$gate_dir/dist"
 python3 -m venv "$gate_dir/venv"
 gate_python="$gate_dir/venv/bin/python"
 
@@ -44,20 +44,15 @@ if [ "$installed_only" -eq 1 ]; then
 fi
 
 : "${GENERIC_CONFIG:?set GENERIC_CONFIG to the absolute operator TOML path}"
-: "${GENERIC_FIRST:?set GENERIC_FIRST to the first approved project path}"
-: "${GENERIC_SECOND:?set GENERIC_SECOND to the second approved project path}"
+: "${GENERIC_FIRST:?set GENERIC_FIRST to the first configured project name}"
+: "${GENERIC_SECOND:?set GENERIC_SECOND to the second configured project name}"
 : "${GENERIC_FIRST_GOAL:?set GENERIC_FIRST_GOAL to the first worker task}"
 : "${GENERIC_SECOND_GOAL:?set GENERIC_SECOND_GOAL to the second worker task}"
 : "${GENERIC_FOLLOW_UP:?set GENERIC_FOLLOW_UP to the first worker follow-up}"
-: "${GENERIC_ALLOW_COMMAND:?set GENERIC_ALLOW_COMMAND to the exact approvable command}"
-: "${GENERIC_DENY_COMMAND:?set GENERIC_DENY_COMMAND to the exact denied command}"
 
 "$gate_python" "$repo_root/examples/generic_coordinator.py" \
     --config "$GENERIC_CONFIG" \
     --first "$GENERIC_FIRST" --second "$GENERIC_SECOND" \
     --first-goal "$GENERIC_FIRST_GOAL" \
     --second-goal "$GENERIC_SECOND_GOAL" \
-    --follow-up "$GENERIC_FOLLOW_UP" \
-    --allow-command "$GENERIC_ALLOW_COMMAND" \
-    --deny-command "$GENERIC_DENY_COMMAND" \
-    --require-outcomes
+    --follow-up "$GENERIC_FOLLOW_UP"

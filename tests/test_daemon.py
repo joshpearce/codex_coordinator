@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_coordinator.daemon import ensure_daemon, probe_local_socket, validate_local_socket
+from codex_coordinator.daemon import probe_local_socket, validate_local_socket
 
 
 def test_socket_target_must_be_private_unix_socket(tmp_path: Path):
@@ -25,12 +25,6 @@ def test_socket_parent_must_be_owner_controlled(tmp_path: Path):
             validate_local_socket(parent / "control.sock")
     finally:
         parent.chmod(0o700)
-
-
-@pytest.mark.asyncio
-async def test_custom_socket_does_not_start_unrelated_default_daemon(tmp_path: Path):
-    with pytest.raises(RuntimeError, match="start an app-server listener"):
-        await ensure_daemon(socket_path=tmp_path / "custom.sock")
 
 
 def test_probe_reports_stale_or_unreachable_socket(monkeypatch, tmp_path: Path):

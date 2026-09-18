@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-coordinator"
 version = "0.1.0"
-description = "Coordinate Codex worker sessions with independently judged approvals"
+description = "Coordinate transparent Codex child sessions across local projects"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["websockets>=15,<16"]
