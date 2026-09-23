@@ -13,7 +13,7 @@ fi
 gate_dir=$(mktemp -d)
 trap 'rm -rf "$gate_dir"' EXIT HUP INT TERM
 
-uv build "$repo_root" --out-dir "$gate_dir/dist"
+python3 -m build "$repo_root" --outdir "$gate_dir/dist"
 python3 -m venv "$gate_dir/venv"
 gate_python="$gate_dir/venv/bin/python"
 
