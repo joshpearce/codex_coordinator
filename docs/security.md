@@ -4,6 +4,13 @@ Codex Coordinator is a trusted, single-user, loopback-only prototype. It is not 
 
 The operator trusts the host/user Codex configuration and every configured project's local Codex configuration as-is. Either may grant unrestricted filesystem, process, or network access. The coordinator neither validates nor narrows those capabilities. A valid approval request from a managed child is accepted automatically, using `acceptForSession` when offered and `accept` otherwise; permission requests receive the requested permission payload.
 
+For example, registering a project whose effective configuration contains
+`approval_policy = "never"` and `sandbox_mode = "danger-full-access"` authorizes
+the service to start an unrestricted child there. This is often called YOLO
+mode. The coordinator does not warn, downgrade, or replace it. Inspect the
+effective host and project-local `.codex/config.toml` files before adding a
+project, and register only projects and instructions you trust.
+
 Configuration prevents request-time arbitrary paths by exposing stable project names, but this is operability and input validation, not sandboxing. Paths may overlap or contain the coordinator itself.
 
 The control plane remains loopback-only with browser Origin/Host rejection and bounded HTTP parsing. It has no authentication; any local process able to reach it may control sessions and read events. Do not publish it through a reverse proxy. Issues #0008 and #0009 track hardening required before broader deployment.

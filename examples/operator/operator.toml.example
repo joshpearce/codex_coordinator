@@ -4,5 +4,7 @@ codex_command = "codex"
 # worker_model and worker_reasoning_effort are optional overrides.
 
 [projects]
+# Existing child directories. Each child inherits the Codex configuration that
+# naturally applies at its path, including danger-full-access/never-approve.
 inventory-app = "/absolute/path/to/inventory-app"
 inventory-report = "/absolute/path/to/inventory-report"

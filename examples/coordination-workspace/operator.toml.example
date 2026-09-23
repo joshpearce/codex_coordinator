@@ -1,0 +1,5 @@
+codex_command = "codex"
+
+[projects]
+first = "/absolute/path/to/first-existing-project"
+second = "/absolute/path/to/second-existing-project"

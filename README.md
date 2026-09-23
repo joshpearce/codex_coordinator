@@ -6,6 +6,53 @@ This is transparent orchestration, not an authorization boundary. Each child inh
 
 Use this only as a trusted, single-user, loopback-only prototype. It is not safe for remote, multi-user, untrusted-client, or production authorization use.
 
+## Quickstart: coordinate existing projects from Codex
+
+The primary workflow is a normal parent Codex session in a small coordination
+workspace delegating to child Codex sessions in existing projects:
+
+```text
+parent Codex session -> loopback coordinator service -> child project sessions
+```
+
+Install the two commands from this checkout:
+
+```console
+make install
+command -v codex-coordinator-preflight codex-coordinator-service
+```
+
+Create a coordination workspace from the supplied template:
+
+```console
+mkdir -p ~/code/my_coordination
+cp examples/coordination-workspace/Makefile ~/code/my_coordination/
+cp examples/coordination-workspace/AGENTS.md ~/code/my_coordination/
+cp examples/coordination-workspace/gitignore ~/code/my_coordination/.gitignore
+cp examples/coordination-workspace/operator.toml.example ~/code/my_coordination/operator.toml
+cd ~/code/my_coordination
+```
+
+Edit `operator.toml` so each stable name points to an absolute existing project
+directory. Make sure the host app-server is running, then start the coordinator:
+
+```console
+make start
+# Or choose another loopback port:
+make start PORT=9876
+```
+
+Open a normal Codex session in the coordination workspace and ask it to delegate
+through the HTTP service described in `AGENTS.md`. The coordination workspace
+does not need to be registered as a child project.
+
+Each child inherits the host/user and project-local Codex configuration that
+already applies in its directory. In particular, a child project configured
+with `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` runs
+in that unrestricted mode; the coordinator does not add a sandbox or narrow it.
+See [Bootstrapping a Codex coordination workspace](docs/coordination-workspace.md)
+before registering projects.
+
 ## Configuration
 
 Create an operator TOML file with stable names mapped to absolute existing directories:

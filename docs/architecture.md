@@ -9,3 +9,11 @@ Thread startup sends only `cwd` and an optional model override. Turn startup sen
 The service does not start or manage the app-server and does not set `CODEX_HOME`. Codex therefore resolves host and project configuration as it would for a session started naturally at the configured path.
 
 This design deliberately has no coordinator-owned governance layer. Project registration is authority to start there; effective child capabilities come from Codex configuration outside this package.
+
+A coordinating Codex session is an ordinary client of the loopback HTTP
+service. It normally runs in a separate coordination workspace containing the
+operator mapping and instructions for issuing HTTP requests. It is not a
+privileged coordinator thread, and its directory need not be registered as a
+child project. The service cannot push an unsolicited turn into that parent
+session; today the parent polls events and session state while its turn remains
+active, optionally under a Codex Goal.
