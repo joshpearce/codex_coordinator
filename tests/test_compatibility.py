@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from codex_coordinator.compatibility import (
-    CodexCompatibilityError, check_codex_compatibility, check_protocol_schema,
+    SUPPORTED_CODEX_VERSIONS, CodexCompatibilityError,
+    check_codex_compatibility, check_protocol_schema,
 )
 
 
@@ -228,3 +229,7 @@ def test_missing_and_unsupported_codex_are_actionable(monkeypatch):
     )
     with pytest.raises(CodexCompatibilityError, match="not verified"):
         check_codex_compatibility()
+
+
+def test_supported_codex_versions_are_an_explicit_verified_allowlist():
+    assert SUPPORTED_CODEX_VERSIONS == frozenset({"0.154.0", "0.156.1"})

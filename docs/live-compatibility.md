@@ -1,5 +1,33 @@
 # Live compatibility evidence
 
+On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
+`0.156.1`. This version exposes the standard control socket through an
+owner-controlled symlink; the coordinator validated both the link and its
+private, user-owned Unix socket target before connecting.
+
+The run started `inventory-app` and `inventory-report` concurrently. Both
+inherited the host model `gpt-5.6-sol` and their distinct project-local
+reasoning efforts, `medium` and `high`, and both turns completed.
+
+The workspace-write `inventory-app` child requested approval before writing a
+marker outside its project. The coordinator emitted `approval.auto_approved`,
+sent the response, observed `serverRequest/resolved`, and then observed the
+command complete. The intentionally unrestricted `inventory-report` child
+created and verified a fresh marker at
+`/tmp/codex-coordinator-live-unrestricted-0.156.1-20260923-run3.txt`, showing
+that the coordinator did not narrow its inherited project configuration.
+
+The final summary was:
+
+```json
+{
+  "autoApprovals": 1,
+  "effectiveModels": ["gpt-5.6-sol", "gpt-5.6-sol"],
+  "effectiveReasoningEfforts": ["medium", "high"],
+  "states": ["completed", "completed"]
+}
+```
+
 On 2026-09-18, the opt-in harness ran against Codex CLI 0.154.0 and the host user's already-running app-server.
 
 The run started `inventory-app` and `inventory-report` concurrently without a model or reasoning override. The app-server reported the host model `gpt-5.6-sol` for both threads and the distinct project-local reasoning efforts `medium` and `high`. Both turns completed.

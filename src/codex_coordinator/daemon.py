@@ -31,7 +31,23 @@ def validate_local_socket(socket_path: Path) -> None:
         raise ValueError(f"Codex socket parent is not a directory: {parent}")
     if parent_info.st_uid != os.getuid() or parent_info.st_mode & 0o022:
         raise ValueError(f"Codex socket parent must be owner-controlled: {parent}")
-    info = path.lstat()
+    link_info = path.lstat()
+    if stat.S_ISLNK(link_info.st_mode):
+        if link_info.st_uid != os.getuid():
+            raise ValueError(f"Codex socket symlink must be owned by this user: {path}")
+        target = path.resolve(strict=True)
+        target_parent_info = target.parent.stat()
+        if (
+            not stat.S_ISDIR(target_parent_info.st_mode)
+            or target_parent_info.st_uid != os.getuid()
+            or target_parent_info.st_mode & 0o022
+        ):
+            raise ValueError(
+                f"Codex socket target parent must be owner-controlled: {target.parent}"
+            )
+        info = target.lstat()
+    else:
+        info = link_info
     if not stat.S_ISSOCK(info.st_mode):
         raise ValueError(f"Codex connection path is not a Unix socket: {path}")
     if info.st_uid != os.getuid() or info.st_mode & 0o077:

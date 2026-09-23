@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-SUPPORTED_CODEX_VERSIONS = frozenset({"0.154.0"})
+SUPPORTED_CODEX_VERSIONS = frozenset({"0.154.0", "0.156.1"})
 
 
 class CodexCompatibilityError(RuntimeError):
