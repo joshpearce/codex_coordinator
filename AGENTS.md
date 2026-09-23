@@ -12,6 +12,12 @@ Valid supported approval requests are automatically accepted. Prefer `acceptForS
 
 Retain concurrent sessions, follow-ups, cancellation, terminal waits, event streaming, connection-loss behavior, resource limits, and orderly shutdown through both the service and reusable Python API.
 
+## Working with configured projects
+
+Route all high-level requests about a configured project through the coordinator service and its child sessions. This includes requests to inspect, explain, search, diagnose, modify, test, or report on a project's code, files, configuration, or repository state. Do not satisfy such requests by reading or changing the configured project's files directly from the coordinator process, shell, or filesystem tools, even when its mapped path is locally accessible. Follow-ups and related work must remain in the same service-managed session when continuity matters.
+
+Direct filesystem access is reserved for developing and maintaining this coordinator repository and its own test fixtures, or when a user explicitly asks for a low-level investigation of the coordinator itself. Treat a configured project's name-to-path mapping as routing information for the child session, not as permission for the coordinator to operate on that path.
+
 ## Issue tracking
 
 Read `docs/issue-tracking.md` before changing issues. One Markdown file per issue lives in `issues/` and is named `NNNN-<severity>-<state>-<slug>.md`; filename severity/state are authoritative and numbers are never reused. Search by number when resolving references. Use `docs/ROADMAP.md` for sequencing. Delete a closed issue only with durable evidence under the documented convention.
