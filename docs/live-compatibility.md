@@ -16,6 +16,17 @@ CODEX_COORDINATOR_PROJECTS='{"coordinator":"/Users/josh/code/codex_coordinator"}
 This denial is expected evidence for the managed parent boundary, not a claim
 that the app-server was unavailable.
 
+Also on 2026-09-24, the installed `0.1.0` service was launched from the
+coordination-workspace template on port 8876 under the per-user launchd label
+`com.openai.codex-coordinator.501.8876`. The initiating `make start` tool call
+returned only after `/health` succeeded. A later, separate tool call received
+the same service ID from `/health`, listed sessions, and reported healthy
+status. A final `make stop` unloaded the supervisor and completed through the
+service's SIGTERM shutdown path. No foreground tool cell was retained. Two
+diagnostic attempts preceded the passing run: the first exposed launchd's
+inability to resolve the service executable, and the second exposed its minimal
+PATH for resolving `codex`; the launcher now supplies both deterministically.
+
 On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
 `0.156.1`. This version exposes the standard control socket through an
 owner-controlled symlink; the coordinator validated both the link and its

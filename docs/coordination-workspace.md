@@ -112,9 +112,16 @@ Use a custom port when `8765` is occupied:
 make start PORT=9876
 ```
 
-The template records the PID, selected port, and log in ignored local files.
-`make stop` reads the recorded port, requests orderly HTTP shutdown, validates
-the PID before any fallback signal, and removes stale runtime state.
+The supported template is macOS-specific: `make start` submits the service to
+the user's `launchctl` supervisor so it remains alive after the initiating
+Codex tool call returns. Startup succeeds only after `/health` responds. The
+template records the selected port and log in ignored local files; it does not
+treat a short-lived background PID as proof of startup. `make status` checks
+HTTP health and distinguishes a stale supervisor job or legacy PID/port files,
+with `make stop` then `make start` as the supported recovery. `make stop`
+unloads the supervised job; the resulting SIGTERM uses the service's orderly
+shutdown path. If no supervised job remains, it falls back to the HTTP shutdown
+route for recovery from older launch methods.
 
 ## 5. Open the parent Codex session
 
