@@ -104,3 +104,22 @@ asyncio.run(main())
 ```
 
 See `examples/generic_coordinator.py` for a runnable two-project program. Run `.venv/bin/pytest -q` for the offline suite. The opt-in live compatibility exercise is separate because only a real host app-server can prove effective configuration inheritance; the latest recorded run is in [`docs/live-compatibility.md`](docs/live-compatibility.md).
+
+`make live-e2e` uses the bundled coordination workspace as an actual parent and
+the two bundled inventory projects as children. It hosts an ephemeral loopback
+control plane, requires the parent to delegate routine waits to a monitoring
+subagent, and emits a `parentMonitor` evidence object. It consumes Codex usage
+and fails if the parent reports main-context waiting, shell sleep polling, an
+invalid session map, or missing terminal monitor reports. The child prompts are
+read-only inspections.
+
+```console
+make live-e2e
+```
+
+`LIVE_E2E_CONFIG`, `LIVE_E2E_PARENT`, `LIVE_E2E_FIRST`,
+`LIVE_E2E_SECOND`, and the prompt variables remain available for a custom
+three-project exercise.
+
+Use `make live-e2e-compat LIVE_E2E_ARGS='...'` for the older direct two-child
+compatibility mode.

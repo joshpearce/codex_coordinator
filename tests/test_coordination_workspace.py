@@ -4,7 +4,10 @@ import subprocess
 from pathlib import Path
 
 
-TEMPLATE = Path(__file__).parents[1] / "examples" / "coordination-workspace" / "Makefile"
+ROOT = Path(__file__).parents[1]
+TEMPLATE = ROOT / "examples" / "coordination-workspace" / "Makefile"
+GUIDANCE = ROOT / "examples" / "coordination-workspace" / "AGENTS.md"
+BOOTSTRAP = ROOT / "docs" / "coordination-workspace.md"
 
 
 def executable(path: Path, text: str) -> None:
@@ -75,3 +78,54 @@ def test_status_explains_stale_port_state(tmp_path):
     assert status.returncode == 2
     assert "stale PID/port state" in status.stdout
     assert "make stop" in status.stdout
+
+
+def test_parent_guidance_delegates_waiting_to_bounded_monitor():
+    guidance = GUIDANCE.read_text()
+
+    assert "dedicated\nmonitoring subagent" in guidance
+    assert "small, bounded brief" in guidance
+    assert "service URL" in guidance
+    assert "session ID-to-project/task map" in guidance
+    assert "GET /events?after=N&wait=30" in guidance
+    assert "On `timeout`, it continues waiting without reporting to the parent" in guidance
+    assert "must not\nfilter raw app-server schemas, busy-loop, or use shell sleeps" in guidance
+
+
+def test_monitor_handoff_and_parent_responsibilities_are_explicit():
+    guidance = GUIDANCE.read_text()
+
+    for condition in (
+        "On `shutdown`",
+        "expired cursor",
+        "changed service ID",
+        "connection loss",
+        "uncertain terminal state",
+        "On a 410",
+        "`recovery.resumeAfter`",
+    ):
+        assert condition in guidance
+    assert "actionable child\nprogress" in guidance
+    assert "a terminal state, or a monitoring\nfailure" in guidance
+    assert "last safe cursor" in guidance
+    assert "not decide task scope" in guidance
+    assert "neither a second coordinator nor\nan authorization boundary" in guidance
+    assert "no empty, timeout, or non-actionable progress messages" in guidance
+    assert "main parent retains task\ndecisions" in guidance
+    assert "focused child follow-ups, cancellation, user questions, and final\nverification" in guidance
+    assert "use one long `wait_agent` call" in guidance
+    assert "re-arm it only if that collaboration wait itself expires" in guidance
+
+
+def test_starter_goal_keeps_routine_waits_out_of_parent_context():
+    bootstrap = BOOTSTRAP.read_text()
+    goal = "/goal" + bootstrap.split("```text\n/goal", 1)[1].split("\n```", 1)[0]
+
+    assert "dedicated monitoring subagent" in goal
+    assert "only the service URL, session map, cursor, recovery rules, and reporting" in goal
+    assert "reports only actionable progress, terminal state, or a\nmonitoring failure" in goal
+    assert "never empty or timeout updates" in goal
+    assert "one long collaboration wait instead of repeated short\nwaits" in goal
+    assert "retain responsibility for task decisions, focused follow-ups,\ncancellation, user questions, and final verification" in goal
+    assert "poll conservatively" not in goal
+    assert "routine waiting out of the main coordination context" in bootstrap

@@ -139,18 +139,26 @@ the control API and trust boundary. A useful initial Goal is:
 ```text
 /goal Coordinate the configured child projects until the requested outcome is
 complete and verified. Delegate through the local Codex Coordinator HTTP
-service, retain session IDs and the event cursor, poll conservatively while
-work is active, reconcile through GET /sessions, and send focused follow-ups
-when evidence is missing. Complete only after the required child work and
-integration evidence are verified. If blocked, report the evidence gathered
-and the exact input needed.
+service and retain responsibility for task decisions, focused follow-ups,
+cancellation, user questions, and final verification. Delegate routine event
+waiting and session reconciliation to a dedicated monitoring subagent with
+only the service URL, session map, cursor, recovery rules, and reporting
+contract. The monitor reports only actionable progress, terminal state, or a
+monitoring failure, never empty or timeout updates; it does not make task
+decisions. Await it with one long collaboration wait instead of repeated short
+waits. Complete only after the required child work and integration evidence are
+verified. If blocked, report the evidence gathered and the exact input needed.
 ```
 
 A Goal keeps the parent objective active across continuation turns. Use the
-bounded blocking form `GET /events?after=N&wait=30` while children are active,
-advance the cursor only from returned events, and treat `outcome=timeout` as no
-change. This keeps one HTTP request parked in the service instead of shell
-sleep polling. Use `GET /sessions` as the authoritative reconciliation surface.
+monitoring structure in the template `AGENTS.md` while children are active.
+The monitor uses the bounded blocking form `GET /events?after=N&wait=30`,
+advances the cursor only from returned events, and treats `outcome=timeout` as
+no change worth returning to the parent. This keeps one HTTP request parked in
+the service and routine waiting out of the main coordination context. When the
+parent has no other ready work, it should use one long `wait_agent` call sized
+to the remaining deadline and re-arm only if that collaboration wait expires.
+Use `GET /sessions` as the authoritative reconciliation surface.
 
 ## 6. Basic HTTP workflow
 
