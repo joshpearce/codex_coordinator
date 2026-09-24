@@ -2,6 +2,14 @@
 
 A session is created from a configured project name and records both that stable name and its resolved absolute path. `thread/start` creates the child thread; `turn/start` begins the initial prompt. A completed thread remains available for follow-up turns.
 
+When a state file is configured, every lifecycle/evidence transition is
+atomically persisted with owner-only mode. Restart recovery resumes each known
+thread by ID and validates the app-server's returned thread ID and canonical
+working directory against the current project mapping. A mismatch or malformed
+registry fails startup visibly; it never silently adopts an unmanaged or
+differently configured thread. Recovered sessions keep their original HTTP/API
+session IDs and are re-registered for notifications and automatic approvals.
+
 States are `active`, `completed`, `failed`, `interrupted`, `cancelling`, `cancelled`, `cancel_unknown`, `connection_lost`, `protocol_unknown`, and `shutdown_unknown`. Cancellation targets the currently recorded turn. A stale completion cannot finish a newer follow-up turn. Connection loss marks active sessions explicitly rather than implying success.
 
 Supported approval server requests are answered immediately and recorded as `approval.auto_approved`. No pending verdict state exists. Malformed, unsupported, or unmanaged requests produce `approval.protocol_error` and an error response correlated to the original request ID.

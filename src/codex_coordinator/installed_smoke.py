@@ -17,13 +17,19 @@ def require(condition: bool, message: str) -> None:
 class FixtureClient:
     def __init__(self):
         self.calls = []
+        self.threads = {}
         self.disconnected = asyncio.Event()
         self.connection_error = None
 
     async def call(self, method, params):
         self.calls.append((method, params))
         if method == "thread/start":
-            return {"thread": {"id": f"thread-{len(self.calls)}"}}
+            thread = {"id": f"thread-{len(self.calls)}", "cwd": params["cwd"], "turns": []}
+            self.threads[thread["id"]] = thread
+            return {"thread": thread}
+        if method == "thread/resume":
+            thread = self.threads[params["threadId"]]
+            return {"thread": thread, "cwd": thread["cwd"]}
         if method == "turn/start":
             return {"turn": {"id": f"turn-{len(self.calls)}"}}
         return {}
@@ -41,11 +47,14 @@ def approval(thread_id: str) -> dict:
 
 async def run(first: Path, second: Path) -> None:
     projects = {"alpha": first.resolve(strict=True), "beta": second.resolve(strict=True)}
-    events, client = EventLog(), FixtureClient()
-    approvals = AutomaticApprovalHandler(events)
-    service = CoordinatorService(client, approvals, events, projects=projects)
-    coordinator = Coordinator(service, approvals, events, client)
-    try:
+    with tempfile.TemporaryDirectory(prefix="coordinator-state-") as state_dir:
+        state_path = Path(state_dir) / "sessions.json"
+        events, client = EventLog(), FixtureClient()
+        approvals = AutomaticApprovalHandler(events)
+        service = CoordinatorService(
+            client, approvals, events, projects=projects, state_path=state_path,
+        )
+        coordinator = Coordinator(service, approvals, events, client)
         alpha, beta = await asyncio.gather(
             coordinator.start("alpha", "alpha task"), coordinator.start("beta", "beta task")
         )
@@ -59,10 +68,28 @@ async def run(first: Path, second: Path) -> None:
                 "threadId": handle.thread_id,
                 "turn": {"id": service.sessions[handle.id].turn_id, "status": "completed"},
             }})
-        await alpha.follow_up("follow-up", effort="high")
-        require(client.calls[-1][1]["threadId"] == alpha.thread_id, "follow-up targeted wrong child")
-    finally:
         await coordinator.close()
+
+        recovered_events, recovered_client = EventLog(), FixtureClient()
+        recovered_client.threads = client.threads.copy()
+        recovered_approvals = AutomaticApprovalHandler(recovered_events)
+        recovered_service = CoordinatorService(
+            recovered_client, recovered_approvals, recovered_events,
+            projects=projects, state_path=state_path,
+        )
+        recovered_coordinator = Coordinator(
+            recovered_service, recovered_approvals, recovered_events, recovered_client,
+        )
+        try:
+            sessions = await recovered_service.recover_sessions()
+            require({item["id"] for item in sessions} == {alpha.id, beta.id}, "sessions were not recovered")
+            await recovered_service.send_message(alpha.id, "follow-up", "high")
+            require(
+                recovered_client.calls[-1][1]["threadId"] == alpha.thread_id,
+                "recovered follow-up targeted wrong child",
+            )
+        finally:
+            await recovered_coordinator.close()
     print("installed two-project fixture passed")
 
 

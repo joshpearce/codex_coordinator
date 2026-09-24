@@ -1,5 +1,6 @@
 import asyncio
 import json
+import stat
 
 import pytest
 
@@ -15,15 +16,23 @@ class FakeClient:
         self.disconnected = asyncio.Event()
         self.connection_error = None
         self.fail_interrupt = False
+        self.threads = {}
 
     async def call(self, method, params):
         self.calls.append((method, params.copy()))
         if method == "thread/start":
-            return {"thread": {
+            thread = {
                 "id": f"thread-{sum(m == method for m, _ in self.calls)}-{len(self.calls)}",
+                "cwd": params["cwd"],
                 "model": params.get("model", "inherited-model"),
                 "reasoningEffort": "inherited-effort",
-            }}
+                "turns": [],
+            }
+            self.threads[thread["id"]] = thread
+            return {"thread": thread}
+        if method == "thread/resume":
+            thread = self.threads[params["threadId"]]
+            return {"thread": thread, "cwd": thread["cwd"]}
         if method == "turn/start":
             return {"turn": {"id": f"turn-{len(self.calls)}", "status": "inProgress"}}
         if method == "turn/interrupt" and self.fail_interrupt:
@@ -202,6 +211,86 @@ async def test_projection_covers_follow_up_cancel_and_protocol_failure(system):
     assert "session.interrupted" in types
     assert "approval.protocol_error" in types
     assert "app_server.notification" not in types
+
+
+@pytest.mark.asyncio
+async def test_durable_restart_recovers_follow_up_wait_cancel_notifications_and_approvals(tmp_path):
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
+    state_path = tmp_path / "coordinator-state.json"
+    events1, client1 = EventLog(), FakeClient()
+    approvals1 = AutomaticApprovalHandler(events1)
+    service1 = CoordinatorService(
+        client1, approvals1, events1, projects={"alpha": alpha}, state_path=state_path,
+    )
+    original = await service1.start_session("alpha", "first")
+    await service1.notification({"method": "turn/completed", "params": {
+        "threadId": original["threadId"],
+        "turn": {"id": original["turnId"], "status": "completed"},
+    }})
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+
+    events2, client2 = EventLog(), FakeClient()
+    client2.threads = client1.threads.copy()
+    approvals2 = AutomaticApprovalHandler(events2)
+    service2 = CoordinatorService(
+        client2, approvals2, events2, projects={"alpha": alpha}, state_path=state_path,
+    )
+    recovered = await service2.recover_sessions()
+    assert recovered[0]["id"] == original["id"]
+    assert client2.calls[0] == ("thread/resume", {"threadId": original["threadId"]})
+    assert approvals2.registrations[original["threadId"]][0] == original["id"]
+
+    approval = await approvals2(request(
+        "item/commandExecution/requestApproval", original["threadId"],
+        availableDecisions=["accept", "acceptForSession"],
+    ))
+    assert approval == {"decision": "acceptForSession"}
+    follow_up = await service2.send_message(original["id"], "follow-up")
+    coordinator = Coordinator(service2, approvals2, events2, client2)
+    waiting = asyncio.create_task(coordinator.wait(original["id"], timeout=1))
+    await service2.notification({"method": "turn/completed", "params": {
+        "threadId": original["threadId"],
+        "turn": {"id": follow_up["turnId"], "status": "completed"},
+    }})
+    assert (await waiting).state == "completed"
+
+    active = await service2.send_message(original["id"], "cancel me")
+    await service2.cancel_session(original["id"])
+    await service2.notification({"method": "turn/completed", "params": {
+        "threadId": original["threadId"],
+        "turn": {"id": active["turnId"], "status": "interrupted"},
+    }})
+    assert (await coordinator.wait(original["id"], timeout=1)).state == "interrupted"
+    assert any(
+        event["type"] == "session.interrupted" and event["session"]["id"] == original["id"]
+        for event in events2.events
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_rejects_thread_from_different_project(tmp_path):
+    alpha = tmp_path / "alpha"; beta = tmp_path / "beta"
+    alpha.mkdir(); beta.mkdir()
+    state_path = tmp_path / "coordinator-state.json"
+    events1, client1 = EventLog(), FakeClient()
+    approvals1 = AutomaticApprovalHandler(events1)
+    service1 = CoordinatorService(
+        client1, approvals1, events1, projects={"alpha": alpha}, state_path=state_path,
+    )
+    original = await service1.start_session("alpha", "first")
+
+    events2, client2 = EventLog(), FakeClient()
+    client2.threads = client1.threads.copy()
+    client2.threads[original["threadId"]] = {
+        **client2.threads[original["threadId"]], "cwd": str(beta),
+    }
+    service2 = CoordinatorService(
+        client2, AutomaticApprovalHandler(events2), events2,
+        projects={"alpha": alpha}, state_path=state_path,
+    )
+    with pytest.raises(RuntimeError, match="does not match configured project"):
+        await service2.recover_sessions()
 
 
 @pytest.mark.asyncio

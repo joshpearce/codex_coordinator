@@ -73,6 +73,7 @@ def _check_protocol_schema(schema_dir: Path) -> None:
 
     for name, param in (
         ("thread/start", "ThreadStartParams"),
+        ("thread/resume", "ThreadResumeParams"),
         ("turn/start", "TurnStartParams"),
         ("turn/interrupt", "TurnInterruptParams"),
         ("thread/read", "ThreadReadParams"),
@@ -83,6 +84,7 @@ def _check_protocol_schema(schema_dir: Path) -> None:
         {"cwd", "model"},
         "thread/start",
     )
+    _required(requests["definitions"]["ThreadResumeParams"], {"threadId"}, "thread/resume")
     _properties(
         requests["definitions"]["TurnStartParams"],
         {"threadId", "input", "effort"},
@@ -93,6 +95,7 @@ def _check_protocol_schema(schema_dir: Path) -> None:
     _required(requests["definitions"]["TurnInterruptParams"], {"threadId", "turnId"}, "turn/interrupt")
     v2 = bundle["definitions"]["v2"]
     _required(v2["ThreadStartResponse"], {"thread"}, "thread/start response")
+    _required(v2["ThreadResumeResponse"], {"thread", "cwd"}, "thread/resume response")
     _required(v2["Thread"], {"id"}, "thread/start thread")
     _required(v2["TurnStartResponse"], {"turn"}, "turn/start response")
     _required(v2["Turn"], {"id", "status"}, "turn/start turn")

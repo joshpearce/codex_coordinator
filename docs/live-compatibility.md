@@ -62,6 +62,23 @@ returned sequence 2 `service.shutting_down` with `outcome=shutdown` and exit 0
 while `make stop` completed. The failed trials are retained here because they
 diagnosed lifecycle defects rather than being hidden or used to weaken tests.
 
+Restart continuity was verified live on `0.156.1` with the launchd workspace
+launcher and its mode-0600 registry. Session
+`16907814c6c44928b35e7b059179af48` / thread
+`01a0d30c-ef4b-7323-8309-e4c75dcf5290` completed, survived a real stop/start
+with the same identities and last message, and accepted multiple same-thread
+follow-ups whose terminal notifications retained both IDs. A second
+approval-enabled fixture session,
+`28f92b54fd794002b5e028e2059f198a` / thread
+`01a0d30e-b32c-77d1-927c-9d54d4b32650`, survived another real restart. Its
+post-restart shell-network follow-up emitted correlated
+`approval.auto_approved`, `approval.wire_sent`, `approval.server_resolved`,
+command completion, child message, and `session.completed` events (sequences
+12–17). A final follow-up was cancelled; one blocking wait returned
+`session.turn_started`, `session.cancelling`, and `session.interrupted`
+(sequences 18–20). The temporary marker was removed by the child, and the local
+test registry was removed after evidence capture.
+
 On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
 `0.156.1`. This version exposes the standard control socket through an
 owner-controlled symlink; the coordinator validated both the link and its

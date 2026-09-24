@@ -203,6 +203,7 @@ class AutomaticApprovalHandler:
         self.item_max_bytes = item_max_bytes
         self.registrations: dict[str, tuple[str, str, str]] = {}
         self.session_evidence: dict[str, dict[str, Any]] = {}
+        self.on_evidence_change = lambda: None
         self.closed = False
 
     def register(
@@ -254,6 +255,7 @@ class AutomaticApprovalHandler:
             "rpcRequestId": self._rpc_request_id(message),
             "method": method, "response": response,
         }
+        self.on_evidence_change()
         self.events.emit(
             "approval.auto_approved", rpcRequestId=self._rpc_request_id(message),
             sessionId=session_id, threadId=thread_id, method=method,
@@ -272,6 +274,7 @@ class AutomaticApprovalHandler:
                 "method": message.get("method"), "reason": reason,
             })
             del errors[:-32]
+            self.on_evidence_change()
         self.events.emit(
             "approval.protocol_error", rpcRequestId=self._rpc_request_id(message),
             threadId=thread_id, method=message.get("method"), reason=reason,
@@ -319,6 +322,7 @@ class CoordinatorService:
         worker_reasoning_effort: str | None = None,
         projects: Mapping[str, Path] | None = None,
         raw_events: EventLog | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self.client = client
         self.approvals = approvals
@@ -331,11 +335,112 @@ class CoordinatorService:
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
         self.projects = dict(projects or {})
+        self.state_path = state_path
         self.raw_events = raw_events or EventLog(
             capacity=events.capacity, max_bytes=events.max_bytes,
             max_event_bytes=events.max_event_bytes, service_id=events.service_id,
             output_enabled=False,
         )
+        self.approvals.on_evidence_change = self._persist_sessions
+
+    def _persist_sessions(self) -> None:
+        if self.state_path is None:
+            return
+        state_path = Path(self.state_path)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = state_path.with_name(f".{state_path.name}.{os.getpid()}.tmp")
+        payload = {
+            "version": 1,
+            "sessions": [session.json() for session in self.sessions.values()],
+        }
+        temporary.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        temporary.chmod(0o600)
+        temporary.replace(state_path)
+
+    async def recover_sessions(self) -> list[dict[str, Any]]:
+        if self.state_path is None or not Path(self.state_path).exists():
+            return []
+        try:
+            payload = json.loads(Path(self.state_path).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read coordinator state {self.state_path}: {exc}") from exc
+        records = payload.get("sessions") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(records, list):
+            raise RuntimeError(f"unsupported or malformed coordinator state: {self.state_path}")
+        if len(records) > 1024:
+            raise RuntimeError("coordinator state exceeds the session limit")
+        recovered: list[dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                raise RuntimeError("coordinator state contains a malformed session")
+            session_id, thread_id, project = (
+                record.get("id"), record.get("threadId"), record.get("project")
+            )
+            if not all(isinstance(value, str) and value for value in (session_id, thread_id, project)):
+                raise RuntimeError("coordinator state contains an invalid session identity")
+            if session_id in self.sessions or thread_id in self.thread_sessions:
+                raise RuntimeError("coordinator state contains duplicate session or thread identities")
+            configured_path = self.projects.get(project)
+            if configured_path is None or record.get("projectPath") != str(configured_path):
+                raise RuntimeError(
+                    f"persisted session {session_id} no longer matches configured project {project!r}"
+                )
+            result = await self.client.call("thread/resume", {"threadId": thread_id})
+            thread = (result or {}).get("thread", result or {})
+            resumed_id = thread.get("id") or thread.get("threadId")
+            resumed_cwd = (result or {}).get("cwd") or thread.get("cwd")
+            try:
+                canonical_cwd = Path(resumed_cwd).resolve(strict=True)
+            except (TypeError, OSError, RuntimeError) as exc:
+                raise RuntimeError(f"resumed thread {thread_id} returned no valid cwd") from exc
+            if resumed_id != thread_id or canonical_cwd != configured_path:
+                raise RuntimeError(
+                    f"resumed thread {thread_id} does not match configured project {project!r}"
+                )
+            evidence = record.get("evidence")
+            session = Session(
+                id=session_id, thread_id=thread_id, project=project,
+                project_path=str(configured_path),
+                state=record.get("state") if isinstance(record.get("state"), str) else "protocol_unknown",
+                turn_id=record.get("turnId") if isinstance(record.get("turnId"), str) else None,
+                model=record.get("model") if isinstance(record.get("model"), str) else None,
+                reasoning_effort=(
+                    record.get("reasoningEffort")
+                    if isinstance(record.get("reasoningEffort"), str) else None
+                ),
+                effective_model=(
+                    thread.get("model") if isinstance(thread.get("model"), str)
+                    else record.get("effectiveModel") if isinstance(record.get("effectiveModel"), str)
+                    else None
+                ),
+                effective_reasoning_effort=(
+                    thread.get("reasoningEffort")
+                    if isinstance(thread.get("reasoningEffort"), str)
+                    else record.get("effectiveReasoningEffort")
+                    if isinstance(record.get("effectiveReasoningEffort"), str) else None
+                ),
+                evidence=evidence if isinstance(evidence, dict) else {},
+            )
+            turns = thread.get("turns")
+            if session.turn_id and isinstance(turns, Sequence):
+                turn = next((
+                    item for item in turns
+                    if isinstance(item, Mapping) and item.get("id") == session.turn_id
+                ), None)
+                status = turn.get("status") if isinstance(turn, Mapping) else None
+                if status in {"completed", "failed", "interrupted"}:
+                    session.state = status
+                    session.last_completed_turn_id = session.turn_id
+                    session.turn_id = None
+            self.sessions[session_id] = session
+            self.thread_sessions[thread_id] = session_id
+            self.approvals.register(
+                thread_id, session_id, project, str(configured_path), session.evidence,
+            )
+            self.events.emit("session.recovered", session=session.json())
+            recovered.append(session.json())
+        self._persist_sessions()
+        return recovered
 
     def _selected_effort(self, requested: str | None) -> str | None:
         effort = self.worker_reasoning_effort if requested is None else requested
@@ -387,6 +492,7 @@ class CoordinatorService:
         )
         self.sessions[session_id] = session
         self.thread_sessions[thread_id] = session_id
+        self._persist_sessions()
         turn_params: dict[str, Any] = {
             "threadId": thread_id,
             "input": [{"type": "text", "text": prompt}],
@@ -405,6 +511,7 @@ class CoordinatorService:
         self.events.emit(
             "session.started", session=session.json(), prompt=prompt,
         )
+        self._persist_sessions()
         return session.json()
 
     async def send_message(
@@ -441,6 +548,7 @@ class CoordinatorService:
         self.events.emit(
             "session.turn_started", session=session.json(), prompt=prompt,
         )
+        self._persist_sessions()
         return session.json()
 
     async def cancel_session(self, session_id: str) -> dict[str, Any]:
@@ -452,6 +560,7 @@ class CoordinatorService:
         self.approvals.cancel_session(session_id)
         session.state = "cancelling"
         self.events.emit("session.cancelling", session=session.json())
+        self._persist_sessions()
         try:
             await self.client.call("turn/interrupt", {
                 "threadId": session.thread_id, "turnId": session.turn_id,
@@ -460,6 +569,7 @@ class CoordinatorService:
             if session.state == "cancelling":
                 session.state = "cancel_unknown"
                 self.events.emit("session.cancel_unknown", session=session.json())
+                self._persist_sessions()
             raise RuntimeError(
                 f"could not confirm cancellation of session {session_id}; "
                 "reconcile its turn with the app-server"
@@ -476,6 +586,7 @@ class CoordinatorService:
             if session.state in {"active", "cancelling"}:
                 session.state = "connection_lost"
                 self.events.emit("session.connection_lost", session=session.json(), reason=reason)
+        self._persist_sessions()
 
     async def shutdown(self) -> None:
         if not self._shutdown_announced:
@@ -519,6 +630,7 @@ class CoordinatorService:
             if session.state in {"active", "cancelling"}:
                 session.state = "shutdown_unknown" if session.id in uncertain else "cancelled"
                 self.events.emit(f"session.{session.state}", session=session.json())
+        self._persist_sessions()
 
     async def notification(self, message: dict[str, Any]) -> None:
         params = message.get("params")
@@ -572,6 +684,7 @@ class CoordinatorService:
                     itemId=item.get("id") if isinstance(item.get("id"), str) else None,
                     text=text,
                 )
+                self._persist_sessions()
         if method == "turn/completed" and session_id:
             turn = params.get("turn")
             status = turn.get("status") if isinstance(turn, Mapping) else None
@@ -604,6 +717,7 @@ class CoordinatorService:
                         threadId=thread_id,
                         turnId=completed_turn_id if isinstance(completed_turn_id, str) else None,
                     )
+                self._persist_sessions()
 
     @staticmethod
     def _agent_message_text(item: Mapping[str, Any]) -> str:
@@ -951,6 +1065,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--item-max-bytes", type=int)
     parser.add_argument("--socket", type=Path)
     parser.add_argument(
+        "--state-file", type=Path,
+        help="durable managed-session registry used to recover app-server threads",
+    )
+    parser.add_argument(
         "--verbose-events", action="store_true",
         help="log full managed event payloads to stdout (may contain sensitive data)",
     )
@@ -1012,10 +1130,12 @@ async def run(args: argparse.Namespace) -> None:
             worker_model=config.worker_model,
             worker_reasoning_effort=config.worker_reasoning_effort,
             projects=config.projects,
+            state_path=args.state_file,
         )
         client.disconnect_handler = service_ref.connection_lost
         try:
             await client.initialize()
+            await service_ref.recover_sessions()
             http_server = HttpControlServer(service_ref)
             loop = asyncio.get_running_loop()
             installed_signals: list[signal.Signals] = []

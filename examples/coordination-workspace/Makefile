@@ -7,6 +7,7 @@ CONFIG := $(CURDIR)/operator.toml
 PID_FILE := $(CURDIR)/.coordinator.pid
 PORT_FILE := $(CURDIR)/.coordinator.port
 LOG_FILE := $(CURDIR)/.coordinator.log
+STATE_FILE := $(CURDIR)/.coordinator-state.json
 SERVICE_LABEL := com.openai.codex-coordinator.$(shell id -u).$(PORT)
 
 .PHONY: start stop status logs preflight
@@ -39,6 +40,7 @@ start: preflight
 	launchctl submit -l "$(SERVICE_LABEL)" -o "$(LOG_FILE)" -e "$(LOG_FILE)" -- \
 		/usr/bin/env "PATH=$$PATH" "$$service" \
 		--config "$(CONFIG)" \
+		--state-file "$(STATE_FILE)" \
 		--host 127.0.0.1 \
 		--port "$(PORT)"; \
 	echo "$(PORT)" >"$(PORT_FILE)"; \

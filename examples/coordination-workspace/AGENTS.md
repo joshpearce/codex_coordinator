@@ -11,6 +11,9 @@ Before delegating, check `GET /health` and inspect `GET /sessions`. Create
 sessions with `POST /sessions`, retain each returned session ID, and use
 `POST /sessions/{id}/messages` for follow-ups. Use
 `POST /sessions/{id}/cancel` only when cancellation is actually needed.
+The template persists managed handles in `.coordinator-state.json`; after a
+service restart, reconcile and continue the returned session IDs instead of
+starting replacement threads.
 
 Track the event cursor returned by `GET /events?after=N&wait=30`. The endpoint is
 the concise orchestration projection; do not filter raw app-server schemas.

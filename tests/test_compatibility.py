@@ -24,6 +24,7 @@ def _schema_fixture(root: Path):
     requests = {
         "oneOf": [_variant(method, params) for method, params in (
             ("thread/start", "ThreadStartParams"),
+            ("thread/resume", "ThreadResumeParams"),
             ("turn/start", "TurnStartParams"),
             ("turn/interrupt", "TurnInterruptParams"),
             ("thread/read", "ThreadReadParams"),
@@ -45,6 +46,10 @@ def _schema_fixture(root: Path):
             "TurnInterruptParams": {
                 "properties": {"threadId": {}, "turnId": {}},
                 "required": ["threadId", "turnId"],
+            },
+            "ThreadResumeParams": {
+                "properties": {"threadId": {}, "cwd": {}, "sandbox": {}},
+                "required": ["threadId"],
             },
             "AskForApproval": {
                 "oneOf": [
@@ -128,6 +133,7 @@ def _schema_fixture(root: Path):
                     "required": ["thread"],
                     "properties": {"activePermissionProfile": {}, "sandbox": {}},
                 },
+                "ThreadResumeResponse": {"required": ["thread", "cwd"]},
                 "ActivePermissionProfile": {
                     "properties": {"id": {}, "extends": {}}, "required": ["id"],
                 },

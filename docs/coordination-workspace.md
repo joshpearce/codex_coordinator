@@ -115,13 +115,21 @@ make start PORT=9876
 The supported template is macOS-specific: `make start` submits the service to
 the user's `launchctl` supervisor so it remains alive after the initiating
 Codex tool call returns. Startup succeeds only after `/health` responds. The
-template records the selected port and log in ignored local files; it does not
+template records the selected port, log, and durable managed-session registry
+in ignored local files; it does not
 treat a short-lived background PID as proof of startup. `make status` checks
 HTTP health and distinguishes a stale supervisor job or legacy PID/port files,
 with `make stop` then `make start` as the supported recovery. `make stop`
 unloads the supervised job; the resulting SIGTERM uses the service's orderly
 shutdown path. If no supervised job remains, it falls back to the HTTP shutdown
 route for recovery from older launch methods.
+
+Restarting the service with the same `.coordinator-state.json` resumes its
+managed app-server threads before `/health` becomes reachable. Keep this file
+private and paired with the same `operator.toml`; startup fails if a saved
+thread's returned ID or canonical working directory does not match the current
+project mapping. Removing the file deliberately forgets coordinator handles,
+but does not delete app-server threads.
 
 ## 5. Open the parent Codex session
 

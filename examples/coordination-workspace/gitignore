@@ -2,3 +2,4 @@
 *.log
 .coordinator.pid
 .coordinator.port
+.coordinator-state.json

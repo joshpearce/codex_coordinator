@@ -26,3 +26,13 @@ results. Routine app-server deltas and item traffic do not enter that cursor or
 retention budget. A separately bounded `GET /debug/events` feed retains
 redacted full managed notifications for explicit diagnosis; clients must not
 depend on that app-server-specific schema for ordinary coordination.
+
+The service may be given an operator-owned state file. It atomically records
+managed session/thread identities, the exact configured project name and
+canonical path, lifecycle state, and bounded evidence. On startup it calls
+`thread/resume` with only the persisted thread ID, then accepts the recovery
+only when the app-server returns that same ID and a canonical `cwd` equal to the
+current project mapping. Recovery never supplies a sandbox, approval policy,
+permission profile, reviewer, rules, workspace roots, or another security
+setting. Recovered threads are registered for notifications and automatic
+approvals before the HTTP listener becomes healthy.

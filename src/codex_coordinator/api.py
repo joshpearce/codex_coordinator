@@ -88,7 +88,7 @@ class Coordinator:
 
     @classmethod
     async def connect(
-        cls, config: OperatorConfig,
+        cls, config: OperatorConfig, *, state_path: Any = None,
     ) -> "Coordinator":
         if not config.projects:
             raise ValueError("configure at least one named project")
@@ -124,10 +124,12 @@ class Coordinator:
             worker_model=config.worker_model,
             worker_reasoning_effort=config.worker_reasoning_effort,
             projects=config.projects,
+            state_path=state_path,
         )
         client.notification_handler = service.notification
         try:
             await client.initialize()
+            await service.recover_sessions()
         except BaseException:
             await client.close()
             await transport.close()
