@@ -17,7 +17,9 @@ the concise orchestration projection; do not filter raw app-server schemas.
 Reconcile authoritative session state through `GET /sessions` and do not
 busy-loop. Use the separately bounded `GET /debug/events` only for explicit
 diagnosis. Treat a changed service ID, an expired cursor, connection loss, or
-an uncertain terminal state explicitly.
+an uncertain terminal state explicitly. On a 410, reconcile `GET /sessions`
+including its evidence summaries, then resume from `recovery.resumeAfter`;
+never busy-poll to avoid cursor expiry.
 
 When operating under a Goal, keep coordinating until the requested outcome is
 verified across the relevant child projects. While children are active, wait

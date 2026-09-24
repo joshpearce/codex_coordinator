@@ -16,4 +16,12 @@ cursor and exposes redacted managed app-server notifications only for explicit
 diagnosis. Default stdout logging emits orchestration metadata rather than full
 payloads.
 
+`GET /sessions` is the recovery surface when an orchestration cursor expires.
+Each session retains its current/terminal state plus a bounded evidence summary:
+the last complete child message, the last automatic approval, and up to 32
+managed protocol errors. A 410 event response returns `latestSequence` and a
+`recovery` object directing the client to reconcile `/sessions`, then continue
+with `after=recovery.resumeAfter`. This avoids aggressive polling; the default
+2,048-event/8 MiB orchestration window is independent of raw debug traffic.
+
 Shutdown stops new work, drains in-flight server requests briefly, interrupts active turns, marks uncertain outcomes explicitly, and closes the app-server connection. It never starts, restarts, or stops the host app-server daemon.

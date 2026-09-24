@@ -38,6 +38,17 @@ load proof; sequences 18 and 19 recorded `session.cancelling` and the correlated
 `session.interrupted` terminal result, and `GET /sessions` agreed. The service
 then stopped cleanly under launchd supervision.
 
+Cursor recovery was then exercised with an intentionally tiny four-event
+orchestration window. After conservative delay, `GET /events?after=0` returned
+410 with oldest sequence 5, latest sequence 8, and an explicit instruction to
+reconcile `/sessions` and resume after 8. The session surface already retained
+the child's latest complete message. The child completed normally while the
+consumer was delayed; `/sessions` reported `completed` with that final message,
+and resuming at 8 returned sequences 9 and 10 (`child.message` and
+`session.completed`). Together with the default-window high-volume run above,
+this proves both normal retention isolation and lossless required-evidence
+recovery without aggressive polling.
+
 On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
 `0.156.1`. This version exposes the standard control socket through an
 owner-controlled symlink; the coordinator validated both the link and its

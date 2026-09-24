@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -217,6 +218,90 @@ def test_event_state_remains_bounded():
     assert len(events.events) == 3
     with pytest.raises(EventCursorExpired):
         events.after(0)
+
+
+@pytest.mark.asyncio
+async def test_high_volume_raw_work_does_not_expire_orchestration_cursor(system):
+    _, _, events, service, _ = system
+    session = await service.start_session("alpha", "work")
+    cursor = events.next_sequence - 1
+    for index in range(10_000):
+        await service.notification({"method": "item/agentMessage/delta", "params": {
+            "threadId": session["threadId"], "turnId": session["turnId"],
+            "delta": str(index),
+        }})
+    await service.notification({"method": "item/completed", "params": {
+        "threadId": session["threadId"], "turnId": session["turnId"],
+        "item": {"id": "final-message", "type": "agentMessage", "text": "required result"},
+    }})
+    await service.notification({"method": "turn/completed", "params": {
+        "threadId": session["threadId"],
+        "turn": {"id": session["turnId"], "status": "completed"},
+    }})
+
+    assert [event["type"] for event in events.after(cursor)] == [
+        "child.message", "session.completed",
+    ]
+    recovered = service.sessions[session["id"]].json()
+    assert recovered["state"] == "completed"
+    assert recovered["evidence"]["lastMessage"]["text"] == "required result"
+
+
+@pytest.mark.asyncio
+async def test_expired_cursor_recovery_preserves_required_session_evidence(system):
+    _, approvals, events, service, _ = system
+    session = await service.start_session("alpha", "work")
+    with pytest.raises(ProtocolError):
+        await approvals(request("unsupported/request", session["threadId"]))
+    await service.notification({"method": "item/completed", "params": {
+        "threadId": session["threadId"], "turnId": session["turnId"],
+        "item": {"id": "answer", "type": "agentMessage", "text": "recover me"},
+    }})
+    await service.notification({"method": "turn/completed", "params": {
+        "threadId": session["threadId"],
+        "turn": {"id": session["turnId"], "status": "failed"},
+    }})
+    for index in range(100):
+        events.emit("test.eviction", index=index)
+    with pytest.raises(EventCursorExpired):
+        events.after(0)
+
+    status, body = await HttpControlServer(service).route("GET", "/sessions", {})
+    recovered = body["sessions"][0]
+    assert status == 200
+    assert recovered["state"] == "failed"
+    assert recovered["evidence"]["lastMessage"]["text"] == "recover me"
+    assert recovered["evidence"]["protocolErrors"][0]["method"] == "unsupported/request"
+
+
+@pytest.mark.asyncio
+async def test_expired_cursor_http_response_has_unambiguous_recovery(system):
+    _, _, events, service, _ = system
+    for index in range(100):
+        events.emit("test.eviction", index=index)
+
+    class Writer:
+        def __init__(self):
+            self.data = b""
+        def write(self, data):
+            self.data += data
+        async def drain(self):
+            return None
+        def close(self):
+            return None
+        async def wait_closed(self):
+            return None
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"GET /events?after=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    reader.feed_eof()
+    writer = Writer()
+    await HttpControlServer(service).handle(reader, writer)
+    payload = json.loads(writer.data.split(b"\r\n\r\n", 1)[1])
+    assert writer.data.startswith(b"HTTP/1.1 410 Gone")
+    assert payload["recovery"] == {
+        "sessions": "/sessions", "resumeAfter": payload["latestSequence"],
+    }
 
 
 @pytest.mark.asyncio

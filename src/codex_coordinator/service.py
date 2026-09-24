@@ -170,6 +170,7 @@ class Session:
     reasoning_effort: str | None = None
     effective_model: str | None = None
     effective_reasoning_effort: str | None = None
+    evidence: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def json(self) -> dict[str, Any]:
         return {
@@ -183,6 +184,7 @@ class Session:
             "reasoningEffort": self.reasoning_effort,
             "effectiveModel": self.effective_model,
             "effectiveReasoningEffort": self.effective_reasoning_effort,
+            "evidence": self.evidence,
         }
 
 
@@ -199,9 +201,13 @@ class AutomaticApprovalHandler:
         self.item_capacity = item_capacity
         self.item_max_bytes = item_max_bytes
         self.registrations: dict[str, tuple[str, str, str]] = {}
+        self.session_evidence: dict[str, dict[str, Any]] = {}
         self.closed = False
 
-    def register(self, thread_id: str, session_id: str, project: str, project_path: str) -> None:
+    def register(
+        self, thread_id: str, session_id: str, project: str, project_path: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
         if self.closed:
             raise RuntimeError("approval handler is closed")
         registration = (session_id, project, project_path)
@@ -209,6 +215,7 @@ class AutomaticApprovalHandler:
         if existing is not None and existing != registration:
             raise ValueError("thread is already bound to a different session")
         self.registrations[thread_id] = registration
+        self.session_evidence[session_id] = evidence if evidence is not None else {}
 
     async def __call__(self, message: dict[str, Any]) -> dict[str, Any]:
         if self.closed:
@@ -242,6 +249,10 @@ class AutomaticApprovalHandler:
         else:
             return self._fail(message, f"unsupported app-server request method: {method}")
         session_id, project, project_path = registration
+        self.session_evidence[session_id]["lastApproval"] = {
+            "rpcRequestId": self._rpc_request_id(message),
+            "method": method, "response": response,
+        }
         self.events.emit(
             "approval.auto_approved", rpcRequestId=self._rpc_request_id(message),
             sessionId=session_id, threadId=thread_id, method=method,
@@ -253,6 +264,13 @@ class AutomaticApprovalHandler:
         params = message.get("params")
         thread_id = params.get("threadId") if isinstance(params, Mapping) else None
         registration = self.registrations.get(thread_id) if isinstance(thread_id, str) else None
+        if registration is not None:
+            errors = self.session_evidence[registration[0]].setdefault("protocolErrors", [])
+            errors.append({
+                "rpcRequestId": self._rpc_request_id(message),
+                "method": message.get("method"), "reason": reason,
+            })
+            del errors[:-32]
         self.events.emit(
             "approval.protocol_error", rpcRequestId=self._rpc_request_id(message),
             threadId=thread_id, method=message.get("method"), reason=reason,
@@ -362,7 +380,9 @@ class CoordinatorService:
                 if isinstance(thread.get("reasoningEffort"), str) else None
             ),
         )
-        self.approvals.register(thread_id, session_id, project_value, str(project))
+        self.approvals.register(
+            thread_id, session_id, project_value, str(project), session.evidence,
+        )
         self.sessions[session_id] = session
         self.thread_sessions[thread_id] = session_id
         turn_params: dict[str, Any] = {
@@ -531,6 +551,13 @@ class CoordinatorService:
                     )
             if isinstance(item, Mapping) and item.get("type") == "agentMessage":
                 text = self._agent_message_text(item)
+                retained_text = text[:8192]
+                self.sessions[session_id].evidence["lastMessage"] = {
+                    "turnId": completed_turn_id if isinstance(completed_turn_id, str) else None,
+                    "itemId": item.get("id") if isinstance(item.get("id"), str) else None,
+                    "text": retained_text,
+                    "truncated": len(retained_text) != len(text),
+                }
                 self.events.emit(
                     "child.message", sessionId=session_id, threadId=thread_id,
                     turnId=completed_turn_id if isinstance(completed_turn_id, str) else None,
@@ -634,6 +661,11 @@ class HttpControlServer:
                 status, result = 410, {
                     "error": str(exc), "oldestSequence": exc.oldest_sequence,
                     "serviceId": self.service.events.service_id,
+                    "latestSequence": self.service.events.next_sequence - 1,
+                    "recovery": {
+                        "sessions": "/sessions",
+                        "resumeAfter": self.service.events.next_sequence - 1,
+                    },
                 }
             except EventCursorAhead as exc:
                 status, result = 409, {

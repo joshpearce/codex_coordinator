@@ -173,6 +173,11 @@ bounded diagnostic capture only, use `GET /debug/events?after=N`. That debug
 feed has a separate cursor and exposes redacted app-server-specific payloads;
 normal clients should not download or filter it.
 
+If `/events` returns 410, read the authoritative `/sessions` state and its
+bounded `evidence` summaries, then resume `/events` with the response's
+`recovery.resumeAfter` cursor. Do not retry the expired cursor or poll faster:
+raw high-volume work does not consume the orchestration retention window.
+
 Send a focused follow-up:
 
 ```console
