@@ -79,6 +79,26 @@ command completion, child message, and `session.completed` events (sequences
 (sequences 18–20). The temporary marker was removed by the child, and the local
 test registry was removed after evidence capture.
 
+The final integrated gate combined the six issue behaviors in one bounded
+chain on port 8881 with a deliberately tiny four-event window. The externally
+supervised launcher remained healthy in a later tool call. Inventory session
+`746c81b37a31484888d7bf802308b526` / thread
+`01a0d311-4ec1-7f61-a25c-a7f3a4693b90` completed via a blocking event wait,
+survived a real stop/start with the same identities and final-message evidence,
+and accepted a same-thread follow-up. Normal-feed load expired cursor 2; the
+410 response directed reconciliation through `/sessions` and resumption after
+7, which returned a clean timeout rather than a replay. A further same-thread
+turn was cancelled, and the next blocking request returned
+`session.turn_started`, `session.cancelling`, and `session.interrupted`
+(sequences 8–10). The run used no shell sleep polling, never fetched or filtered
+the raw debug feed, and shut down through the supervised orderly path. Automatic
+approval continuity is established by the immediately preceding recovered
+fixture run (sequences 12–17); the integrated follow-up's first network command
+completed with status 128 and did not issue a server approval request, so it is
+not misreported as approval evidence. App-server token-usage notifications are
+intentionally redacted from retained evidence, so a reliable live token total
+was not available.
+
 On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
 `0.156.1`. This version exposes the standard control socket through an
 owner-controlled symlink; the coordinator validated both the link and its
