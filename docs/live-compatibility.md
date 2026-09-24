@@ -1,5 +1,20 @@
 # Live compatibility evidence
 
+On 2026-09-24, the parent/monitor E2E discovered and spawned the checked-in
+project-scoped `coordinator_monitor` agent from
+`.codex/agents/coordinator-monitor.toml`. The monitor rollout confirms the
+configured `gpt-6-luna` model, low reasoning effort, and workspace-write
+sandbox. The parent made one `wait_agent` call while the monitor followed the
+event cursor through 22 and reported both child sessions completed; the parent
+made no `GET /events` calls and used no shell sleeps. The parent rollout used
+201,603 input tokens, including 169,216 cached tokens, and 204,320 total tokens.
+Two preceding diagnostic runs exposed duplicate terminal handoffs and loss of
+per-command sandbox escalation. The checked-in monitor instructions now forbid
+duplicate `send_message` plus final handoffs and require escalation for every
+local control-plane request when the bounded brief specifies it. The harness
+also verifies the custom agent type and task name from the rollout rather than
+accepting the parent's self-report alone.
+
 On 2026-09-24, the parent/monitor E2E used the bundled coordination workspace
 and both inventory fixtures over an ephemeral owner-controlled Unix socket.
 Parent thread `01a0d362-37cc-7ff1-af93-e34bc4856a1c` created two service-managed

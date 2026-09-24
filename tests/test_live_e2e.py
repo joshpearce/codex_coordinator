@@ -30,7 +30,8 @@ def test_parent_monitor_prompt_encodes_guidance_and_tasks():
     assert "--unix-socket /tmp/live/control.sock" in prompt
     assert "URL base `http://localhost`" in prompt
     assert 'sandbox_permissions="require_escalated"' in prompt
-    assert "dedicated monitoring subagent" in prompt
+    assert "project-scoped `coordinator_monitor` custom subagent" in prompt
+    assert "task name `coordinator_monitor`" in prompt
     assert "GET /events?after=N&wait=30" in prompt
     assert "continue silently on timeout" in prompt
     assert "never use shell\nsleeps or busy polling" in prompt
@@ -87,10 +88,23 @@ def test_parent_rollout_requires_one_wait_and_one_monitor_handoff(monkeypatch, t
     rollout = tmp_path / ".codex" / "sessions" / "2026" / "rollout-thread-1.jsonl"
     rollout.parent.mkdir(parents=True)
     records = [
+        {"type": "response_item", "payload": {
+            "name": "spawn_agent",
+            "arguments": json.dumps({
+                "task_name": "coordinator_monitor",
+                "agent_type": "coordinator_monitor",
+            }),
+        }},
         {"type": "response_item", "payload": {"name": "wait_agent"}},
         {"type": "response_item", "payload": {
             "type": "agent_message", "author": "/root/batch_monitor",
             "recipient": "/root",
+            "content": [{"text": "Message Type: MESSAGE\nPayload:\n"}],
+        }},
+        {"type": "response_item", "payload": {
+            "type": "agent_message", "author": "/root/batch_monitor",
+            "recipient": "/root",
+            "content": [{"text": "Message Type: FINAL_ANSWER\nPayload:\nterminal"}],
         }},
         {"type": "token_usage_record", "payload": {
             "thread_id": "thread-1",
@@ -103,5 +117,6 @@ def test_parent_rollout_requires_one_wait_and_one_monitor_handoff(monkeypatch, t
     evidence = parent_rollout_evidence("thread-1")
 
     assert evidence["waitAgentCalls"] == 1
-    assert evidence["monitorHandoffs"] == 1
+    assert evidence["coordinatorMonitorSpawns"] == 1
+    assert evidence["monitorNotifications"] == 2
     assert evidence["turnTokenUsage"]["input_tokens"] == 123

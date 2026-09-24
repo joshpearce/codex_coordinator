@@ -30,6 +30,9 @@ cp examples/coordination-workspace/Makefile ~/code/my_coordination/
 cp examples/coordination-workspace/AGENTS.md ~/code/my_coordination/
 cp examples/coordination-workspace/gitignore ~/code/my_coordination/.gitignore
 cp examples/coordination-workspace/operator.toml.example ~/code/my_coordination/operator.toml
+mkdir -p ~/code/my_coordination/.codex/agents
+cp examples/coordination-workspace/.codex/agents/coordinator-monitor.toml \
+  ~/code/my_coordination/.codex/agents/
 cd ~/code/my_coordination
 ```
 
@@ -43,8 +46,10 @@ make start PORT=9876
 ```
 
 Open a normal Codex session in the coordination workspace and ask it to delegate
-through the HTTP service described in `AGENTS.md`. The coordination workspace
-does not need to be registered as a child project.
+through the HTTP service described in `AGENTS.md`. The tracked project-scoped
+`coordinator_monitor` custom agent uses `gpt-6-luna` with low reasoning for
+routine event waits while the parent retains decisions and final verification.
+The coordination workspace does not need to be registered as a child project.
 
 Each child inherits the host/user and project-local Codex configuration that
 already applies in its directory. In particular, a child project configured

@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 
@@ -8,6 +9,7 @@ ROOT = Path(__file__).parents[1]
 TEMPLATE = ROOT / "examples" / "coordination-workspace" / "Makefile"
 GUIDANCE = ROOT / "examples" / "coordination-workspace" / "AGENTS.md"
 BOOTSTRAP = ROOT / "docs" / "coordination-workspace.md"
+MONITOR = ROOT / "examples" / "coordination-workspace" / ".codex" / "agents" / "coordinator-monitor.toml"
 
 
 def executable(path: Path, text: str) -> None:
@@ -83,7 +85,8 @@ def test_status_explains_stale_port_state(tmp_path):
 def test_parent_guidance_delegates_waiting_to_bounded_monitor():
     guidance = GUIDANCE.read_text()
 
-    assert "dedicated\nmonitoring subagent" in guidance
+    assert "dedicated\n`coordinator_monitor` custom subagent" in guidance
+    assert "`.codex/agents/coordinator-monitor.toml`" in guidance
     assert "small, bounded brief" in guidance
     assert "service URL" in guidance
     assert "session ID-to-project/task map" in guidance
@@ -94,6 +97,7 @@ def test_parent_guidance_delegates_waiting_to_bounded_monitor():
 
 def test_monitor_handoff_and_parent_responsibilities_are_explicit():
     guidance = GUIDANCE.read_text()
+    compact = " ".join(guidance.split())
 
     for condition in (
         "On `shutdown`",
@@ -109,7 +113,7 @@ def test_monitor_handoff_and_parent_responsibilities_are_explicit():
     assert "a terminal state, or a monitoring\nfailure" in guidance
     assert "last safe cursor" in guidance
     assert "not decide task scope" in guidance
-    assert "neither a second coordinator nor\nan authorization boundary" in guidance
+    assert "neither a second coordinator nor an authorization boundary" in compact
     assert "no empty, timeout, or non-actionable progress messages" in guidance
     assert "main parent retains task\ndecisions" in guidance
     assert "focused child follow-ups, cancellation, user questions, and final\nverification" in guidance
@@ -129,3 +133,32 @@ def test_starter_goal_keeps_routine_waits_out_of_parent_context():
     assert "retain responsibility for task decisions, focused follow-ups,\ncancellation, user questions, and final verification" in goal
     assert "poll conservatively" not in goal
     assert "routine waiting out of the main coordination context" in bootstrap
+
+
+def test_project_scoped_monitor_agent_matches_documented_contract():
+    monitor = tomllib.loads(MONITOR.read_text())
+    instructions = monitor["developer_instructions"]
+
+    assert set(monitor) == {
+        "name", "description", "model", "model_reasoning_effort",
+        "sandbox_mode", "developer_instructions",
+    }
+    assert monitor["name"] == "coordinator_monitor"
+    assert monitor["model"] == "gpt-6-luna"
+    assert monitor["model_reasoning_effort"] == "low"
+    assert monitor["sandbox_mode"] == "workspace-write"
+    for requirement in (
+        "GET /events?after=N&wait=30",
+        "On timeout, continue waiting without reporting",
+        "HTTP 410",
+        "recovery.resumeAfter",
+        "Do not send empty",
+        "Do not call send_message",
+        "every control-plane command",
+        "retry once",
+        "not a second coordinator",
+    ):
+        assert requirement in instructions
+    bootstrap = BOOTSTRAP.read_text()
+    assert "coordinator-monitor.toml" in bootstrap
+    assert "`coordinator_monitor` agent" in bootstrap

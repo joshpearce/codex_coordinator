@@ -16,11 +16,14 @@ service restart, reconcile and continue the returned session IDs instead of
 starting replacement threads.
 
 Delegate routine event waiting and session reconciliation to one dedicated
-monitoring subagent for each active coordination batch. Give that monitor a
-small, bounded brief containing only the service URL, the retained event cursor,
-the session ID-to-project/task map, and the reporting contract below; do not
-give it the parent's full task history. The main parent must not repeatedly
-resume its own large context merely to observe a timeout.
+`coordinator_monitor` custom subagent for each active coordination batch. Its
+project-scoped definition lives at `.codex/agents/coordinator-monitor.toml`;
+keep that definition tracked with this repository and use it rather than an
+unspecified general-purpose agent. Spawn it without the parent's task history,
+and give it a small, bounded brief containing only the service URL, retained
+event cursor, session ID-to-project/task map, and the reporting contract below.
+The main parent must
+not repeatedly resume its large context merely to observe a timeout.
 
 The monitor retains the cursor and session IDs and uses
 `GET /events?after=N&wait=30`, the concise orchestration projection. It must not
@@ -39,9 +42,10 @@ progress requiring a decision or follow-up, a terminal state, or a monitoring
 failure. Each report includes the affected session ID, the last safe cursor,
 the relevant state/evidence, and the action required from the parent. The
 monitor sends no empty, timeout, or non-actionable progress messages. It does
-not decide task scope, send child follow-ups, cancel sessions, ask the user
-questions, or verify the final result. It is neither a second coordinator nor
-an authorization boundary.
+not duplicate a terminal handoff through both `send_message` and its final
+answer. It does not decide task scope, send child follow-ups, cancel sessions,
+ask the user questions, or verify the final result. It is neither a second
+coordinator nor an authorization boundary.
 
 When operating under a Goal, keep coordinating until the requested outcome is
 verified across the relevant child projects. The main parent retains task

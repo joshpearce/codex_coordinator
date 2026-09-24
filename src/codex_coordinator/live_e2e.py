@@ -37,7 +37,9 @@ parent. Create one child session for each project/task in this JSON object:
 {json.dumps(tasks, indent=2, sort_keys=True)}
 
 Delegate all routine GET /events waiting and GET /sessions reconciliation to
-one dedicated monitoring subagent with a small brief containing only the
+the project-scoped `coordinator_monitor` custom subagent. Spawn exactly one
+subagent with task name `coordinator_monitor`, no inherited parent history, and
+a small brief containing only the
 service URL, cursor, created session IDs/project map, recovery rules, and this
 reporting contract. The monitor must use GET /events?after=N&wait=30, retain
 its cursor and session IDs, continue silently on timeout, never use shell
@@ -140,6 +142,7 @@ def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
         )
     wait_calls = 0
     monitor_handoffs = 0
+    monitor_spawns = 0
     last_turn_usage: dict[str, Any] | None = None
     for line in matches[0].read_text().splitlines():
         try:
@@ -154,6 +157,19 @@ def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
             and payload.get("name") == "wait_agent"
         ):
             wait_calls += 1
+        if (
+            record.get("type") == "response_item"
+            and payload.get("name") == "spawn_agent"
+        ):
+            try:
+                arguments = json.loads(payload.get("arguments", ""))
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+            if (
+                arguments.get("task_name") == "coordinator_monitor"
+                and arguments.get("agent_type") == "coordinator_monitor"
+            ):
+                monitor_spawns += 1
         if (
             record.get("type") == "response_item"
             and payload.get("type") == "agent_message"
@@ -173,17 +189,18 @@ def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
             "parent rollout resumed through "
             f"{wait_calls} wait_agent calls; expected one terminal wait"
         )
-    if monitor_handoffs != 1:
+    if monitor_spawns != 1:
         raise RuntimeError(
-            "monitor sent "
-            f"{monitor_handoffs} parent handoffs; expected one terminal handoff"
+            "parent rollout spawned "
+            f"{monitor_spawns} typed project-scoped coordinator monitors; expected one"
         )
     if last_turn_usage is None:
         raise RuntimeError("parent rollout contained no token-usage evidence")
     return {
         "rolloutPath": str(matches[0]),
         "waitAgentCalls": wait_calls,
-        "monitorHandoffs": monitor_handoffs,
+        "coordinatorMonitorSpawns": monitor_spawns,
+        "monitorNotifications": monitor_handoffs,
         "turnTokenUsage": last_turn_usage,
     }
 

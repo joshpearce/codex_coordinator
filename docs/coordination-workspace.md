@@ -80,6 +80,9 @@ cp examples/coordination-workspace/Makefile ~/code/my_coordination/
 cp examples/coordination-workspace/AGENTS.md ~/code/my_coordination/
 cp examples/coordination-workspace/gitignore ~/code/my_coordination/.gitignore
 cp examples/coordination-workspace/operator.toml.example ~/code/my_coordination/operator.toml
+mkdir -p ~/code/my_coordination/.codex/agents
+cp examples/coordination-workspace/.codex/agents/coordinator-monitor.toml \
+  ~/code/my_coordination/.codex/agents/
 cd ~/code/my_coordination
 git init
 ```
@@ -143,7 +146,8 @@ service and retain responsibility for task decisions, focused follow-ups,
 cancellation, user questions, and final verification. Delegate routine event
 waiting and session reconciliation to a dedicated monitoring subagent with
 only the service URL, session map, cursor, recovery rules, and reporting
-contract. The monitor reports only actionable progress, terminal state, or a
+contract. Use the tracked project-scoped `coordinator_monitor` definition. The
+monitor reports only actionable progress, terminal state, or a
 monitoring failure, never empty or timeout updates; it does not make task
 decisions. Await it with one long collaboration wait instead of repeated short
 waits. Complete only after the required child work and integration evidence are
@@ -152,7 +156,11 @@ verified. If blocked, report the evidence gathered and the exact input needed.
 
 A Goal keeps the parent objective active across continuation turns. Use the
 monitoring structure in the template `AGENTS.md` while children are active.
-The monitor uses the bounded blocking form `GET /events?after=N&wait=30`,
+Codex discovers the tracked project-scoped definition at
+`.codex/agents/coordinator-monitor.toml`; spawn its declared
+`coordinator_monitor` agent once per active coordination batch without the
+parent's task history. The monitor uses the bounded blocking form
+`GET /events?after=N&wait=30`,
 advances the cursor only from returned events, and treats `outcome=timeout` as
 no change worth returning to the parent. This keeps one HTTP request parked in
 the service and routine waiting out of the main coordination context. When the
