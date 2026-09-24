@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import stat
 import sys
 import uuid
@@ -325,6 +326,7 @@ class CoordinatorService:
         self.sessions: dict[str, Session] = {}
         self.thread_sessions: dict[str, str] = {}
         self.stopping = asyncio.Event()
+        self._shutdown_announced = False
         self._connection_lost = False
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
@@ -476,6 +478,12 @@ class CoordinatorService:
                 self.events.emit("session.connection_lost", session=session.json(), reason=reason)
 
     async def shutdown(self) -> None:
+        if not self._shutdown_announced:
+            self._shutdown_announced = True
+            self.events.emit("service.shutting_down")
+            # Let already-blocked HTTP event handlers serialize the shutdown
+            # event before the listener owner begins teardown.
+            await asyncio.sleep(0)
         self.stopping.set()
         self.approvals.close("service shutdown")
         drain_requests = getattr(self.client, "drain_requests", None)
@@ -618,10 +626,19 @@ class HttpControlServer:
     MAX_BODY = 1024 * 1024
     READ_TIMEOUT = 10
     WRITE_TIMEOUT = 10
+    MAX_EVENT_WAIT = 30.0
 
     def __init__(self, service: CoordinatorService) -> None:
         self.service = service
         self._inflight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    async def drain(self, timeout: float = 3) -> None:
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout)
+        except asyncio.TimeoutError:
+            return
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if self._inflight >= 64:
@@ -640,6 +657,7 @@ class HttpControlServer:
                 writer.close()
             return
         self._inflight += 1
+        self._idle.clear()
         try:
             # Bound before the read so the error handler can name the request
             # even when parsing it is what failed.
@@ -648,7 +666,21 @@ class HttpControlServer:
                 method, target, body = await asyncio.wait_for(
                     self._read_request(reader), timeout=self.READ_TIMEOUT,
                 )
-                status, result = await self.route(method, target, body)
+                if self._is_blocking_event_request(method, target):
+                    routed = asyncio.create_task(self.route(method, target, body))
+                    disconnected = asyncio.create_task(reader.read(1))
+                    done, _ = await asyncio.wait(
+                        {routed, disconnected}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if routed not in done:
+                        routed.cancel()
+                        await asyncio.gather(routed, return_exceptions=True)
+                        return
+                    disconnected.cancel()
+                    await asyncio.gather(disconnected, return_exceptions=True)
+                    status, result = routed.result()
+                else:
+                    status, result = await self.route(method, target, body)
             except asyncio.TimeoutError:
                 status, result = 408, {"error": "request read timed out"}
             except asyncio.LimitOverrunError:
@@ -695,6 +727,8 @@ class HttpControlServer:
                 pass
         finally:
             self._inflight -= 1
+            if self._inflight == 0:
+                self._idle.set()
             writer.close()
             try:
                 await asyncio.wait_for(writer.wait_closed(), timeout=self.WRITE_TIMEOUT)
@@ -741,17 +775,57 @@ class HttpControlServer:
             raise ValueError("request body must be an object")
         return method, target, body
 
+    @staticmethod
+    def _is_blocking_event_request(method: str, target: str) -> bool:
+        parsed = urlsplit(target)
+        return (
+            method == "GET" and parsed.path.rstrip("/") == "/events"
+            and "wait" in parse_qs(parsed.query)
+        )
+
+    async def _events_response(self, after: int, wait: float) -> dict[str, Any]:
+        if wait < 0 or wait > self.MAX_EVENT_WAIT:
+            raise ValueError(f"wait must be between 0 and {self.MAX_EVENT_WAIT:g} seconds")
+        events = self.service.events.after(after)
+        outcome = "events" if events else "snapshot"
+        if not events and wait > 0:
+            event_task = asyncio.create_task(self.service.events.wait_after(after))
+            shutdown_task = asyncio.create_task(self.service.stopping.wait())
+            done, pending = await asyncio.wait(
+                {event_task, shutdown_task}, timeout=wait,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if event_task in done:
+                events = event_task.result()
+                outcome = (
+                    "shutdown"
+                    if any(event.get("type") == "service.shutting_down" for event in events)
+                    else "events"
+                )
+            elif shutdown_task in done:
+                outcome = "shutdown"
+            else:
+                outcome = "timeout"
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        return {
+            "serviceId": self.service.events.service_id,
+            "outcome": outcome,
+            "latestSequence": self.service.events.next_sequence - 1,
+            "events": events,
+        }
+
     async def route(self, method: str, target: str, body: dict[str, Any]) -> tuple[int, Any]:
         parsed = urlsplit(target)
         parts = [part for part in parsed.path.split("/") if part]
         if method == "GET" and parts == ["health"]:
             return 200, {"ok": True, "serviceId": self.service.events.service_id}
         if method == "GET" and parts == ["events"]:
-            after = int(parse_qs(parsed.query).get("after", ["0"])[0])
-            return 200, {
-                "serviceId": self.service.events.service_id,
-                "events": self.service.events.after(after),
-            }
+            query = parse_qs(parsed.query)
+            after = int(query.get("after", ["0"])[0])
+            wait = float(query.get("wait", ["0"])[0])
+            return 200, await self._events_response(after, wait)
         if method == "GET" and parts == ["debug", "events"]:
             after = int(parse_qs(parsed.query).get("after", ["0"])[0])
             return 200, {
@@ -942,8 +1016,20 @@ async def run(args: argparse.Namespace) -> None:
         client.disconnect_handler = service_ref.connection_lost
         try:
             await client.initialize()
+            http_server = HttpControlServer(service_ref)
+            loop = asyncio.get_running_loop()
+            installed_signals: list[signal.Signals] = []
+            for stop_signal in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(
+                        stop_signal,
+                        lambda: asyncio.create_task(service_ref.shutdown()),
+                    )
+                    installed_signals.append(stop_signal)
+                except (NotImplementedError, RuntimeError):
+                    pass
             async with control_listener(
-                HttpControlServer(service_ref).handle,
+                http_server.handle,
                 host=args.host,
                 port=args.port,
                 unix_socket=getattr(args, "unix_socket", None),
@@ -963,6 +1049,9 @@ async def run(args: argparse.Namespace) -> None:
                 await asyncio.gather(*pending, return_exceptions=True)
                 if disconnect_task in done and not service_ref.stopping.is_set():
                     service_ref.connection_lost(str(client.connection_error or "connection closed"))
+                await http_server.drain()
+            for stop_signal in installed_signals:
+                loop.remove_signal_handler(stop_signal)
         finally:
             if not client.disconnected.is_set() and not service_ref.stopping.is_set():
                 await service_ref.shutdown()

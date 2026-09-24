@@ -24,4 +24,16 @@ managed protocol errors. A 410 event response returns `latestSequence` and a
 with `after=recovery.resumeAfter`. This avoids aggressive polling; the default
 2,048-event/8 MiB orchestration window is independent of raw debug traffic.
 
-Shutdown stops new work, drains in-flight server requests briefly, interrupts active turns, marks uncertain outcomes explicitly, and closes the app-server connection. It never starts, restarts, or stops the host app-server daemon.
+HTTP consumers may request `GET /events?after=N&wait=S`, where `S` is between
+0 and 30 seconds. The response `outcome` is `events`, `timeout`, `snapshot`, or
+`shutdown`; cursor expiry remains 410 and a cursor from another service
+generation remains 409. App-server connection loss wakes waiters through a
+`service.connection_lost` event. Multiple waiters and sessions share the same
+notification primitive without shell sleep polling, and an HTTP disconnect
+cancels only that request's waiter.
+
+Shutdown stops new work, publishes `service.shutting_down`, drains in-flight
+HTTP and app-server requests briefly, interrupts active turns, marks uncertain
+outcomes explicitly, and closes the app-server connection. SIGINT and SIGTERM
+enter this same orderly path. It never starts, restarts, or stops the host
+app-server daemon.

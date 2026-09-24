@@ -138,10 +138,11 @@ integration evidence are verified. If blocked, report the evidence gathered
 and the exact input needed.
 ```
 
-A Goal keeps the parent objective active across continuation turns. It does not
-turn `GET /events` into push delivery. The current endpoint returns immediately,
-so the parent should poll conservatively, advance the event cursor, and use
-`GET /sessions` as the authoritative reconciliation surface.
+A Goal keeps the parent objective active across continuation turns. Use the
+bounded blocking form `GET /events?after=N&wait=30` while children are active,
+advance the cursor only from returned events, and treat `outcome=timeout` as no
+change. This keeps one HTTP request parked in the service instead of shell
+sleep polling. Use `GET /sessions` as the authoritative reconciliation surface.
 
 ## 6. Basic HTTP workflow
 
@@ -164,6 +165,7 @@ Keep each returned session ID. Inspect state and events:
 ```console
 curl --fail --silent --show-error http://127.0.0.1:8765/sessions
 curl --fail --silent --show-error 'http://127.0.0.1:8765/events?after=0'
+curl --fail --silent --show-error 'http://127.0.0.1:8765/events?after=0&wait=30'
 ```
 
 `GET /events` is the concise orchestration feed. It contains child messages,

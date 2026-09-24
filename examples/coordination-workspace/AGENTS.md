@@ -12,10 +12,11 @@ sessions with `POST /sessions`, retain each returned session ID, and use
 `POST /sessions/{id}/messages` for follow-ups. Use
 `POST /sessions/{id}/cancel` only when cancellation is actually needed.
 
-Track the event cursor returned by `GET /events?after=N`. The endpoint is
+Track the event cursor returned by `GET /events?after=N&wait=30`. The endpoint is
 the concise orchestration projection; do not filter raw app-server schemas.
 Reconcile authoritative session state through `GET /sessions` and do not
-busy-loop. Use the separately bounded `GET /debug/events` only for explicit
+busy-loop or use shell sleeps. Distinguish `events`, `timeout`, and `shutdown`
+outcomes. Use the separately bounded `GET /debug/events` only for explicit
 diagnosis. Treat a changed service ID, an expired cursor, connection loss, or
 an uncertain terminal state explicitly. On a 410, reconcile `GET /sessions`
 including its evidence summaries, then resume from `recovery.resumeAfter`;

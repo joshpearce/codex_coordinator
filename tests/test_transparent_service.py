@@ -305,6 +305,96 @@ async def test_expired_cursor_http_response_has_unambiguous_recovery(system):
 
 
 @pytest.mark.asyncio
+async def test_http_event_wait_immediate_delayed_timeout_shutdown_and_cursor_errors(system):
+    _, _, events, service, _ = system
+    server = HttpControlServer(service)
+    cursor = events.next_sequence - 1
+
+    events.emit("test.immediate")
+    _, immediate = await server.route("GET", f"/events?after={cursor}&wait=1", {})
+    assert immediate["outcome"] == "events"
+    cursor = immediate["latestSequence"]
+
+    async def emit_later():
+        await asyncio.sleep(0)
+        events.emit("test.delayed")
+    emitter = asyncio.create_task(emit_later())
+    _, delayed = await server.route("GET", f"/events?after={cursor}&wait=1", {})
+    await emitter
+    assert delayed["outcome"] == "events"
+    assert delayed["events"][0]["type"] == "test.delayed"
+    cursor = delayed["latestSequence"]
+
+    _, timed_out = await server.route("GET", f"/events?after={cursor}&wait=0.001", {})
+    assert timed_out["outcome"] == "timeout"
+    assert timed_out["events"] == []
+
+    waiter = asyncio.create_task(server.route("GET", f"/events?after={cursor}&wait=1", {}))
+    await asyncio.sleep(0)
+    service.stopping.set()
+    _, stopped = await waiter
+    assert stopped["outcome"] == "shutdown"
+
+    with pytest.raises(ValueError, match="ahead"):
+        await server.route("GET", "/events?after=999999&wait=1", {})
+    for index in range(100):
+        events.emit("test.expire", index=index)
+    with pytest.raises(EventCursorExpired):
+        await server.route("GET", "/events?after=0&wait=1", {})
+    with pytest.raises(ValueError, match="between 0 and 30"):
+        await server.route("GET", "/events?after=100&wait=31", {})
+
+
+@pytest.mark.asyncio
+async def test_http_event_wait_wakes_for_concurrent_sessions_and_disconnects_cleanly(system):
+    _, _, events, service, _ = system
+    server = HttpControlServer(service)
+    cursor = events.next_sequence - 1
+    waiting = asyncio.create_task(server.route("GET", f"/events?after={cursor}&wait=1", {}))
+    await asyncio.gather(
+        service.start_session("alpha", "a"), service.start_session("beta", "b")
+    )
+    _, response = await waiting
+    assert response["outcome"] == "events"
+    assert {event["session"]["project"] for event in response["events"]} == {"alpha", "beta"}
+
+    cursor = response["latestSequence"]
+    disconnected = asyncio.create_task(
+        server.route("GET", f"/events?after={cursor}&wait=1", {})
+    )
+    await asyncio.sleep(0)
+    service.connection_lost("socket closed")
+    _, lost = await disconnected
+    assert lost["outcome"] == "events"
+    assert lost["events"][0]["type"] == "service.connection_lost"
+
+    class Writer:
+        def __init__(self):
+            self.data = b""
+        def write(self, data):
+            self.data += data
+        async def drain(self):
+            return None
+        def close(self):
+            return None
+        async def wait_closed(self):
+            return None
+
+    cursor = events.next_sequence - 1
+    reader = asyncio.StreamReader()
+    reader.feed_data(
+        f"GET /events?after={cursor}&wait=30 HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
+    )
+    writer = Writer()
+    handler = asyncio.create_task(server.handle(reader, writer))
+    await asyncio.sleep(0)
+    reader.feed_eof()
+    await asyncio.wait_for(handler, 1)
+    assert writer.data == b""
+    assert server._inflight == 0
+
+
+@pytest.mark.asyncio
 async def test_http_body_limit_is_enforced_before_allocation(system):
     _, _, _, service, _ = system
     reader = asyncio.StreamReader()

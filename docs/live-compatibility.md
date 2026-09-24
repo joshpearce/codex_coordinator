@@ -49,6 +49,19 @@ and resuming at 8 returned sequences 9 and 10 (`child.message` and
 this proves both normal retention isolation and lossless required-evidence
 recovery without aggressive polling.
 
+The live blocking-wait exercise ran two read-only children concurrently. One
+`wait=30` request returned correlated progress for both sessions (sequences
+4–7), and the next returned both final messages and both `session.completed`
+records (sequences 8–11); no shell sleep loop or raw-event filtering was used.
+A `wait=0.1` request returned `outcome=timeout`, and an ahead cursor returned
+409 with the service generation's latest sequence. The first supervised-stop
+trial exposed that SIGTERM bypassed coordinator shutdown, and the second showed
+an open waiter could lose its response during teardown. After adding signal
+handling plus HTTP-handler draining, the repeated open `wait=30` request
+returned sequence 2 `service.shutting_down` with `outcome=shutdown` and exit 0
+while `make stop` completed. The failed trials are retained here because they
+diagnosed lifecycle defects rather than being hidden or used to weaken tests.
+
 On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
 `0.156.1`. This version exposes the standard control socket through an
 owner-controlled symlink; the coordinator validated both the link and its

@@ -15,8 +15,10 @@ service. It normally runs in a separate coordination workspace containing the
 operator mapping and instructions for issuing HTTP requests. It is not a
 privileged coordinator thread, and its directory need not be registered as a
 child project. The service cannot push an unsolicited turn into that parent
-session; today the parent polls events and session state while its turn remains
-active, optionally under a Codex Goal.
+session. While its turn remains active, the parent can use
+`GET /events?after=N&wait=30`, which blocks in the service until events arrive,
+the bounded timeout elapses, or shutdown begins. Disconnected HTTP clients
+cancel their waiter promptly.
 
 The normal event log is a projection for orchestration: child assistant
 messages, session transitions, approval/protocol outcomes, and terminal
