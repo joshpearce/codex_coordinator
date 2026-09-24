@@ -32,6 +32,7 @@ class EventLog:
     max_bytes: int = 8 * 1024 * 1024
     max_event_bytes: int = 1024 * 1024
     verbose_output: bool = False
+    output_enabled: bool = True
     service_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     next_sequence: int = 1
     _changed: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -74,8 +75,9 @@ class EventLog:
             self._retained_bytes -= self._sizes.pop(0)
         self._changed.set()
         self._changed = asyncio.Event()
-        output = self._log_view(event)
-        print(json.dumps(output, sort_keys=True, separators=(",", ":")), flush=True)
+        if self.output_enabled:
+            output = self._log_view(event)
+            print(json.dumps(output, sort_keys=True, separators=(",", ":")), flush=True)
         return event
 
     def _log_view(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -297,6 +299,7 @@ class CoordinatorService:
         worker_model: str | None = None,
         worker_reasoning_effort: str | None = None,
         projects: Mapping[str, Path] | None = None,
+        raw_events: EventLog | None = None,
     ) -> None:
         self.client = client
         self.approvals = approvals
@@ -308,6 +311,11 @@ class CoordinatorService:
         self.worker_model = worker_model
         self.worker_reasoning_effort = worker_reasoning_effort
         self.projects = dict(projects or {})
+        self.raw_events = raw_events or EventLog(
+            capacity=events.capacity, max_bytes=events.max_bytes,
+            max_event_bytes=events.max_event_bytes, service_id=events.service_id,
+            output_enabled=False,
+        )
 
     def _selected_effort(self, requested: str | None) -> str | None:
         effort = self.worker_reasoning_effort if requested is None else requested
@@ -495,6 +503,10 @@ class CoordinatorService:
         method = str(message.get("method", "notification"))
         if session_id is None:
             return
+        self.raw_events.emit(
+            "app_server.notification", method=method,
+            sessionId=session_id, threadId=thread_id, message=message,
+        )
         if method == "item/started":
             pass
         if method == "serverRequest/resolved":
@@ -517,6 +529,14 @@ class CoordinatorService:
                         threadId=thread_id, turnId=turn_id,
                         itemId=item_id, itemStatus=status,
                     )
+            if isinstance(item, Mapping) and item.get("type") == "agentMessage":
+                text = self._agent_message_text(item)
+                self.events.emit(
+                    "child.message", sessionId=session_id, threadId=thread_id,
+                    turnId=completed_turn_id if isinstance(completed_turn_id, str) else None,
+                    itemId=item.get("id") if isinstance(item.get("id"), str) else None,
+                    text=text,
+                )
         if method == "turn/completed" and session_id:
             turn = params.get("turn")
             status = turn.get("status") if isinstance(turn, Mapping) else None
@@ -543,12 +563,26 @@ class CoordinatorService:
                 session.turn_id = None
                 if session.state == "protocol_unknown":
                     self.events.emit("session.protocol_unknown", session=session.json())
-        self.events.emit(
-            "app_server.notification",
-            method=method,
-            sessionId=session_id,
-            message=message,
-        )
+                else:
+                    self.events.emit(
+                        f"session.{session.state}", session=session.json(),
+                        threadId=thread_id,
+                        turnId=completed_turn_id if isinstance(completed_turn_id, str) else None,
+                    )
+
+    @staticmethod
+    def _agent_message_text(item: Mapping[str, Any]) -> str:
+        text = item.get("text")
+        if isinstance(text, str):
+            return text
+        content = item.get("content")
+        if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
+            parts = [
+                part.get("text") for part in content
+                if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+            ]
+            return "".join(parts)
+        return ""
 
 
 class HttpControlServer:
@@ -685,6 +719,12 @@ class HttpControlServer:
             return 200, {
                 "serviceId": self.service.events.service_id,
                 "events": self.service.events.after(after),
+            }
+        if method == "GET" and parts == ["debug", "events"]:
+            after = int(parse_qs(parsed.query).get("after", ["0"])[0])
+            return 200, {
+                "serviceId": self.service.events.service_id,
+                "events": self.service.raw_events.after(after),
             }
         if method == "GET" and parts == ["sessions"]:
             return 200, {

@@ -17,3 +17,10 @@ privileged coordinator thread, and its directory need not be registered as a
 child project. The service cannot push an unsolicited turn into that parent
 session; today the parent polls events and session state while its turn remains
 active, optionally under a Codex Goal.
+
+The normal event log is a projection for orchestration: child assistant
+messages, session transitions, approval/protocol outcomes, and terminal
+results. Routine app-server deltas and item traffic do not enter that cursor or
+retention budget. A separately bounded `GET /debug/events` feed retains
+redacted full managed notifications for explicit diagnosis; clients must not
+depend on that app-server-specific schema for ordinary coordination.

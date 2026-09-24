@@ -6,6 +6,14 @@ States are `active`, `completed`, `failed`, `interrupted`, `cancelling`, `cancel
 
 Supported approval server requests are answered immediately and recorded as `approval.auto_approved`. No pending verdict state exists. Malformed, unsupported, or unmanaged requests produce `approval.protocol_error` and an error response correlated to the original request ID.
 
-Events have monotonically increasing sequence numbers within one service generation and bounded count/byte retention. Polling behind the retained window reports an expired cursor; polling beyond the current generation reports an ahead cursor. Default stdout logging emits metadata rather than full payloads.
+Orchestration events have monotonically increasing sequence numbers within one
+service generation and bounded count/byte retention. They include child
+messages, session transitions, approval/protocol outcomes, and terminal
+results. Routine raw notification traffic is excluded. Polling behind the
+retained window reports an expired cursor; polling beyond the current
+generation reports an ahead cursor. `GET /debug/events` has its own bounded
+cursor and exposes redacted managed app-server notifications only for explicit
+diagnosis. Default stdout logging emits orchestration metadata rather than full
+payloads.
 
 Shutdown stops new work, drains in-flight server requests briefly, interrupts active turns, marks uncertain outcomes explicitly, and closes the app-server connection. It never starts, restarts, or stops the host app-server daemon.

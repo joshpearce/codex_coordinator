@@ -166,6 +166,13 @@ curl --fail --silent --show-error http://127.0.0.1:8765/sessions
 curl --fail --silent --show-error 'http://127.0.0.1:8765/events?after=0'
 ```
 
+`GET /events` is the concise orchestration feed. It contains child messages,
+session transitions, automatic-approval/protocol outcomes, and terminal
+results; it intentionally omits routine raw item and delta traffic. For a
+bounded diagnostic capture only, use `GET /debug/events?after=N`. That debug
+feed has a separate cursor and exposes redacted app-server-specific payloads;
+normal clients should not download or filter it.
+
 Send a focused follow-up:
 
 ```console

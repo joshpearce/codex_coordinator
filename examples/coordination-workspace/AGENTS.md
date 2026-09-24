@@ -13,9 +13,11 @@ sessions with `POST /sessions`, retain each returned session ID, and use
 `POST /sessions/{id}/cancel` only when cancellation is actually needed.
 
 Track the event cursor returned by `GET /events?after=N`. The endpoint is
-snapshot-based, so poll it conservatively and reconcile authoritative session
-state through `GET /sessions`; do not busy-loop. Treat a changed service ID, an
-expired cursor, connection loss, or an uncertain terminal state explicitly.
+the concise orchestration projection; do not filter raw app-server schemas.
+Reconcile authoritative session state through `GET /sessions` and do not
+busy-loop. Use the separately bounded `GET /debug/events` only for explicit
+diagnosis. Treat a changed service ID, an expired cursor, connection loss, or
+an uncertain terminal state explicitly.
 
 When operating under a Goal, keep coordinating until the requested outcome is
 verified across the relevant child projects. While children are active, wait

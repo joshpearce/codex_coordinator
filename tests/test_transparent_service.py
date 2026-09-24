@@ -131,6 +131,79 @@ async def test_concurrency_follow_up_cancel_wait_and_connection_loss(system):
 
 
 @pytest.mark.asyncio
+async def test_orchestration_projection_is_concise_ordered_and_correlated(system):
+    client, approvals, events, service, _ = system
+    alpha, beta = await asyncio.gather(
+        service.start_session("alpha", "a"), service.start_session("beta", "b")
+    )
+    baseline = events.next_sequence - 1
+    for index in range(1000):
+        await service.notification({"method": "item/agentMessage/delta", "params": {
+            "threadId": alpha["threadId"], "turnId": alpha["turnId"],
+            "delta": f"noise-{index}",
+        }})
+    await service.notification({"method": "item/completed", "params": {
+        "threadId": alpha["threadId"], "turnId": alpha["turnId"],
+        "item": {"id": "message-1", "type": "agentMessage", "text": "alpha result"},
+    }})
+    await service.notification({"method": "turn/completed", "params": {
+        "threadId": alpha["threadId"],
+        "turn": {"id": alpha["turnId"], "status": "completed"},
+    }})
+    await service.notification({"method": "turn/completed", "params": {
+        "threadId": beta["threadId"],
+        "turn": {"id": beta["turnId"], "status": "failed"},
+    }})
+
+    projected = events.after(baseline)
+    assert [event["type"] for event in projected] == [
+        "child.message", "session.completed", "session.failed",
+    ]
+    assert [event["sequence"] for event in projected] == sorted(
+        event["sequence"] for event in projected
+    )
+    assert projected[0] == {
+        "sequence": projected[0]["sequence"], "type": "child.message",
+        "sessionId": alpha["id"], "threadId": alpha["threadId"],
+        "turnId": alpha["turnId"], "itemId": "message-1", "text": "alpha result",
+    }
+    assert projected[-1]["session"]["id"] == beta["id"]
+    assert len(service.raw_events.events) == 64
+    assert all(event["type"] == "app_server.notification" for event in service.raw_events.events)
+
+    status, debug = await HttpControlServer(service).route(
+        "GET", f"/debug/events?after={service.raw_events.events[-2]['sequence']}", {}
+    )
+    assert status == 200
+    assert debug["events"][0]["message"]["method"] == "turn/completed"
+
+
+@pytest.mark.asyncio
+async def test_projection_covers_follow_up_cancel_and_protocol_failure(system):
+    client, approvals, events, service, _ = system
+    session = await service.start_session("alpha", "first")
+    await service.notification({"method": "turn/completed", "params": {
+        "threadId": session["threadId"],
+        "turn": {"id": session["turnId"], "status": "completed"},
+    }})
+    follow_up = await service.send_message(session["id"], "second")
+    await service.cancel_session(session["id"])
+    await service.notification({"method": "turn/completed", "params": {
+        "threadId": session["threadId"],
+        "turn": {"id": follow_up["turnId"], "status": "interrupted"},
+    }})
+    with pytest.raises(ProtocolError):
+        await approvals(request("unsupported/request", session["threadId"]))
+
+    types = [event["type"] for event in events.events]
+    assert "session.turn_started" in types
+    assert "session.cancelling" in types
+    assert "session.interrupted" in types
+    assert "approval.protocol_error" in types
+    assert "app_server.notification" not in types
+
+
+@pytest.mark.asyncio
 async def test_http_has_no_approval_resolution_route(system):
     _, _, _, service, _ = system
     status, body = await HttpControlServer(service).route("POST", "/approvals/abc", {"verdict": "deny"})

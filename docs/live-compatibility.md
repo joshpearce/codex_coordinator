@@ -27,6 +27,17 @@ diagnostic attempts preceded the passing run: the first exposed launchd's
 inability to resolve the service executable, and the second exposed its minimal
 PATH for resolving `codex`; the launcher now supplies both deterministically.
 
+The same date's live event-projection exercise started a read-only child on
+Codex CLI/app-server `0.156.1`. At an early high-volume snapshot the explicit
+debug cursor had already reached 83 notifications, including token updates,
+message deltas, MCP startup, item starts, and full command results. The normal
+feed held seven concise records: service/session startup, two complete child
+messages, and three command-completion correlations. The normal client did not
+parse a raw notification schema. The run was bounded by cancelling after the
+load proof; sequences 18 and 19 recorded `session.cancelling` and the correlated
+`session.interrupted` terminal result, and `GET /sessions` agreed. The service
+then stopped cleanly under launchd supervision.
+
 On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
 `0.156.1`. This version exposes the standard control socket through an
 owner-controlled symlink; the coordinator validated both the link and its
