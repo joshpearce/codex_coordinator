@@ -1,5 +1,19 @@
 # Live compatibility evidence
 
+On 2026-09-24, the parent/monitor E2E used the bundled coordination workspace
+and both inventory fixtures over an ephemeral owner-controlled Unix socket.
+Parent thread `01a0d362-37cc-7ff1-af93-e34bc4856a1c` created two service-managed
+children, spawned one bounded monitoring subagent, made one long `wait_agent`
+call, and received one terminal handoff covering both completed sessions. The
+monitor finished at orchestration cursor 23 with no shell sleeps and the parent
+made no `GET /events` calls. The parent rollout recorded 168,789 cumulative
+input tokens, of which 155,776 were cached, and 171,541 total tokens. The
+immediately preceding diagnostic run used three short parent waits and three
+monitor handoffs and accumulated 205,550 input tokens. That failed run exposed
+two empty/non-actionable monitor resumptions; the repeated-wait structure is
+therefore rejected by the harness rather than accepted based only on the
+parent's self-report.
+
 On 2026-09-24, preflight was run from the managed Codex parent against the
 host user's standard socket with the coordinator checkout configured as a
 project. The parent lacked metadata access to the socket target. The command
