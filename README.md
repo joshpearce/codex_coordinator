@@ -84,7 +84,12 @@ codex-coordinator-preflight --config /absolute/operator.toml --require-socket
 codex-coordinator-service --config /absolute/operator.toml
 ```
 
-The loopback HTTP API provides `POST /sessions`, follow-up and cancel routes, `GET /sessions`, `GET /events`, `GET /health`, and `POST /shutdown`. Session creation names a configured project and accepts optional `model` and `effort`; follow-ups accept optional per-turn `effort`.
+The loopback HTTP API provides `POST /sessions`, compact batch creation through
+`POST /sessions/batch`, follow-up and cancel routes, `GET /sessions`,
+`GET /events`, `GET /health`, and `POST /shutdown`. Session creation names a
+configured project and accepts optional `model` and `effort`; follow-ups accept
+optional per-turn `effort`. Creation responses include the service generation
+and event cursor required to hand monitoring off without a reconciliation read.
 
 There is no approval-resolution endpoint. Successful automatic decisions are emitted as `approval.auto_approved`; malformed or unsupported server requests produce `approval.protocol_error` and a protocol error response.
 

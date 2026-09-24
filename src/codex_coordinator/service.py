@@ -830,7 +830,7 @@ class HttpControlServer:
                     error=f"{type(exc).__name__}: {exc}",
                 )
             payload = json.dumps(result, sort_keys=True).encode()
-            reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 409: "Conflict", 410: "Gone", 413: "Payload Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(status, "OK")
+            reason = {200: "OK", 201: "Created", 202: "Accepted", 207: "Multi-Status", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 408: "Request Timeout", 409: "Conflict", 410: "Gone", 413: "Payload Too Large", 431: "Request Header Fields Too Large", 500: "Internal Server Error"}.get(status, "OK")
             writer.write(
                 f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
                 + payload
@@ -954,9 +954,66 @@ class HttpControlServer:
         if method == "POST" and parts == ["sessions"]:
             if set(body) - {"project", "prompt", "effort", "model"}:
                 raise ValueError("unsupported session fields")
-            return 201, await self.service.start_session(
+            session = await self.service.start_session(
                 body["project"], body["prompt"], body.get("effort"), body.get("model"),
             )
+            return 201, {
+                **session,
+                "serviceId": self.service.events.service_id,
+                "eventCursor": self.service.events.next_sequence - 1,
+            }
+        if method == "POST" and parts == ["sessions", "batch"]:
+            if set(body) != {"sessions"} or not isinstance(body["sessions"], list):
+                raise ValueError("batch body must contain only a sessions list")
+            requests = body["sessions"]
+            if not requests or len(requests) > 32:
+                raise ValueError("batch must contain between 1 and 32 sessions")
+            allowed = {"project", "prompt", "effort", "model"}
+            for request in requests:
+                if not isinstance(request, dict) or set(request) - allowed:
+                    raise ValueError("batch contains malformed or unsupported session fields")
+                if "project" not in request or "prompt" not in request:
+                    raise ValueError("each batch session requires project and prompt")
+                # Validate all deterministic inputs before the first thread is created.
+                project = request["project"]
+                prompt = request["prompt"]
+                if not isinstance(project, str) or not project.strip() or project not in self.service.projects:
+                    raise ValueError(f"unknown project: {project}")
+                if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 1024 * 1024:
+                    raise ValueError("prompt must be nonempty text no larger than 1 MiB")
+                for key in ("effort", "model"):
+                    value = request.get(key)
+                    if value is not None and (not isinstance(value, str) or not value.strip()):
+                        raise ValueError(f"{key} must be nonempty text when set")
+            if len(self.service.sessions) + len(requests) > 1024:
+                raise ValueError("session limit reached; restart the local service")
+            created: list[dict[str, Any]] = []
+            failures: list[dict[str, Any]] = []
+            for index, request in enumerate(requests):
+                before = set(self.service.sessions)
+                try:
+                    created.append(await self.service.start_session(
+                        request["project"], request["prompt"],
+                        request.get("effort"), request.get("model"),
+                    ))
+                except Exception as exc:
+                    # A session may already exist when turn/start fails. Return
+                    # every handle so callers never retry into duplicates.
+                    for session_id in set(self.service.sessions) - before:
+                        created.append(self.service.sessions[session_id].json())
+                    failures.append({
+                        "index": index, "project": request["project"],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    break
+            status = 201 if not failures else 207
+            return status, {
+                "serviceId": self.service.events.service_id,
+                "eventCursor": self.service.events.next_sequence - 1,
+                "batchState": "created" if not failures else "partial",
+                "sessions": created,
+                "failures": failures,
+            }
         if method == "POST" and len(parts) == 3 and parts[0] == "sessions" and parts[2] == "messages":
             if set(body) - {"prompt", "effort"}:
                 raise ValueError("unsupported session message fields")

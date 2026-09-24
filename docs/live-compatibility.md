@@ -1,5 +1,36 @@
 # Live compatibility evidence
 
+On 2026-09-24, the bounded-parent-context E2E passed against pinned Codex CLI
+and app-server `0.156.1`. Parent thread
+`01a0d39b-f7a1-7373-a7b4-f2ce6327e0c2` used one
+`POST /sessions/batch` request to create both children and received the service
+generation, post-start cursor, and both session identities without preliminary
+health, session, or event reads. It spawned one project-scoped monitor, made one
+long `wait_agent` call, received one terminal notification, and made no direct
+parent event calls. Both children completed with their distinct inherited
+reasoning efforts. The monitor used no shell sleeps or raw-event filtering,
+performed no recovery-related parent resumption, and returned the exact bounded
+terminal `Session.json()` snapshots and retained final-message evidence carried
+by the terminal events; no redundant final session read was needed.
+
+The parent rollout recorded 4 model invocations and 82,614 cumulative input
+tokens: 52,864 cached and 29,750 uncached. This is materially fewer activations
+and less total context processing than the preceding healthy two-child baseline
+(201,603 input, 169,216 cached, 32,387 uncached), while reporting cached and
+uncached values separately because cache reuse varied between otherwise similar
+diagnostic runs. The rollout also records one monitor notification, zero direct
+parent event calls, and zero recovery-related resumptions.
+
+Two diagnostic failures improved the final contract rather than being treated
+as passing evidence. One showed that an automatic final `GET /sessions` could
+fail under transient file-descriptor pressure even though terminal events
+already held authoritative snapshots; the monitor now reads sessions only for
+missing or uncertain evidence. Another exposed that concurrent batch startup
+could create one session before a generic HTTP 500 lost its handle. Batch input
+is now validated before startup, sessions are started deterministically while
+their turns remain concurrent, and a runtime partial failure returns HTTP 207
+with every created or failed handle so callers do not retry into duplicates.
+
 On 2026-09-24, the parent/monitor E2E discovered and spawned the checked-in
 project-scoped `coordinator_monitor` agent from
 `.codex/agents/coordinator-monitor.toml`. The monitor rollout confirms the

@@ -30,6 +30,8 @@ def test_parent_monitor_prompt_encodes_guidance_and_tasks():
     assert "--unix-socket /tmp/live/control.sock" in prompt
     assert "URL base `http://localhost`" in prompt
     assert 'sandbox_permissions="require_escalated"' in prompt
+    assert "exactly one POST /sessions/batch request" in prompt
+    assert "serviceId, eventCursor" in prompt
     assert "project-scoped `coordinator_monitor` custom subagent" in prompt
     assert "task name `coordinator_monitor`" in prompt
     assert "GET /events?after=N&wait=30" in prompt
@@ -48,9 +50,15 @@ def test_monitoring_evidence_is_extracted_and_validated():
       "monitoringEvidence": {
         "monitorSpawned": true,
         "boundedBrief": true,
+        "serviceId": "service-1",
         "sessionIds": {"app": "s1", "docs": "s2"},
         "lastCursor": 9,
         "timeoutCount": 2,
+        "recoveryCount": 1,
+        "terminalSessions": [
+          {"id": "s1", "state": "completed", "evidence": {"lastMessage": {}}},
+          {"id": "s2", "state": "completed", "evidence": {"lastMessage": {}}}
+        ],
         "reports": [
           {"kind": "terminal", "sessionId": "s1", "state": "completed"},
           {"kind": "terminal", "sessionId": "s2", "state": "completed"}
@@ -61,8 +69,12 @@ def test_monitoring_evidence_is_extracted_and_validated():
     }''' + "\n```"
     evidence = monitoring_evidence(text)
     sessions = {
-        "s1": SimpleNamespace(project="app", state="completed"),
-        "s2": SimpleNamespace(project="docs", state="completed"),
+        "s1": SimpleNamespace(project="app", state="completed", json=lambda: {
+            "id": "s1", "state": "completed", "evidence": {"lastMessage": {}},
+        }),
+        "s2": SimpleNamespace(project="docs", state="completed", json=lambda: {
+            "id": "s2", "state": "completed", "evidence": {"lastMessage": {}},
+        }),
     }
 
     validate_monitoring_evidence(evidence, sessions, {"app", "docs"})
@@ -72,9 +84,12 @@ def test_monitoring_evidence_rejects_main_context_waiting():
     evidence = {
         "monitorSpawned": True,
         "boundedBrief": True,
+        "serviceId": "service-1",
         "sessionIds": {"app": "s1", "docs": "s2"},
         "lastCursor": 9,
         "timeoutCount": 0,
+        "recoveryCount": 0,
+        "terminalSessions": [],
         "reports": [],
         "mainContextWaitCalls": 1,
         "shellSleepCalls": 0,
@@ -99,16 +114,13 @@ def test_parent_rollout_requires_one_wait_and_one_monitor_handoff(monkeypatch, t
         {"type": "response_item", "payload": {
             "type": "agent_message", "author": "/root/batch_monitor",
             "recipient": "/root",
-            "content": [{"text": "Message Type: MESSAGE\nPayload:\n"}],
-        }},
-        {"type": "response_item", "payload": {
-            "type": "agent_message", "author": "/root/batch_monitor",
-            "recipient": "/root",
             "content": [{"text": "Message Type: FINAL_ANSWER\nPayload:\nterminal"}],
         }},
         {"type": "token_usage_record", "payload": {
             "thread_id": "thread-1",
-            "turn_token_usage": {"input_tokens": 123, "total_tokens": 130},
+            "turn_token_usage": {
+                "input_tokens": 123, "cached_input_tokens": 100, "total_tokens": 130,
+            },
         }},
     ]
     rollout.write_text("\n".join(json.dumps(record) for record in records))
@@ -118,5 +130,9 @@ def test_parent_rollout_requires_one_wait_and_one_monitor_handoff(monkeypatch, t
 
     assert evidence["waitAgentCalls"] == 1
     assert evidence["coordinatorMonitorSpawns"] == 1
-    assert evidence["monitorNotifications"] == 2
+    assert evidence["monitorNotifications"] == 1
+    assert evidence["parentModelInvocations"] == 1
+    assert evidence["cachedInputTokens"] == 100
+    assert evidence["uncachedInputTokens"] == 23
+    assert evidence["directParentEventCalls"] == 0
     assert evidence["turnTokenUsage"]["input_tokens"] == 123

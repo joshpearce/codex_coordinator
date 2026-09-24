@@ -300,6 +300,83 @@ async def test_http_has_no_approval_resolution_route(system):
     assert (status, body) == (404, {"error": "not found"})
 
 
+@pytest.mark.asyncio
+async def test_session_creation_returns_monitor_identity_and_cursor(system):
+    _, _, events, service, _ = system
+    status, body = await HttpControlServer(service).route(
+        "POST", "/sessions", {"project": "alpha", "prompt": "work"},
+    )
+
+    assert status == 201
+    assert body["serviceId"] == events.service_id
+    assert body["eventCursor"] == events.next_sequence - 1
+    assert body["id"] in service.sessions
+
+
+@pytest.mark.asyncio
+async def test_batch_creation_returns_complete_initial_monitor_handoff(system):
+    client, _, events, service, _ = system
+    status, body = await HttpControlServer(service).route("POST", "/sessions/batch", {
+        "sessions": [
+            {"project": "alpha", "prompt": "one"},
+            {"project": "beta", "prompt": "two", "effort": "high"},
+        ],
+    })
+
+    assert status == 201
+    assert body["serviceId"] == events.service_id
+    assert body["eventCursor"] == events.next_sequence - 1
+    assert body["batchState"] == "created"
+    assert body["failures"] == []
+    assert {item["project"] for item in body["sessions"]} == {"alpha", "beta"}
+    assert len([call for call in client.calls if call[0] == "thread/start"]) == 2
+    assert len([call for call in client.calls if call[0] == "turn/start"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_validates_every_request_before_creating_threads(system):
+    client, _, _, service, _ = system
+    with pytest.raises(ValueError, match="unknown project"):
+        await HttpControlServer(service).route("POST", "/sessions/batch", {
+            "sessions": [
+                {"project": "alpha", "prompt": "valid"},
+                {"project": "missing", "prompt": "invalid"},
+            ],
+        })
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_partial_batch_returns_created_handles_instead_of_losing_them(system):
+    client, _, _, service, _ = system
+    original_call = client.call
+    turn_starts = 0
+
+    async def fail_second_turn(method, params):
+        nonlocal turn_starts
+        if method == "turn/start":
+            turn_starts += 1
+            if turn_starts == 2:
+                raise ProtocolError("startup exhausted")
+        return await original_call(method, params)
+
+    client.call = fail_second_turn
+    status, body = await HttpControlServer(service).route("POST", "/sessions/batch", {
+        "sessions": [
+            {"project": "alpha", "prompt": "one"},
+            {"project": "beta", "prompt": "two"},
+        ],
+    })
+
+    assert status == 207
+    assert body["batchState"] == "partial"
+    assert len(body["sessions"]) == 2
+    assert {item["state"] for item in body["sessions"]} == {"active", "failed"}
+    assert body["failures"][0]["index"] == 1
+    assert body["failures"][0]["project"] == "beta"
+
+
 def test_event_state_remains_bounded():
     events = EventLog(capacity=3, max_bytes=4096)
     for index in range(10):

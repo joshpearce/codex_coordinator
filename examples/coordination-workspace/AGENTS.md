@@ -7,8 +7,11 @@ Use the Codex Coordinator service at `http://127.0.0.1:8765`. Start child work
 through the service rather than launching another Codex CLI process or directly
 changing a child project from this workspace.
 
-Before delegating, check `GET /health` and inspect `GET /sessions`. Create
-sessions with `POST /sessions`, retain each returned session ID, and use
+For a new batch, use one `POST /sessions/batch` request. Its response provides
+the service ID, event cursor, and created session snapshots needed for the
+monitor brief, without separate health, reconciliation, or cursor reads. Use
+single `POST /sessions` only for one-off work; its response also includes the
+service ID and event cursor. Retain each returned session ID, and use
 `POST /sessions/{id}/messages` for follow-ups. Use
 `POST /sessions/{id}/cancel` only when cancellation is actually needed.
 The template persists managed handles in `.coordinator-state.json`; after a
@@ -30,17 +33,26 @@ The monitor retains the cursor and session IDs and uses
 filter raw app-server schemas, busy-loop, or use shell sleeps. On `events`, it
 advances the cursor and reconciles authoritative state through `GET /sessions`
 when needed. On `timeout`, it continues waiting without reporting to the parent.
-On `shutdown`, an expired cursor, a changed service ID, connection loss, or an
-uncertain terminal state, it follows the documented recovery where possible and
-reports a monitoring failure when it cannot safely continue. On a 410, it
+On a transient transport failure, it retries the same bounded wait and silently
+continues only after the service ID matches and `GET /sessions` confirms the
+retained sessions; a recovered transient does not resume the parent.
+On `shutdown`, an expired cursor, a changed service ID,
+connection loss, or an uncertain terminal state, it follows the documented
+recovery where possible and reports a monitoring failure when it cannot safely
+continue. On a 410, it
 reconciles `GET /sessions` including the evidence summaries, then resumes from
 `recovery.resumeAfter`. `GET /debug/events` remains limited to explicit,
 bounded diagnosis.
 
 The monitor reports to the main parent only when there is actionable child
 progress requiring a decision or follow-up, a terminal state, or a monitoring
-failure. Each report includes the affected session ID, the last safe cursor,
-the relevant state/evidence, and the action required from the parent. The
+failure. A terminal handoff includes the service ID, last safe cursor, and the
+complete bounded session snapshots carried by the terminal events, including
+their retained evidence, so the parent can decide whether another read is
+necessary. It uses `GET /sessions` only when event evidence is missing or
+uncertain, not as an automatic final read. Each nonterminal report includes the
+affected session ID, relevant state/evidence, and the action required from the
+parent. The
 monitor sends no empty, timeout, or non-actionable progress messages. It does
 not duplicate a terminal handoff through both `send_message` and its final
 answer. It does not decide task scope, send child follow-ups, cancel sessions,

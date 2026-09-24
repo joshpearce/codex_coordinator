@@ -141,17 +141,10 @@ the control API and trust boundary. A useful initial Goal is:
 
 ```text
 /goal Coordinate the configured child projects until the requested outcome is
-complete and verified. Delegate through the local Codex Coordinator HTTP
-service and retain responsibility for task decisions, focused follow-ups,
-cancellation, user questions, and final verification. Delegate routine event
-waiting and session reconciliation to a dedicated monitoring subagent with
-only the service URL, session map, cursor, recovery rules, and reporting
-contract. Use the tracked project-scoped `coordinator_monitor` definition. The
-monitor reports only actionable progress, terminal state, or a
-monitoring failure, never empty or timeout updates; it does not make task
-decisions. Await it with one long collaboration wait instead of repeated short
-waits. Complete only after the required child work and integration evidence are
-verified. If blocked, report the evidence gathered and the exact input needed.
+complete and verified. Follow this workspace's AGENTS.md coordination and
+monitor contract. Retain responsibility for task decisions and final
+verification; complete only after the required child work and integration
+evidence are verified. If blocked, report the evidence and exact input needed.
 ```
 
 A Goal keeps the parent objective active across continuation turns. Use the
@@ -170,18 +163,14 @@ Use `GET /sessions` as the authoritative reconciliation surface.
 
 ## 6. Basic HTTP workflow
 
-Create one child session per project:
+Create a batch in one request; the returned service ID, event cursor, and
+session snapshots form the complete initial monitor brief:
 
 ```console
 curl --fail --silent --show-error \
   -H 'Content-Type: application/json' \
-  -d '{"project":"frontend","prompt":"Implement the requested frontend work and verify it."}' \
-  http://127.0.0.1:8765/sessions
-
-curl --fail --silent --show-error \
-  -H 'Content-Type: application/json' \
-  -d '{"project":"backend","prompt":"Implement the requested backend work and verify it."}' \
-  http://127.0.0.1:8765/sessions
+  -d '{"sessions":[{"project":"frontend","prompt":"Implement the requested frontend work and verify it."},{"project":"backend","prompt":"Implement the requested backend work and verify it."}]}' \
+  http://127.0.0.1:8765/sessions/batch
 ```
 
 Keep each returned session ID. Inspect state and events:

@@ -88,6 +88,8 @@ def test_parent_guidance_delegates_waiting_to_bounded_monitor():
     assert "dedicated\n`coordinator_monitor` custom subagent" in guidance
     assert "`.codex/agents/coordinator-monitor.toml`" in guidance
     assert "small, bounded brief" in guidance
+    assert "one `POST /sessions/batch` request" in guidance
+    assert "service ID, event cursor" in guidance
     assert "service URL" in guidance
     assert "session ID-to-project/task map" in guidance
     assert "GET /events?after=N&wait=30" in guidance
@@ -115,6 +117,9 @@ def test_monitor_handoff_and_parent_responsibilities_are_explicit():
     assert "not decide task scope" in guidance
     assert "neither a second coordinator nor an authorization boundary" in compact
     assert "no empty, timeout, or non-actionable progress messages" in guidance
+    assert "complete bounded session snapshots" in guidance
+    assert "not as an automatic final read" in guidance
+    assert "recovered transient" in guidance
     assert "main parent retains task\ndecisions" in guidance
     assert "focused child follow-ups, cancellation, user questions, and final\nverification" in guidance
     assert "use one long `wait_agent` call" in guidance
@@ -125,12 +130,11 @@ def test_starter_goal_keeps_routine_waits_out_of_parent_context():
     bootstrap = BOOTSTRAP.read_text()
     goal = "/goal" + bootstrap.split("```text\n/goal", 1)[1].split("\n```", 1)[0]
 
-    assert "dedicated monitoring subagent" in goal
-    assert "only the service URL, session map, cursor, recovery rules, and reporting" in goal
-    assert "reports only actionable progress, terminal state, or a\nmonitoring failure" in goal
-    assert "never empty or timeout updates" in goal
-    assert "one long collaboration wait instead of repeated short\nwaits" in goal
-    assert "retain responsibility for task decisions, focused follow-ups,\ncancellation, user questions, and final verification" in goal
+    assert "Follow this workspace's AGENTS.md coordination and\nmonitor contract" in goal
+    assert "Retain responsibility for task decisions and final\nverification" in goal
+    assert "service URL" not in goal
+    assert "GET /events" not in goal
+    assert "recovery rules" not in goal
     assert "poll conservatively" not in goal
     assert "routine waiting out of the main coordination context" in bootstrap
 
@@ -156,6 +160,9 @@ def test_project_scoped_monitor_agent_matches_documented_contract():
         "Do not call send_message",
         "every control-plane command",
         "retry once",
+        "complete bounded session snapshots",
+        "not as an automatic final read",
+        "recovered transient",
         "not a second coordinator",
     ):
         assert requirement in instructions

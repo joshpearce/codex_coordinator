@@ -20,6 +20,14 @@ session. While its turn remains active, the parent can use
 the bounded timeout elapses, or shutdown begins. Disconnected HTTP clients
 cancel their waiter promptly.
 
+`POST /sessions/batch` validates all deterministic inputs before creating up to
+32 sessions. The resulting turns remain concurrent. Its service ID,
+post-creation event cursor, and session snapshots are a compact initial monitor
+handoff. If runtime startup fails partway through, a 207 `partial` response
+returns every created handle and the failure instead of losing identities behind
+a generic 500. Single-session creation returns the same identity and cursor
+metadata.
+
 The normal event log is a projection for orchestration: child assistant
 messages, session transitions, approval/protocol outcomes, and terminal
 results. Routine app-server deltas and item traffic do not enter that cursor or

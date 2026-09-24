@@ -32,9 +32,17 @@ the live service over Unix socket {control_socket}. Use curl with
 request. Socket access is outside the workspace sandbox: both you and the
 monitor must request `sandbox_permissions="require_escalated"` on the first
 socket command instead of trying an unprivileged call first. You are the main
-parent. Create one child session for each project/task in this JSON object:
+parent. Create both child sessions with exactly one POST /sessions/batch request
+for the project/tasks in this JSON object. Use its serviceId, eventCursor, and
+session snapshots directly in the monitor brief; do not make preliminary GET
+/health, GET /sessions, or GET /events requests:
 
 {json.dumps(tasks, indent=2, sort_keys=True)}
+
+The batch JSON body is exactly `{{"sessions":[{{"project":"...","prompt":"..."}}]}}`:
+use `prompt`, not `task`, and use curl --fail so an HTTP error stops the flow.
+Proceed only when batchState is `created` and failures is empty. A `partial`
+response is a visible failure whose returned session handles must not be retried.
 
 Delegate all routine GET /events waiting and GET /sessions reconciliation to
 the project-scoped `coordinator_monitor` custom subagent. Spawn exactly one
@@ -45,9 +53,14 @@ reporting contract. The monitor must use GET /events?after=N&wait=30, retain
 its cursor and session IDs, continue silently on timeout, never use shell
 sleeps or busy polling, recover a 410 through GET /sessions and
 recovery.resumeAfter, and report only actionable progress, terminal state, or
-a monitoring failure. The monitor must include its timeout count and last safe
-cursor in its report. It must remain active until both sessions are terminal
-and must not send empty, timeout, or non-actionable progress messages.
+a monitoring failure. Recovered transient transport failures must not notify
+you; a changed serviceId or uncertain identity must fail visibly. The monitor
+must include its timeout count, recovery count, service ID, last safe cursor,
+and the unmodified complete session snapshots (including evidence) from both
+terminal events in its terminal report. It must not make an automatic final
+GET /sessions when those event snapshots are complete. It must remain active
+until both sessions are terminal and must not send empty, timeout, or
+non-actionable progress messages.
 
 You retain all task decisions, follow-ups, cancellation, user questions, and
 final verification. Do not personally call GET /events or perform routine
@@ -66,9 +79,12 @@ End with exactly one JSON object having this shape, using observed values:
   "monitoringEvidence": {{
     "monitorSpawned": true,
     "boundedBrief": true,
+    "serviceId": "...",
     "sessionIds": {{"{args.first}": "...", "{args.second}": "..."}},
     "lastCursor": 0,
     "timeoutCount": 0,
+    "recoveryCount": 0,
+    "terminalSessions": [{{"id": "...", "threadId": "...", "project": "...", "projectPath": "...", "state": "completed", "turnId": null, "model": null, "reasoningEffort": null, "effectiveModel": "...", "effectiveReasoningEffort": "...", "evidence": {{}}}}],
     "reports": [
       {{"kind": "terminal", "sessionId": "...", "state": "completed"}}
     ],
@@ -115,6 +131,12 @@ def validate_monitoring_evidence(
         evidence.get("timeoutCount"), bool
     ):
         raise RuntimeError("monitor did not return its timeout count")
+    if not isinstance(evidence.get("recoveryCount"), int) or isinstance(
+        evidence.get("recoveryCount"), bool
+    ):
+        raise RuntimeError("monitor did not return its recovery count")
+    if not isinstance(evidence.get("serviceId"), str) or not evidence["serviceId"]:
+        raise RuntimeError("monitor did not return the service identity")
     session_ids = evidence.get("sessionIds")
     if not isinstance(session_ids, dict) or set(session_ids) != projects:
         raise RuntimeError("monitor evidence did not map both requested projects")
@@ -131,6 +153,20 @@ def validate_monitoring_evidence(
     } if isinstance(reports, list) else set()
     if terminal_ids != set(session_ids.values()):
         raise RuntimeError("monitor did not return one terminal report for each child")
+    terminal_sessions = evidence.get("terminalSessions")
+    snapshots = {
+        item.get("id"): item for item in terminal_sessions if isinstance(item, dict)
+    } if isinstance(terminal_sessions, list) else {}
+    if set(snapshots) != set(session_ids.values()) or any(
+        item.get("state") != "completed" or not isinstance(item.get("evidence"), dict)
+        for item in snapshots.values()
+    ):
+        raise RuntimeError("monitor did not return authoritative terminal session evidence")
+    for session_id, snapshot in snapshots.items():
+        session = sessions[session_id]
+        authoritative = session.json() if callable(getattr(session, "json", None)) else None
+        if authoritative is not None and snapshot != authoritative:
+            raise RuntimeError("monitor terminal snapshot differs from authoritative session state")
 
 
 def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
@@ -143,6 +179,8 @@ def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
     wait_calls = 0
     monitor_handoffs = 0
     monitor_spawns = 0
+    model_invocations = 0
+    direct_parent_event_calls = 0
     last_turn_usage: dict[str, Any] | None = None
     for line in matches[0].read_text().splitlines():
         try:
@@ -170,6 +208,16 @@ def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
                 and arguments.get("agent_type") == "coordinator_monitor"
             ):
                 monitor_spawns += 1
+        if record.get("type") == "response_item" and payload.get("name") in {"exec", "exec_command"}:
+            raw_arguments = payload.get("arguments", payload.get("input", ""))
+            try:
+                arguments = json.loads(raw_arguments)
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+            command = arguments.get("cmd", "")
+            code = raw_arguments if payload.get("name") == "exec" else command
+            if isinstance(code, str) and "/events?" in code:
+                direct_parent_event_calls += 1
         if (
             record.get("type") == "response_item"
             and payload.get("type") == "agent_message"
@@ -183,6 +231,7 @@ def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
             and payload.get("thread_id") == thread_id
             and isinstance(payload.get("turn_token_usage"), dict)
         ):
+            model_invocations += 1
             last_turn_usage = payload["turn_token_usage"]
     if wait_calls != 1:
         raise RuntimeError(
@@ -194,13 +243,28 @@ def parent_rollout_evidence(thread_id: str) -> dict[str, Any]:
             "parent rollout spawned "
             f"{monitor_spawns} typed project-scoped coordinator monitors; expected one"
         )
+    if monitor_handoffs != 1:
+        raise RuntimeError(
+            f"parent rollout received {monitor_handoffs} monitor notifications; expected one"
+        )
     if last_turn_usage is None:
         raise RuntimeError("parent rollout contained no token-usage evidence")
+    input_tokens = last_turn_usage.get("input_tokens", 0)
+    cached_tokens = last_turn_usage.get("cached_input_tokens", 0)
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (input_tokens, cached_tokens)
+    ):
+        raise RuntimeError("parent rollout token usage is malformed")
     return {
         "rolloutPath": str(matches[0]),
         "waitAgentCalls": wait_calls,
         "coordinatorMonitorSpawns": monitor_spawns,
         "monitorNotifications": monitor_handoffs,
+        "parentModelInvocations": model_invocations,
+        "cachedInputTokens": cached_tokens,
+        "uncachedInputTokens": input_tokens - cached_tokens,
+        "directParentEventCalls": direct_parent_event_calls,
         "turnTokenUsage": last_turn_usage,
     }
 
@@ -233,7 +297,12 @@ async def run_parent_monitor(
     validate_monitoring_evidence(
         evidence, coordinator.service.sessions, {args.first, args.second},
     )
+    if evidence["serviceId"] != coordinator.service.events.service_id:
+        raise RuntimeError("monitor returned a changed service identity")
     rollout = parent_rollout_evidence(parent.thread_id)
+    if rollout["directParentEventCalls"] != 0:
+        raise RuntimeError("parent rollout directly called the event feed")
+    rollout["recoveryRelatedResumptions"] = evidence["recoveryCount"]
     child_sessions = [
         coordinator.service.sessions[evidence["sessionIds"][project]]
         for project in (args.first, args.second)
