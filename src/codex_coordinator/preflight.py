@@ -30,9 +30,29 @@ def check(config: OperatorConfig, projects: list[str], *, require_socket: bool =
     unknown = sorted(set(selected) - set(config.projects))
     if unknown:
         raise ValueError(f"unknown configured projects: {unknown}")
-    ready = config.socket_path.exists() or config.socket_path.is_symlink()
+    try:
+        config.socket_path.lstat()
+        ready = True
+    except FileNotFoundError:
+        ready = False
+    except OSError as exc:
+        raise ValueError(
+            f"cannot access host Codex app-server socket {config.socket_path}: {exc}"
+        ) from exc
     if ready:
-        probe_local_socket(config.socket_path)
+        try:
+            probe_local_socket(config.socket_path)
+        except PermissionError as exc:
+            raise ValueError(
+                f"cannot access host Codex app-server socket {config.socket_path}: {exc}"
+            ) from exc
+        except ConnectionError as exc:
+            cause = exc.__cause__
+            if isinstance(cause, PermissionError):
+                raise ValueError(
+                    f"cannot access host Codex app-server socket {config.socket_path}: {cause}"
+                ) from exc
+            raise ValueError(str(exc)) from exc
     elif require_socket:
         raise ValueError(
             f"host Codex app-server socket is unavailable: {config.socket_path}; "
@@ -51,7 +71,14 @@ def main() -> None:
     parser.add_argument("--project", action="append", default=[], help="configured project name; repeat")
     parser.add_argument("--require-socket", action="store_true", help="fail unless the host socket is reachable")
     args = parser.parse_args()
-    print(json.dumps(check(OperatorConfig.load(path=args.config), args.project, require_socket=args.require_socket), sort_keys=True))
+    try:
+        result = check(
+            OperatorConfig.load(path=args.config), args.project,
+            require_socket=args.require_socket,
+        )
+    except (ValueError, ConnectionError) as exc:
+        parser.exit(2, f"preflight failed: {exc}\n")
+    print(json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":

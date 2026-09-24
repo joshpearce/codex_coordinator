@@ -64,6 +64,12 @@ If necessary, the host user can start it through Codex itself:
 codex app-server daemon start
 ```
 
+`codex-coordinator-preflight --require-socket` reports socket metadata and
+connection failures as a single `preflight failed:` diagnostic. An access
+denial names the socket and operating-system reason; it does not recommend
+starting a second daemon. Grant the parent process access to the existing host
+socket, then rerun preflight.
+
 ## 3. Create the coordination workspace
 
 From the coordinator checkout, copy the reusable template:

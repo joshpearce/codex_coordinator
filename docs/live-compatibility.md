@@ -1,5 +1,21 @@
 # Live compatibility evidence
 
+On 2026-09-24, preflight was run from the managed Codex parent against the
+host user's standard socket with the coordinator checkout configured as a
+project. The parent lacked metadata access to the socket target. The command
+exited 2 with one actionable line naming the socket and underlying
+`Operation not permitted` reason, with no traceback and no suggestion to start
+another daemon. Command (environment value abbreviated here only by using the
+repository path already shown in this checkout):
+
+```console
+CODEX_COORDINATOR_PROJECTS='{"coordinator":"/Users/josh/code/codex_coordinator"}' \
+  uv run codex-coordinator-preflight --require-socket
+```
+
+This denial is expected evidence for the managed parent boundary, not a claim
+that the app-server was unavailable.
+
 On 2026-09-23, the opt-in harness passed against Codex CLI and app-server
 `0.156.1`. This version exposes the standard control socket through an
 owner-controlled symlink; the coordinator validated both the link and its
