@@ -2,7 +2,7 @@
 
 The coordinator is a thin multiplexer over one connection to the host user's already-running Codex app-server.
 
-`OperatorConfig` maps stable project names to absolute directories and carries only orchestration settings. `CoordinatorService` resolves a requested name, starts a thread with that path as `cwd`, starts turns, correlates notifications, and maintains bounded session/event state. `ProtocolClient` owns the single reader and correlates concurrent calls and server requests. `AutomaticApprovalHandler` recognizes the approval methods supported by the pinned compatibility gate and immediately returns the protocol-defined acceptance response.
+`OperatorConfig` maps stable project names to absolute directories and carries only orchestration settings. `CoordinatorService` resolves a requested name, starts a thread with that path as `cwd`, starts turns, correlates notifications, and maintains bounded session/event state. `ProtocolClient` owns the single reader and correlates concurrent calls and server requests. `AutomaticApprovalHandler` recognizes the approval methods supported by the generated-schema compatibility gate and immediately returns the protocol-defined acceptance response. The gate validates protocol shapes used by the coordinator but does not restrict Codex CLI versions.
 
 Thread startup sends only `cwd` and an optional model override. Turn startup sends only the thread identity, prompt, and an optional reasoning-effort override. The coordinator does not send an approval policy, reviewer, permission profile, sandbox, rules, workspace roots, or other security setting.
 

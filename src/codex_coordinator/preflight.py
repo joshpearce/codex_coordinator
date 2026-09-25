@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,10 +14,43 @@ from .config import OperatorConfig
 from .daemon import probe_local_socket
 
 
-def check(config: OperatorConfig, projects: list[str], *, require_socket: bool = False) -> dict:
+MONITOR_CONTRACT_VERSION = 2
+MONITOR_RELATIVE_PATH = Path(".codex/agents/coordinator-monitor.toml")
+
+
+def workspace_warnings(workspace: Path | None) -> list[str]:
+    if workspace is None:
+        return []
+    monitor = workspace / MONITOR_RELATIVE_PATH
+    if not monitor.exists():
+        return [f"project-scoped monitor definition is missing: {monitor}"]
+    try:
+        text = monitor.read_text()
+    except OSError as exc:
+        return [f"cannot inspect project-scoped monitor definition {monitor}: {exc}"]
+    match = re.search(r"^# coordinator-contract-version: (\d+)$", text, re.MULTILINE)
+    warnings = []
+    version = int(match.group(1)) if match else None
+    if version != MONITOR_CONTRACT_VERSION:
+        warnings.append(
+            "project-scoped monitor contract is stale: expected version "
+            f"{MONITOR_CONTRACT_VERSION}, found "
+            f"{version if version is not None else 'unversioned'}"
+        )
+    if "every control-plane command" not in text or "retry once" not in text:
+        warnings.append(
+            "project-scoped monitor lacks the required local-transport escalation contract"
+        )
+    return warnings
+
+
+def check(
+    config: OperatorConfig, projects: list[str], *, require_socket: bool = False,
+    workspace: Path | None = None,
+) -> dict:
     if not config.projects:
         raise ValueError("configure at least one named project")
-    version = check_codex_compatibility(config.codex_command)
+    check_codex_compatibility(config.codex_command)
     executable = shutil.which(config.codex_command)
     if executable is None:
         raise ValueError(f"Codex executable {config.codex_command!r} disappeared after compatibility check")
@@ -59,9 +93,10 @@ def check(config: OperatorConfig, projects: list[str], *, require_socket: bool =
             "start the app-server before coordination"
         )
     return {
-        "ok": True, "codexVersion": version, "socketReady": ready,
+        "ok": True, "socketReady": ready,
         "socketPath": str(config.socket_path),
         "projects": [{"name": name, "path": str(config.projects[name])} for name in selected],
+        "workspaceWarnings": workspace_warnings(workspace),
     }
 
 
@@ -75,6 +110,7 @@ def main() -> None:
         result = check(
             OperatorConfig.load(path=args.config), args.project,
             require_socket=args.require_socket,
+            workspace=args.config.resolve().parent if args.config else None,
         )
     except (ValueError, ConnectionError) as exc:
         parser.exit(2, f"preflight failed: {exc}\n")

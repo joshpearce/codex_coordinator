@@ -109,6 +109,12 @@ make status
 curl --fail --silent --show-error http://127.0.0.1:8765/health
 ```
 
+During an active parent session, if session creation reports that this service
+is unreachable, invoke `make start` once with the sandbox escalation required
+for local control-plane access. A successful `make start` already proves health;
+proceed directly to session creation instead of issuing separate preflight and
+health probes.
+
 Use a custom port when `8765` is occupied:
 
 ```console
@@ -152,7 +158,9 @@ monitoring structure in the template `AGENTS.md` while children are active.
 Codex discovers the tracked project-scoped definition at
 `.codex/agents/coordinator-monitor.toml`; spawn its declared
 `coordinator_monitor` agent once per active coordination batch without the
-parent's task history. The monitor uses the bounded blocking form
+parent's task history. Include an explicit transport-access mode in its bounded
+brief: use `require_escalated` when the managed sandbox blocks local HTTP or
+socket access. The monitor uses the bounded blocking form
 `GET /events?after=N&wait=30`,
 advances the cursor only from returned events, and treats `outcome=timeout` as
 no change worth returning to the parent. This keeps one HTTP request parked in
@@ -160,6 +168,12 @@ the service and routine waiting out of the main coordination context. When the
 parent has no other ready work, it should use one long `wait_agent` call sized
 to the remaining deadline and re-arm only if that collaboration wait expires.
 Use `GET /sessions` as the authoritative reconciliation surface.
+
+Copied workspaces own their customized `AGENTS.md`, but should periodically
+merge coordinator-contract changes from both the template `AGENTS.md` and
+`.codex/agents/coordinator-monitor.toml`. `codex-coordinator-preflight` reports
+a workspace warning when the monitor definition is missing or predates the
+current contract.
 
 ## 6. Basic HTTP workflow
 

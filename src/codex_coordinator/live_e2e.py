@@ -59,8 +59,7 @@ must include its timeout count, recovery count, service ID, last safe cursor,
 and the unmodified complete session snapshots (including evidence) from both
 terminal events in its terminal report. It must not make an automatic final
 GET /sessions when those event snapshots are complete. It must remain active
-until both sessions are terminal and must not send empty, timeout, or
-non-actionable progress messages.
+until both sessions are terminal and must not send empty, timeout, or non-actionable progress messages.
 
 You retain all task decisions, follow-ups, cancellation, user questions, and
 final verification. Do not personally call GET /events or perform routine

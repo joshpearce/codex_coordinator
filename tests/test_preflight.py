@@ -62,6 +62,38 @@ def test_missing_invalid_and_healthy_socket(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "probe_local_socket", lambda _path: None)
     result = preflight.check(selected, [], require_socket=True)
     assert result["socketReady"] is True
+    assert result["workspaceWarnings"] == []
+
+
+def test_workspace_monitor_contract_warns_for_stale_copy(tmp_path, monkeypatch):
+    selected = config(tmp_path)
+    selected.socket_path.touch()
+    monkeypatch.setattr(preflight, "probe_local_socket", lambda _path: None)
+    monitor = tmp_path / ".codex" / "agents" / "coordinator-monitor.toml"
+    monitor.parent.mkdir(parents=True)
+    monitor.write_text('name = "coordinator_monitor"\n')
+
+    result = preflight.check(selected, [], workspace=tmp_path)
+
+    assert len(result["workspaceWarnings"]) == 2
+    assert "stale" in result["workspaceWarnings"][0]
+    assert "transport escalation" in result["workspaceWarnings"][1]
+
+
+def test_workspace_monitor_contract_accepts_current_copy(tmp_path, monkeypatch):
+    selected = config(tmp_path)
+    selected.socket_path.touch()
+    monkeypatch.setattr(preflight, "probe_local_socket", lambda _path: None)
+    monitor = tmp_path / ".codex" / "agents" / "coordinator-monitor.toml"
+    monitor.parent.mkdir(parents=True)
+    monitor.write_text(
+        "# coordinator-contract-version: 2\n"
+        "# request escalation on every control-plane command; retry once\n"
+    )
+
+    result = preflight.check(selected, [], workspace=tmp_path)
+
+    assert result["workspaceWarnings"] == []
 
 
 def test_cli_expected_failure_is_concise_without_traceback(tmp_path, monkeypatch, capsys):

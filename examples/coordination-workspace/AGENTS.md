@@ -24,7 +24,9 @@ project-scoped definition lives at `.codex/agents/coordinator-monitor.toml`;
 keep that definition tracked with this repository and use it rather than an
 unspecified general-purpose agent. Spawn it without the parent's task history,
 and give it a small, bounded brief containing only the service URL, retained
-event cursor, session ID-to-project/task map, and the reporting contract below.
+event cursor, session ID-to-project/task map, explicit transport-access mode
+(`require_escalated` when local HTTP or socket access is sandbox-blocked), and
+the reporting contract below.
 The main parent must
 not repeatedly resume its large context merely to observe a timeout.
 
@@ -71,6 +73,13 @@ without a monitor report. Do not declare the Goal complete merely because child
 turns ended: verify the requested artifacts or test evidence. If work needs
 user input or no defensible path remains, report the blocker and specific input
 needed.
+
+If session creation fails because the coordinator is not reachable, run
+`make start` once with the required sandbox escalation. Its successful return
+already includes a health check; do not spend separate parent activations on a
+preliminary `curl`, standalone `make preflight`, or follow-up health request.
+After startup, retry session creation once. Do not start a second service or
+replace a session handle that was already returned.
 
 This is a trusted, single-user, loopback-only prototype. Registering a project
 authorizes the coordinator to start Codex there. Child sessions inherit host,

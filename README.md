@@ -49,6 +49,9 @@ Open a normal Codex session in the coordination workspace and ask it to delegate
 through the HTTP service described in `AGENTS.md`. The tracked project-scoped
 `coordinator_monitor` custom agent uses `gpt-6-luna` with low reasoning for
 routine event waits while the parent retains decisions and final verification.
+Its bounded brief must explicitly state whether local control-plane commands
+require sandbox escalation. Copied workspaces should merge later changes from
+both template files; preflight reports stale monitor-contract copies.
 The coordination workspace does not need to be registered as a child project.
 
 Each child inherits the host/user and project-local Codex configuration that

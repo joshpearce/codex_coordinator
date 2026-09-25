@@ -1,3 +1,4 @@
+# coordinator-contract-version: 2
 name = "coordinator_monitor"
 description = "Low-cost event monitor for Codex Coordinator session batches."
 model = "gpt-6-luna"

@@ -5,8 +5,7 @@ from pathlib import Path
 import pytest
 
 from codex_coordinator.compatibility import (
-    SUPPORTED_CODEX_VERSIONS, CodexCompatibilityError,
-    check_codex_compatibility, check_protocol_schema,
+    CodexCompatibilityError, check_codex_compatibility, check_protocol_schema,
 )
 
 
@@ -224,18 +223,28 @@ def test_schema_gate_requires_file_item_changes(tmp_path: Path):
         check_protocol_schema(tmp_path)
 
 
-def test_missing_and_unsupported_codex_are_actionable(monkeypatch):
+def test_missing_codex_is_actionable(monkeypatch):
     monkeypatch.setattr("codex_coordinator.compatibility.shutil.which", lambda _value: None)
     with pytest.raises(CodexCompatibilityError, match="install Codex CLI"):
         check_codex_compatibility("missing-codex")
+
+
+def test_compatibility_check_does_not_query_cli_version(tmp_path, monkeypatch):
+    _schema_fixture(tmp_path)
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        assert command[1:] == [
+            "app-server", "generate-json-schema", "--experimental", "--out", command[-1],
+        ]
+        for source in tmp_path.iterdir():
+            Path(command[-1], source.name).write_text(source.read_text())
+        return subprocess.CompletedProcess(command, 0, "", "")
+
     monkeypatch.setattr("codex_coordinator.compatibility.shutil.which", lambda _value: "/bin/codex")
-    monkeypatch.setattr(
-        "codex_coordinator.compatibility.subprocess.run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, "codex-cli 0.153.0\n", ""),
-    )
-    with pytest.raises(CodexCompatibilityError, match="not verified"):
-        check_codex_compatibility()
+    monkeypatch.setattr("codex_coordinator.compatibility.subprocess.run", run)
 
+    check_codex_compatibility()
 
-def test_supported_codex_versions_are_an_explicit_verified_allowlist():
-    assert SUPPORTED_CODEX_VERSIONS == frozenset({"0.154.0", "0.156.1"})
+    assert len(commands) == 1

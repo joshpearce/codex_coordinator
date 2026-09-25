@@ -140,7 +140,8 @@ def test_starter_goal_keeps_routine_waits_out_of_parent_context():
 
 
 def test_project_scoped_monitor_agent_matches_documented_contract():
-    monitor = tomllib.loads(MONITOR.read_text())
+    monitor_text = MONITOR.read_text()
+    monitor = tomllib.loads(monitor_text)
     instructions = monitor["developer_instructions"]
 
     assert set(monitor) == {
@@ -151,6 +152,7 @@ def test_project_scoped_monitor_agent_matches_documented_contract():
     assert monitor["model"] == "gpt-6-luna"
     assert monitor["model_reasoning_effort"] == "low"
     assert monitor["sandbox_mode"] == "workspace-write"
+    assert "# coordinator-contract-version: 2" in monitor_text
     for requirement in (
         "GET /events?after=N&wait=30",
         "On timeout, continue waiting without reporting",

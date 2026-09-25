@@ -1,4 +1,4 @@
-"""Fail-closed compatibility gate for the experimental Codex app-server wire.
+"""Schema compatibility gate for the experimental Codex app-server wire.
 
 The CLI generates version-specific JSON Schemas as documented at
 https://learn.chatgpt.com/docs/app-server#message-schema.
@@ -7,15 +7,11 @@ https://learn.chatgpt.com/docs/app-server#message-schema.
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
-
-
-SUPPORTED_CODEX_VERSIONS = frozenset({"0.154.0", "0.156.1"})
 
 
 class CodexCompatibilityError(RuntimeError):
@@ -174,26 +170,12 @@ def _check_protocol_schema(schema_dir: Path) -> None:
         raise CodexCompatibilityError("incompatible app-server schema: command completion statuses changed")
 
 
-def check_codex_compatibility(codex_command: str = "codex") -> str:
-    """Return the supported CLI version or raise an actionable startup error."""
+def check_codex_compatibility(codex_command: str = "codex") -> None:
+    """Validate the CLI's generated app-server schema without gating its version."""
     executable = shutil.which(codex_command)
     if executable is None:
         raise CodexCompatibilityError(
             f"Codex executable {codex_command!r} was not found; install Codex CLI or set codex_command"
-        )
-    try:
-        version_result = subprocess.run(
-            [executable, "--version"], capture_output=True, text=True,
-            timeout=10, check=True,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CodexCompatibilityError(f"cannot run Codex CLI {executable}: {exc}") from exc
-    match = re.fullmatch(r"codex-cli (\d+\.\d+\.\d+)", version_result.stdout.strip())
-    version = match.group(1) if match else "unrecognized"
-    if version not in SUPPORTED_CODEX_VERSIONS:
-        supported = ", ".join(sorted(SUPPORTED_CODEX_VERSIONS))
-        raise CodexCompatibilityError(
-            f"Codex CLI {version} is not verified for this package; supported: {supported}"
         )
     with tempfile.TemporaryDirectory(prefix="codex-coordinator-schema-") as temporary:
         try:
@@ -208,4 +190,3 @@ def check_codex_compatibility(codex_command: str = "codex") -> str:
                 f"could not generate Codex app-server schema: {result.stderr.strip()}"
             )
         check_protocol_schema(Path(temporary))
-    return version
